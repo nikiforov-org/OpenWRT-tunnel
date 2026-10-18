@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>It works — a web site on the router</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar"><div class="container"><a class="brand" href="/">tunnel_ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a class="current" href="/">Overview</a><a href="/frontend.html">Frontend</a><a href="/backend.html">Backend</a><a href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
+<div class="container page">
+<aside class="sidebar"><nav>
+<div class="group">Guide</div><ul>
+<li><a class="pagelink current" href="/">Overview</a>
+<ul class="sections"><li><a href="#how-it-works">How it works</a></li><li><a href="#a-minimal-site-in-a-minute">A minimal site in a minute</a></li><li><a href="#what-the-router-can-do">What the router can do</a></li></ul>
+</li>
+<li><a class="pagelink" href="/frontend.html">Frontend</a>
+</li>
+<li><a class="pagelink" href="/backend.html">Backend</a>
+</li>
+<li><a class="pagelink" href="/login.html">Login page</a>
+</li>
+<li><a class="pagelink" href="/archive.html">Archive and upload</a>
+</li>
+</ul>
+</nav></aside>
+<main class="content">
+<h1>It works</h1>
+<p>This is the built-in site of the <code>luci-app-tunnel_ddns</code> package, served while <code>default</code> is the selected site. The router already serves it over HTTPS with a real certificate; these pages explain how to make a site of your own: what goes into the archive, how to have the router rebuild the pages on a schedule, and how to replace the standard login of the router administration with a login page of your own.</p>
+
+<div class="cards">
+<div class="card"><h3>Frontend</h3><p>Plain static files: <code>index.html</code>, styles, scripts, images. Nothing special to learn.</p><a href="/frontend.html">Read →</a></div>
+<div class="card"><h3>Backend</h3><p>A build script the router runs on a cron schedule and on a button, for example to assemble a page from RSS feeds.</p><a href="/backend.html">Read →</a></div>
+<div class="card"><h3>Login page</h3><p>Your own <code>cgi-bin/login</code> replaces the LuCI login. The captcha and the brake on password guessing come with the package.</p><a href="/login.html">Read →</a></div>
+<div class="card"><h3>Archive and upload</h3><p>How to pack the site, where to upload it, what the package changes on the router and where the files end up.</p><a href="/archive.html">Read →</a></div>
+</div>
+
+<h2 id="how-it-works">How it works</h2>
+<p>A site is a <code>.tar.gz</code> archive. You upload it on the <strong>Tunnel → Dynamic DNS → Web site</strong> page of LuCI, pick it in the list together with the domain it answers to, and click <strong>Save &amp; Apply</strong>. From then on the router's web server (uhttpd) serves the files of the archive instead of its administration pages, and the HTTPS port is opened from the Internet.</p>
+<p>An archive may hold three kinds of content:</p>
+<div class="table-wrap"><table>
+<tr><th>What</th><th>Where in the archive</th><th>Required</th><th>What the router does with it</th></tr>
+<tr><td>Public files</td><td>the top level of the archive (or a single folder)</td><td><code>index.html</code> — yes</td><td>serves them as they are over HTTPS</td></tr>
+<tr><td>Build script</td><td><code>.tunnel_ddns/build</code> and whatever it needs next to it</td><td>no</td><td>keeps it away from the web server, runs it after the upload, on the schedule and on the button</td></tr>
+<tr><td>Login page</td><td><code>cgi-bin/login</code></td><td>no</td><td>makes it the login of the router administration instead of the standard LuCI page</td></tr>
+</table></div>
+
+<h2 id="a-minimal-site-in-a-minute">A minimal site in a minute</h2>
+<pre><code>mkdir mysite
+cat &gt; mysite/index.html &lt;&lt;'EOF'
+&lt;!doctype html&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;My site&lt;/title&gt;
+&lt;h1&gt;Hello&lt;/h1&gt;
+EOF
+tar -C mysite -czf mysite.tar.gz .</code></pre>
+<p>Upload <code>mysite.tar.gz</code> with <strong>Upload a site archive…</strong>, choose it in the <strong>Site</strong> field and a domain in the <strong>Domain</strong> field, tick <strong>Serve the web site</strong> and click <strong>Save &amp; Apply</strong>. The site opens at <code>https://your-domain/</code>.</p>
+
+<h2 id="what-the-router-can-do">What the router can do</h2>
+<ul>
+<li>Static files of any size within the free space (shown in LuCI next to the list of sites). The sysupgrade backup is built in RAM, so tens of megabytes are a bad idea.</li>
+<li>Pages built by your own script: shell and <code>ucode</code> (a JavaScript-like language present on every OpenWrt with LuCI), downloads with <code>wget</code>. There is no Python, Node or Perl on the router, and installing them is not worth it: the router is small.</li>
+<li>A login page of your own, with a captcha generated on the router and growing delays after failed attempts.</li>
+<li>A Let's Encrypt certificate for the chosen domain, renewed automatically.</li>
+</ul>
+<p>The administration stays reachable at <code>/cgi-bin/luci/</code> of the same site. To keep it working, do not name your files or folders <code>cgi-bin</code> (apart from your own CGI scripts inside it) or <code>luci-static</code>.</p>
+<nav class="pager"><a class="next" href="/frontend.html"><span>Next</span>Frontend</a></nav>
+<footer>tunnel_ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+</main>
+<aside class="toc"><div class="title">On this page</div><ul><li><a href="#how-it-works">How it works</a></li><li><a href="#a-minimal-site-in-a-minute">A minimal site in a minute</a></li><li><a href="#what-the-router-can-do">What the router can do</a></li></ul></aside>
+</div>
+</body>
+</html>

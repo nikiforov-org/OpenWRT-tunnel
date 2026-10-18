@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+REL="${1:-25.12.5}"
+SDK="openwrt/sdk:x86-64-${REL}"
+REPO="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$REPO/dist"
+
+docker run --rm \
+	-v "$REPO:/custom:ro" \
+	-v "$REPO/dist:/out" \
+	"$SDK" sh -e -c '
+		cd /builder
+
+		# Copy the package sources and normalise file modes (the host filesystem may
+		# report 700 for everything): 644 for files, 755 for directories and scripts.
+		rm -rf /tmp/custom && mkdir -p /tmp/custom
+		PKGS=""
+		for d in /custom/luci-app-tunnel_*/; do
+			[ -f "${d}Makefile" ] || continue
+			cp -r "$d" /tmp/custom/
+			PKGS="$PKGS $(basename "$d")"
+		done
+		find /tmp/custom -type d -exec chmod 755 {} +
+		find /tmp/custom -type f -exec chmod 644 {} +
+		find /tmp/custom \( -path "*/root/etc/init.d/*" -o -path "*/root/usr/libexec/*" \
+			-o -path "*/root/usr/bin/*" -o -path "*/root/usr/sbin/*" \
+			-o -path "*/root/etc/hotplug.d/*" -o -path "*/root/etc/uci-defaults/*" \) \
+			-type f -exec chmod 755 {} +
+
+		cp feeds.conf.default feeds.conf
+		echo "src-link custom /tmp/custom" >> feeds.conf
+		[ -n "$PKGS" ] || { echo "no luci-app-tunnel_* packages found"; exit 1; }
+
+		./scripts/feeds update luci custom
+		./scripts/feeds install $PKGS
+
+		make defconfig >/dev/null
+		for p in $PKGS; do
+			make "package/$p/compile" V=s
+		done
+
+		rm -f /out/*.apk
+		find bin -path "*/custom/*" -name "*.apk" -exec cp {} /out/ \;
+		ls -l /out
+	'

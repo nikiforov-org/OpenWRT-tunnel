@@ -1,0 +1,41 @@
+#!/bin/sh
+# tunnel_ddns luci-gate: stands in front of LuCI while a site with its own login page is
+# served. It is linked as <site document root>/cgi-bin/luci, so the web server runs it for
+# every LuCI request; the stock dispatcher at /www/cgi-bin/luci is never modified.
+#   - a request with a logged-in session goes to the dispatcher as usual, except the logout:
+#     the session is ended here and the browser is sent to the site's front page;
+#   - a JSON-RPC request from LuCI's own pages (Referer inside /cgi-bin/luci) without a
+#     session gets "login required", on which LuCI shows its "session expired" notice;
+#   - any other request without a session gets the site's 404 page (see not-found): the
+#     administration is entered only through the site's login page and nothing tells what is
+#     behind the address.
+LUCI=/www/cgi-bin/luci
+NOT_FOUND=/usr/libexec/tunnel_ddns/not-found
+
+# the session id: the first cookie of that name, exactly as the LuCI dispatcher reads it
+cookie=sysauth_http
+[ "$HTTPS" = on ] && cookie=sysauth_https
+sid=""
+case "$HTTP_COOKIE" in *"$cookie="*) sid="${HTTP_COOKIE#*$cookie=}"; sid="${sid%%;*}" ;; esac
+case "$sid" in *[!0-9a-f]*) sid="" ;; esac
+
+if [ -n "$sid" ] && ubus -S call session get "{\"ubus_rpc_session\":\"$sid\"}" 2>/dev/null | grep -q '"username"'; then
+	[ "$PATH_INFO" = /admin/logout ] || exec "$LUCI"
+	ubus -S call session destroy "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1
+	printf 'Status: 302 Found\r\nSet-Cookie: %s=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/cgi-bin/luci/\r\nLocation: /\r\nCache-Control: no-store\r\n\r\n' "$cookie"
+	exit 0
+fi
+
+case "$CONTENT_TYPE" in
+application/json*)
+	case "$HTTP_REFERER" in
+	*"//$HTTP_HOST/cgi-bin/luci"*)
+		[ "${CONTENT_LENGTH:-0}" -gt 0 ] 2>/dev/null && head -c "$CONTENT_LENGTH" > /dev/null   # read the body, see not-found
+		printf 'Status: 403 Forbidden\r\nX-LuCI-Login-Required: yes\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n\r\nLogin required\n' ;;
+	*) exec "$NOT_FOUND" ;;
+	esac
+	;;
+*)
+	exec "$NOT_FOUND"
+	;;
+esac

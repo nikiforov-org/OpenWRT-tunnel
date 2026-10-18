@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# Applies /etc/config/tunnel_ddns to the system: ddns-scripts sections, firewall rule,
+# uhttpd document root/port/certificate, the LuCI login gate of the served site and the
+# cron jobs (certificate renewal, site rebuild).
+
+START=96
+USE_PROCD=1
+
+start_service() {
+	/usr/libexec/tunnel_ddns/sync
+}
+
+reload_service() {
+	/usr/libexec/tunnel_ddns/sync
+}
+
+service_triggers() {
+	procd_add_reload_trigger "tunnel_ddns"
+}

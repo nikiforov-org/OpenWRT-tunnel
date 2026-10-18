@@ -1,0 +1,14 @@
+#!/bin/sh
+# tunnel_ddns not-found: the 404 answer of a served site, with the right status code. uhttpd
+# runs it for every address that does not exist (its error_page option, linked into the site
+# as cgi-bin/not-found) and luci-gate for administration addresses without a session. The body
+# is the site's own 404.html when it has one.
+# the request body, if any, is read in full: a body left unread would be taken for the next
+# request on a kept-alive connection and break it
+[ "${CONTENT_LENGTH:-0}" -gt 0 ] 2>/dev/null && head -c "$CONTENT_LENGTH" > /dev/null
+printf 'Status: 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\r\n'
+if [ -f "$DOCUMENT_ROOT/404.html" ]; then
+	cat "$DOCUMENT_ROOT/404.html"
+else
+	printf '<h1>Not Found</h1>\n'
+fi

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Frontend — a web site on the router</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar"><div class="container"><a class="brand" href="/">tunnel_ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a class="current" href="/frontend.html">Frontend</a><a href="/backend.html">Backend</a><a href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
+<div class="container page">
+<aside class="sidebar"><nav>
+<div class="group">Guide</div><ul>
+<li><a class="pagelink" href="/">Overview</a>
+</li>
+<li><a class="pagelink current" href="/frontend.html">Frontend</a>
+<ul class="sections"><li><a href="#layout">Layout</a></li><li><a href="#names-the-router-reserves">Names the router reserves</a></li><li><a href="#ports-and-addresses">Ports and addresses</a></li><li><a href="#caching">Caching</a></li><li><a href="#a-placeholder-until-the-first-build">A placeholder until the first build</a></li><li><a href="#example-a-members-link-and-a-login-required-dialog">Example: a "members" link and a "login required" dialog</a></li><li><a href="#what-to-avoid">What to avoid</a></li></ul>
+</li>
+<li><a class="pagelink" href="/backend.html">Backend</a>
+</li>
+<li><a class="pagelink" href="/login.html">Login page</a>
+</li>
+<li><a class="pagelink" href="/archive.html">Archive and upload</a>
+</li>
+</ul>
+</nav></aside>
+<main class="content">
+<h1>Frontend</h1>
+<p>The frontend is everything at the top level of the archive: the router serves these files as they are. Nothing is processed on the fly, so any static output works: hand-written HTML, the output of a generator such as Hugo or Astro, an export from a site builder.</p>
+
+<h2 id="layout">Layout</h2>
+<pre><code>index.html        required: the home page
+404.html          optional: served for every missing address, in the site's own style
+style.css         styles, images, fonts — whatever you like
+app.js
+img/logo.svg
+about/index.html  nested pages: https://domain/about/
+robots.txt
+favicon.ico
+.tunnel_ddns/     optional: the backend, never served over HTTP (see "Backend")
+cgi-bin/login     optional: the login page (see "Login page")</code></pre>
+<p>The site lives at the root of the domain, so absolute paths like <code>/style.css</code> work. Directory listings are switched off while a site is served: a directory without an <code>index.html</code> answers 403. If the site has a <code>404.html</code>, the router serves it, with status 404, for every address that does not exist, including the administration addresses when nobody is logged in; without it the web server's plain "Not Found" is shown.</p>
+
+<div class="note">Everything outside <code>.tunnel_ddns/</code> is available over HTTPS to anyone, including files whose names start with a dot. Keep keys, passwords and drafts out of the archive's top level.</div>
+
+<h2 id="names-the-router-reserves">Names the router reserves</h2>
+<p>To keep the administration reachable, the router adds links to its own files into the site root: the entries <code>cgi-bin/luci</code>, <code>cgi-bin/cgi-upload</code>, <code>cgi-bin/cgi-download</code>, <code>cgi-bin/cgi-backup</code> and <code>cgi-bin/cgi-exec</code>, and a folder with a random 16-character name for the static files of the administration. A file of the site with the same name is left alone, but then the administration stops working. The rule is simple: do not name your CGI scripts like those of the router.</p>
+
+<h2 id="ports-and-addresses">Ports and addresses</h2>
+<ul>
+<li>Only the HTTPS port is open from the Internet (443 by default, changeable in LuCI). Port 80 is reachable from the local network only, and there is no redirect from HTTP to HTTPS. Make the links inside the site relative or start them with <code>/</code>.</li>
+<li>The certificate is issued for the domain chosen in LuCI. Opening the site by IP address or another name makes the browser complain about the certificate; that is expected.</li>
+<li>The login page of the administration, if the site has one, is <code>/cgi-bin/login</code>. The administration itself is <code>/cgi-bin/luci/</code>.</li>
+</ul>
+
+<h2 id="caching">Caching</h2>
+<p>uhttpd serves static files with <code>ETag</code> and <code>Last-Modified</code> headers and browsers cache them as they see fit. If the backend rebuilds the pages, forbid caching in <code>index.html</code> and change the version in the address of the styles and scripts on every build:</p>
+<pre><code>&lt;meta http-equiv="Cache-Control" content="no-cache, must-revalidate, max-age=0"&gt;
+&lt;link rel="stylesheet" href="/style.css?v=1760000000"&gt;</code></pre>
+
+<h2 id="a-placeholder-until-the-first-build">A placeholder until the first build</h2>
+<p>If <code>index.html</code> is generated by the backend, still put a simple placeholder <code>index.html</code> into the archive: the router shows it from the upload until the first build finishes (the build starts right after the upload and usually takes seconds).</p>
+<pre><code>&lt;!doctype html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;
+&lt;title&gt;Loading&lt;/title&gt;&lt;link rel="stylesheet" href="/style.css"&gt;&lt;/head&gt;
+&lt;body&gt;&lt;h1&gt;The page is being built&lt;/h1&gt;&lt;p&gt;Come back in a minute.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</code></pre>
+
+<h2 id="example-a-members-link-and-a-login-required-dialog">Example: a "members" link and a "login required" dialog</h2>
+<p>A common pattern for a site with its own login page: section links open a "sign in to continue" dialog, while the button in the header goes straight to <code>/cgi-bin/login</code>. Plain JavaScript, no libraries.</p>
+<pre><code>&lt;a class="login" href="/cgi-bin/login"&gt;Members&lt;/a&gt;
+&lt;a class="gate" href="/cgi-bin/login"&gt;Members-only section&lt;/a&gt;
+
+&lt;div class="modal" id="auth" hidden&gt;
+  &lt;p&gt;This section is available after signing in.&lt;/p&gt;
+  &lt;a href="/cgi-bin/login"&gt;Sign in&lt;/a&gt; &lt;button type="button" id="auth-close"&gt;Close&lt;/button&gt;
+&lt;/div&gt;
+
+&lt;script&gt;
+// links with class "gate" open the dialog instead of navigating
+document.querySelectorAll('.gate').forEach(a =&gt; a.addEventListener('click', e =&gt; {
+  e.preventDefault(); document.getElementById('auth').hidden = false;
+}));
+document.getElementById('auth-close').onclick = () =&gt; { document.getElementById('auth').hidden = true; };
+&lt;/script&gt;</code></pre>
+
+<h2 id="what-to-avoid">What to avoid</h2>
+<ul>
+<li>Heavy frameworks and megabyte bundles: the router is small and sits on a home connection.</li>
+<li>Multi-megabyte images inside the archive: the archive goes into the sysupgrade backup, which is built in RAM. Keep large images elsewhere and link to them.</li>
+<li>Server-side logic in the frontend: there is no PHP or similar on the router. Everything dynamic is done by the backend ahead of time, on a schedule.</li>
+</ul>
+<nav class="pager"><a class="prev" href="/"><span>Previous</span>Overview</a><a class="next" href="/backend.html"><span>Next</span>Backend</a></nav>
+<footer>tunnel_ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+</main>
+<aside class="toc"><div class="title">On this page</div><ul><li><a href="#layout">Layout</a></li><li><a href="#names-the-router-reserves">Names the router reserves</a></li><li><a href="#ports-and-addresses">Ports and addresses</a></li><li><a href="#caching">Caching</a></li><li><a href="#a-placeholder-until-the-first-build">A placeholder until the first build</a></li><li><a href="#example-a-members-link-and-a-login-required-dialog">Example: a "members" link and a "login required" dialog</a></li><li><a href="#what-to-avoid">What to avoid</a></li></ul></aside>
+</div>
+</body>
+</html>

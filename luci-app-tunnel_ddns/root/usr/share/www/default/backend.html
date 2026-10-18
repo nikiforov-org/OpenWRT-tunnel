@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Backend — a web site on the router</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar"><div class="container"><a class="brand" href="/">tunnel_ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a class="current" href="/backend.html">Backend</a><a href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
+<div class="container page">
+<aside class="sidebar"><nav>
+<div class="group">Guide</div><ul>
+<li><a class="pagelink" href="/">Overview</a>
+</li>
+<li><a class="pagelink" href="/frontend.html">Frontend</a>
+</li>
+<li><a class="pagelink current" href="/backend.html">Backend</a>
+<ul class="sections"><li><a href="#the-contract">The contract</a></li><li><a href="#when-it-runs">When it runs</a></li><li><a href="#rules-of-a-good-build">Rules of a good build</a></li><li><a href="#what-the-router-offers">What the router offers</a></li><li><a href="#example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</a></li><li><a href="#example-2-a-feed-from-rss">Example 2: a feed from RSS</a></li><li><a href="#debugging">Debugging</a></li></ul>
+</li>
+<li><a class="pagelink" href="/login.html">Login page</a>
+</li>
+<li><a class="pagelink" href="/archive.html">Archive and upload</a>
+</li>
+</ul>
+</nav></aside>
+<main class="content">
+<h1>Backend: pages built on a schedule</h1>
+<p>The backend here is not a server answering requests but a script that assembles static pages every now and then: it downloads news feeds, exchange rates, the weather, anything at all, and writes a finished <code>index.html</code>. Visitors get the file that is already built, so even a small router copes with any load.</p>
+
+<h2 id="the-contract">The contract</h2>
+<p>The archive carries a <code>.tunnel_ddns/</code> directory with an executable file <code>build</code> and whatever it needs next to it: templates, configuration, helper scripts. On upload the router moves this directory out of the web root, to <code>/etc/tunnel_ddns/sites/&lt;name&gt;/</code>, and runs <code>build</code> from there.</p>
+<div class="table-wrap"><table>
+<tr><th>Variable</th><th>Value</th></tr>
+<tr><td><code>SITE_NAME</code></td><td>the name of the site, as in LuCI</td></tr>
+<tr><td><code>SITE_PUBLIC</code></td><td>the document root, <code>/usr/share/www/&lt;name&gt;</code>: write the pages here</td></tr>
+<tr><td><code>SITE_TMP</code></td><td>a scratch directory, <code>/tmp/tunnel_ddns/sites/&lt;name&gt;</code>: a cache kept between runs, lost on reboot</td></tr>
+</table></div>
+<ul>
+<li>The current directory is the script's own, so <code>./feeds.conf</code> and <code>ucode render.uc</code> work without paths.</li>
+<li>Everything the script prints goes into the log of the last build: the <strong>Rebuild log</strong> button in LuCI.</li>
+<li>Exit code 0 means a successful build, anything else a failed one; the result shows in the <strong>Content</strong> line of the Overview section.</li>
+<li>At most one build of a site runs at a time; a second start while one is running is silently skipped.</li>
+<li>The script runs as root. Upload only your own archives.</li>
+</ul>
+
+<h2 id="when-it-runs">When it runs</h2>
+<ul>
+<li>Right after the upload, so that the placeholder gives way to the real page.</li>
+<li>On the <strong>Rebuild now</strong> button.</li>
+<li>On the schedule from the <strong>Rebuild schedule</strong> field: five cron fields — minute, hour, day of month, month, day of week. <code>0 3 * * *</code> is every night at 03:00, <code>0 */6 * * *</code> every six hours, <code>*/30 * * * *</code> every half hour. An empty field means only on the button.</li>
+</ul>
+<p>A build is not started by <strong>Save &amp; Apply</strong> or by a reboot: the built pages are on disk and stay there.</p>
+
+<h2 id="rules-of-a-good-build">Rules of a good build</h2>
+<ol>
+<li>Write the page to a temporary file in the same directory and swap it in with a single <code>mv</code>: a visitor never sees a half-written file.</li>
+<li>If the sources are unreachable, leave the old page alone and exit with a non-zero code: LuCI shows "last rebuild failed" and the site stays as it was.</li>
+<li>Download with timeouts (<code>wget -T 25</code>) and keep the last good copy of every source in <code>$SITE_TMP</code>: one failing source then does not break the page.</li>
+<li>Do not write anything into your <code>.tunnel_ddns/</code> directory that need not be kept forever, and do not write to <code>/tmp</code> directly: that is what <code>$SITE_TMP</code> is for.</li>
+<li>Stay within seconds. Dozens of sources and a few hundred kilobytes are fine; parsing gigabytes on a router is not.</li>
+</ol>
+
+<h2 id="what-the-router-offers">What the router offers</h2>
+<div class="table-wrap"><table>
+<tr><th>Tool</th><th>Notes</th></tr>
+<tr><td><code>sh</code> (busybox ash)</td><td>no bash extensions: no arrays, no <code>[[ ]]</code>, no <code>${var//…}</code></td></tr>
+<tr><td><code>wget</code></td><td>on plain OpenWrt this is <code>uclient-fetch</code> with <code>-q -O file -T seconds -U agent</code>; HTTPS works</td></tr>
+<tr><td><code>ucode</code></td><td>a language with JavaScript syntax: strings, arrays, objects, regular expressions, <code>json()</code>, templates through <code>render()</code>; modules <code>fs</code>, <code>uci</code>, <code>ubus</code>, <code>math</code>, <code>log</code>; present on every OpenWrt with LuCI</td></tr>
+<tr><td><code>jsonfilter</code></td><td>picks a field out of JSON right in the shell: <code>jsonfilter -i file.json -e '@.rate'</code></td></tr>
+<tr><td><code>sed</code>, <code>awk</code>, <code>grep</code>, <code>tr</code>, <code>date</code></td><td>busybox versions, enough for most feeds</td></tr>
+<tr><td>Python, Node, Perl, PHP, curl, jq</td><td>absent. They can be installed with apk, but that is hundreds of kilobytes to megabytes on a small router; better stay with ucode</td></tr>
+</table></div>
+
+<h2 id="example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</h2>
+<p>Two files in <code>.tunnel_ddns/</code>: <code>build</code> downloads the data and calls the renderer, <code>render.uc</code> builds the page from the template <code>index.ut</code>. The shortest complete example.</p>
+<p><code>.tunnel_ddns/build</code>:</p>
+<pre><code>#!/bin/sh
+# Downloads the data and renders index.html. Run by the router in this directory with
+# SITE_PUBLIC (document root) and SITE_TMP (scratch directory, kept between runs).
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+: "${SITE_PUBLIC:?}" "${SITE_TMP:?}"
+
+fetch() {   # fetch NAME URL: keeps the previous copy when the download fails
+	name=$1; url=$2
+	if wget -q -T 25 -O "${SITE_TMP:?}/$name.new" "$url"; then
+		mv "${SITE_TMP:?}/$name.new" "${SITE_TMP:?}/$name"; echo "fetched $name"
+	else
+		rm -f "${SITE_TMP:?}/$name.new"; echo "could not fetch $name, using the previous copy"
+	fi
+}
+fetch rates.json   https://example.org/api/rates.json
+fetch weather.json https://example.org/api/weather.json
+
+page="${SITE_PUBLIC:?}/.index.html.new"
+DATA_DIR="$SITE_TMP" ucode render.uc &gt; "$page" || { rm -f "$page"; echo "render failed"; exit 1; }
+mv "$page" "$SITE_PUBLIC/index.html"
+echo "index.html updated, $(wc -c &lt; "$SITE_PUBLIC/index.html") bytes"</code></pre>
+<p><code>.tunnel_ddns/render.uc</code>:</p>
+<pre><code>#!/usr/bin/ucode
+'use strict';
+// Reads the downloaded JSON files and prints index.html rendered from index.ut.
+import { readfile } from 'fs';
+
+const DATA_DIR = getenv('DATA_DIR') ?? '.';
+const load = (name) =&gt; json(readfile(`${DATA_DIR}/${name}`) ?? 'null');
+
+let rates = load('rates.json');       // whatever the API returns, e.g. { "usd": 92.5 }
+let weather = load('weather.json');
+if (!rates || !weather)
+	die('no data yet');                 // non-zero exit: the build fails, the old page stays
+
+let now = localtime();
+print(render('index.ut', {
+	rates, weather,
+	built_at: sprintf('%02d.%02d.%d %02d:%02d', now.mday, now.mon, now.year, now.hour, now.min),
+	escape: (s) =&gt; replace(replace(replace(s ?? '', '&amp;', '&amp;amp;'), '&lt;', '&amp;lt;'), '&gt;', '&amp;gt;')
+}));</code></pre>
+<p><code>.tunnel_ddns/index.ut</code>, the template: ordinary HTML where <code>{{ }}</code> inserts a value and <code>{% %}</code> holds code:</p>
+<pre><code>&lt;!doctype html&gt;
+&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;Summary&lt;/title&gt;
+&lt;link rel="stylesheet" href="/style.css?v={{ time() }}"&gt;&lt;/head&gt;
+&lt;body&gt;
+&lt;h1&gt;Summary as of {{ built_at }}&lt;/h1&gt;
+&lt;p&gt;Dollar: {{ rates.usd }}. Outside: {{ weather.temp }}°, {{ escape(weather.text) }}.&lt;/p&gt;
+&lt;ul&gt;
+{% for (let day in weather.forecast) { %}
+  &lt;li&gt;{{ escape(day.date) }}: {{ day.min }}…{{ day.max }}°&lt;/li&gt;
+{% } %}
+&lt;/ul&gt;
+&lt;/body&gt;&lt;/html&gt;</code></pre>
+<p>Pass everything that came from outside through <code>escape()</code>: the template escapes nothing by itself.</p>
+
+<h2 id="example-2-a-feed-from-rss">Example 2: a feed from RSS</h2>
+<p>RSS is XML and ucode has no XML parser, but cutting the text up is enough for feeds. An entry is everything between <code>&lt;item&gt;</code> and <code>&lt;/item&gt;</code>, the fields inside are between their own tags. Entities such as <code>&amp;amp;</code> and <code>&amp;#8212;</code> have to be decoded and the HTML inside the description stripped.</p>
+<pre><code>// the text between the first `from` and the `to` that follows it, or ''
+function between(text, from, to) {
+	let start = index(text, from);
+	if (start &lt; 0) return '';
+	let rest = substr(text, start + length(from));
+	let end = index(rest, to);
+	return end &lt; 0 ? '' : substr(rest, 0, end);
+}
+
+function clean(text) {
+	text = replace(replace(text ?? '', '&lt;![CDATA[', ''), ']]&gt;', '');
+	text = replace(text, /&lt;[^&gt;]*&gt;/g, '');                 // strip tags
+	text = replace(text, /&amp;#([0-9]+);/g, (m, code) =&gt; chr(int(code)));  // ASCII only; encode UTF-8 for higher code points
+	text = replace(text, '&amp;amp;', '&amp;');
+	return trim(text);
+}
+
+let items = [];
+let xml = readfile(`${DATA_DIR}/news.xml`) ?? '';
+for (let chunk in slice(split(xml, '&lt;item&gt;'), 1)) {
+	let item = split(chunk, '&lt;/item&gt;')[0];
+	push(items, {
+		title: clean(between(item, '&lt;title&gt;', '&lt;/title&gt;')),
+		link: clean(between(item, '&lt;link&gt;', '&lt;/link&gt;')),
+		summary: clean(between(item, '&lt;description&gt;', '&lt;/description&gt;')),
+		date: between(item, '&lt;pubDate&gt;', '&lt;/pubDate&gt;')
+	});
+}</code></pre>
+<p>Then the same <code>render('index.ut', { items, … })</code>. Several feeds: a loop over a list of addresses in your own <code>feeds.conf</code>. Sorting by date: turn <code>pubDate</code> into a number and <code>sort(items, (a, b) =&gt; b.key - a.key)</code>.</p>
+
+<h2 id="debugging">Debugging</h2>
+<ul>
+<li><strong>Rebuild log</strong> in LuCI holds the whole output of the last build; print there what you fetched and how much you wrote.</li>
+<li>The <strong>Content</strong> line of the Overview: "rebuilding now", "last rebuilt 5 minutes ago", "last rebuild failed", and whether the schedule is in effect.</li>
+<li>Over ssh: <code>/usr/libexec/tunnel_ddns/sitebuild &lt;name&gt;</code> starts a build by hand, <code>ucode -c -o /dev/null file.uc</code> checks the syntax, <code>logread -e tunnel_ddns</code> shows how the settings were applied.</li>
+<li>To fix the script without re-uploading, you may edit the files right in <code>/etc/tunnel_ddns/sites/&lt;name&gt;/</code>, but the archive is the source of truth: the next upload overwrites everything.</li>
+</ul>
+<nav class="pager"><a class="prev" href="/frontend.html"><span>Previous</span>Frontend</a><a class="next" href="/login.html"><span>Next</span>Login page</a></nav>
+<footer>tunnel_ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+</main>
+<aside class="toc"><div class="title">On this page</div><ul><li><a href="#the-contract">The contract</a></li><li><a href="#when-it-runs">When it runs</a></li><li><a href="#rules-of-a-good-build">Rules of a good build</a></li><li><a href="#what-the-router-offers">What the router offers</a></li><li><a href="#example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</a></li><li><a href="#example-2-a-feed-from-rss">Example 2: a feed from RSS</a></li><li><a href="#debugging">Debugging</a></li></ul></aside>
+</div>
+</body>
+</html>

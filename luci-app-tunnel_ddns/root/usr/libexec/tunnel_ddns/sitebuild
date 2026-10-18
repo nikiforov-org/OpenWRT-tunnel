@@ -1,0 +1,36 @@
+#!/bin/sh
+# tunnel_ddns sitebuild NAME: runs the build script of a site, /etc/tunnel_ddns/sites/NAME/build.
+# Started by the cron line the package keeps for the site, by the "Rebuild now" button and
+# once right after the site is uploaded. The script runs in its own directory with
+#   SITE_NAME    the name of the site
+#   SITE_PUBLIC  the document root, /usr/share/www/NAME, where the pages are written
+#   SITE_TMP     a scratch directory kept between runs (under /tmp, so lost on reboot)
+# One run per site at a time. The output of the last run is in /tmp/tunnel_ddns/site-NAME.log,
+# its result in site-NAME.state: "running EPOCH PID", "ok EPOCH" or "failed EPOCH".
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+name="$1"
+case "$name" in ''|*[!A-Za-z0-9._-]*) echo "usage: sitebuild NAME" >&2; exit 1 ;; esac
+
+backend="/etc/tunnel_ddns/sites/$name"
+public="/usr/share/www/$name"
+run=/tmp/tunnel_ddns
+log="$run/site-$name.log"
+state="$run/site-$name.state"
+
+[ -x "$backend/build" ] || { echo "site '$name' has no build script" >&2; exit 1; }
+[ -d "$public" ] || { echo "site '$name' has no document root" >&2; exit 1; }
+mkdir -p "$run/sites/$name"
+
+exec 9> "$run/site-$name.lock"
+flock -n 9 || { echo "a build of '$name' is already running" >&2; exit 0; }
+
+echo "running $(date +%s) $$" > "$state"
+{
+	echo "== $(date) building site '$name'"
+	cd "$backend" && SITE_NAME="$name" SITE_PUBLIC="$public" SITE_TMP="$run/sites/$name" ./build
+	rc=$?
+	echo "== $(date) build finished with exit code $rc"
+} > "$log" 2>&1
+echo "$([ "$rc" = 0 ] && echo ok || echo failed) $(date +%s)" > "$state"
+exit $rc
