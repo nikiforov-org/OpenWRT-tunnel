@@ -59,7 +59,7 @@ function service() {
 }
 
 function singbox_log() {
-	return exec(`logread -e 'tunnel_server-hysteria2|sing-box\\[' 2>/dev/null`).out;
+	return exec(`logread 2>/dev/null | grep -E 'tunnel_server-hysteria2|sing-box\\['`).out;
 }
 
 function cert_info(path) {

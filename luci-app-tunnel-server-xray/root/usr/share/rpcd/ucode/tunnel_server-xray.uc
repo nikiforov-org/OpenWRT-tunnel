@@ -72,7 +72,7 @@ function service() {
 }
 
 function xray_log() {
-	return exec(`logread -e 'tunnel_server-xray|xray\\[' 2>/dev/null`).out;
+	return exec(`logread 2>/dev/null | grep -E 'tunnel_server-xray|xray\\['`).out;
 }
 
 function urlenc(s) {

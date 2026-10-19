@@ -1,0 +1,17 @@
+{
+	"tunnel_server-tor": {
+		"description": "Manage the Tor onion service of the router and its authorized clients",
+		"read": {
+			"ubus": {
+				"tunnel_server-tor": [ "status", "keypair", "pubkey", "links", "config", "log" ]
+			},
+			"uci": [ "tunnel_server-tor" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel_server-tor": [ "restart" ]
+			},
+			"uci": [ "tunnel_server-tor" ]
+		}
+	}
+}
