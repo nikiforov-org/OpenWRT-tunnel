@@ -1,0 +1,17 @@
+{
+	"tunnel_server-hysteria2": {
+		"description": "Manage the Hysteria2 server (sing-box) of the router",
+		"read": {
+			"ubus": {
+				"tunnel_server-hysteria2": [ "status", "links", "log", "config" ]
+			},
+			"uci": [ "tunnel_server-hysteria2" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel_server-hysteria2": [ "restart" ]
+			},
+			"uci": [ "tunnel_server-hysteria2" ]
+		}
+	}
+}

@@ -16,7 +16,7 @@ docker run --rm \
 		# report 700 for everything): 644 for files, 755 for directories and scripts.
 		rm -rf /tmp/custom && mkdir -p /tmp/custom
 		PKGS=""
-		for d in /custom/luci-app-tunnel_*/; do
+		for d in /custom/luci-app-tunnel-*/; do
 			[ -f "${d}Makefile" ] || continue
 			cp -r "$d" /tmp/custom/
 			PKGS="$PKGS $(basename "$d")"
@@ -30,7 +30,7 @@ docker run --rm \
 
 		cp feeds.conf.default feeds.conf
 		echo "src-link custom /tmp/custom" >> feeds.conf
-		[ -n "$PKGS" ] || { echo "no luci-app-tunnel_* packages found"; exit 1; }
+		[ -n "$PKGS" ] || { echo "no luci-app-tunnel-* packages found"; exit 1; }
 
 		./scripts/feeds update luci custom
 		./scripts/feeds install $PKGS

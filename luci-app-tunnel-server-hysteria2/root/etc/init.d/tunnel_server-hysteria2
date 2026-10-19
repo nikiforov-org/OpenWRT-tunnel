@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# Runs sing-box with the Hysteria2 configuration that sync generates from
+# /etc/config/tunnel_server-hysteria2. LuCI's apply triggers a reload: sync runs again and
+# procd restarts sing-box only when the generated file changed; with the server switched off
+# the file is removed and sing-box stops. sing-box reloads the certificate files by itself.
+
+START=99
+USE_PROCD=1
+
+PROG=/usr/bin/sing-box
+CONF=/etc/tunnel_server-hysteria2/config.json
+WORKDIR=/tmp/tunnel_server-hysteria2/work
+
+start_service() {
+	/usr/libexec/tunnel_server-hysteria2/sync
+	[ -s "$CONF" ] && [ -x "$PROG" ] || return 0
+	mkdir -p "$WORKDIR"
+	procd_open_instance hysteria2
+	procd_set_param command "$PROG" run -c "$CONF" -D "$WORKDIR"
+	procd_set_param file "$CONF"
+	procd_set_param respawn
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "tunnel_server-hysteria2"
+}
