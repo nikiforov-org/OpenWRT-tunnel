@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header class="topbar"><div class="container"><a class="brand" href="/">tunnel_ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a href="/backend.html">Backend</a><a class="current" href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
+<header class="topbar"><div class="container"><a class="brand" href="/">tunnel-ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a href="/backend.html">Backend</a><a class="current" href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
 <div class="container page">
 <aside class="sidebar"><nav>
 <div class="group">Guide</div><ul>
@@ -52,8 +52,8 @@ Cache-Control: no-store
 
 <h2 id="the-package-s-modules">The package's modules</h2>
 <p>Two modules take care of everything that is not about the look of the page.</p>
-<h3><code>tunnel_ddns.captcha</code>, the picture with the code</h3>
-<pre><code>import { create, verify } from 'tunnel_ddns.captcha';
+<h3><code>tunnel-ddns.captcha</code>, the picture with the code</h3>
+<pre><code>import { create, verify } from 'tunnel-ddns.captcha';
 
 let c = create({ language: 'en' });   // { id: '…32 hex digits…', png: '…base64 PNG…' } or null
                                       // when too many pictures are waiting for an answer
@@ -63,8 +63,8 @@ verify(c.id, typed_text);             // true when the right code was typed</cod
 <li>Every character has its own colour, a random tilt and size; the picture is bent along a wave and crossed by lines. The PNG is assembled on the router without any image library, in a fraction of a second.</li>
 <li>The answer is kept on the router for three minutes and checked once: after <code>verify()</code>, successful or not, the picture is no longer valid. Case does not matter, and Latin/Cyrillic look-alikes (A and А, C and С…) are accepted for each other.</li>
 </ul>
-<h3><code>tunnel_ddns.login</code>, signing in to LuCI</h3>
-<pre><code>import { login } from 'tunnel_ddns.login';
+<h3><code>tunnel-ddns.login</code>, signing in to LuCI</h3>
+<pre><code>import { login } from 'tunnel-ddns.login';
 
 let r = login({ username: 'root', password: '…', client: env.REMOTE_ADDR, https: env.HTTPS == 'on' });
 // r = { cookie: 'sysauth_https=…; path=/cgi-bin/luci/; …' }  logged in: send it as Set-Cookie
@@ -82,8 +82,8 @@ let r = login({ username: 'root', password: '…', client: env.REMOTE_ADDR, http
 // Login page of the site: a captcha, then the router credentials; a successful login opens LuCI.
 import { stdin } from 'fs';
 import { urldecode } from 'luci.http';
-import { create as new_captcha, verify as verify_captcha } from 'tunnel_ddns.captcha';
-import { login } from 'tunnel_ddns.login';
+import { create as new_captcha, verify as verify_captcha } from 'tunnel-ddns.captcha';
+import { login } from 'tunnel-ddns.login';
 
 const env = getenv();
 const LUCI = '/cgi-bin/luci/';
@@ -160,7 +160,7 @@ else
 <li>Keep the page anonymous: neutral field names, no mention of the software behind it in the markup, scripts or error texts. The package does its part: while a site with a login page is served, LuCI's static files are linked under a random name, directory listings are off, and a request to an administration address without a session gets the site's 404 page, exactly like any other missing address.</li>
 </ul>
 <nav class="pager"><a class="prev" href="/backend.html"><span>Previous</span>Backend</a><a class="next" href="/archive.html"><span>Next</span>Archive and upload</a></nav>
-<footer>tunnel_ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+<footer>tunnel-ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
 </main>
 <aside class="toc"><div class="title">On this page</div><ul><li><a href="#what-changes-when-the-site-has-a-login-page">What changes when the site has a login page</a></li><li><a href="#how-the-cgi-works">How the CGI works</a></li><li><a href="#the-package-s-modules">The package's modules</a></li><li><a href="#a-complete-cgi-bin-login">A complete cgi-bin/login</a></li><li><a href="#security">Security</a></li></ul></aside>
 </div>

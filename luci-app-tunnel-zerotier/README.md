@@ -49,11 +49,11 @@ Everything only on **Save & Apply**, nothing at install time with the default co
   that the router does not join the public Earth network. The file gets mode 600 (it holds
   the node's identity secret). The zerotier service is enabled, restarted on changes, and
   stopped and disabled when ZeroTier is switched off here (only if it was switched on here:
-  a zerotier service you run otherwise is left alone, marker `/etc/tunnel_zerotier/managed`).
-- `/etc/config/firewall`: the zone `tunnel_zerotier` (devices `zt+`, input accepted or
+  a zerotier service you run otherwise is left alone, marker `/etc/tunnel-zerotier/managed`).
+- `/etc/config/firewall`: the zone `tunnel-zerotier` (devices `zt+`, input accepted or
   rejected by the access box) with forwarding to `wan`, and to and from `lan` with the
   access box; removed when ZeroTier is switched off.
-- `/etc/config/tunnel_zerotier` gets mode 600 (it holds the API token).
+- `/etc/config/tunnel-zerotier` gets mode 600 (it holds the API token).
 - ZeroTier Central: on "Save & Apply" the router's node is authorized in every listed
   network through the API (member name = the router's hostname). Everything in the
   "Networks of the account", "Members" and "Routes" parts changes the account directly.
@@ -64,5 +64,5 @@ Everything only on **Save & Apply**, nothing at install time with the default co
 ## Removal
 
 `apk del luci-app-tunnel-zerotier` stops ZeroTier, removes the network sections and the
-firewall zone, and removes the files. `/etc/config/tunnel_zerotier` and `/etc/config/zerotier`
+firewall zone, and removes the files. `/etc/config/tunnel-zerotier` and `/etc/config/zerotier`
 (with the node identity) stay unless `apk` is told to drop configuration files.

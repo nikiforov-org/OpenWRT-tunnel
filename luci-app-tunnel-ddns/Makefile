@@ -10,7 +10,7 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 define Package/luci-app-tunnel-ddns/conffiles
-/etc/config/tunnel_ddns
+/etc/config/tunnel-ddns
 endef
 
 define Package/luci-app-tunnel-ddns/postinst
@@ -25,7 +25,7 @@ endef
 
 define Package/luci-app-tunnel-ddns/prerm
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel_ddns/sync revert >/dev/null 2>&1
+[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel-ddns/sync revert >/dev/null 2>&1
 exit 0
 endef
 

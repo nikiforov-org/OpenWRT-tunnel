@@ -10,7 +10,7 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 define Package/luci-app-tunnel-zerotier/conffiles
-/etc/config/tunnel_zerotier
+/etc/config/tunnel-zerotier
 endef
 
 define Package/luci-app-tunnel-zerotier/postinst
@@ -25,7 +25,7 @@ endef
 
 define Package/luci-app-tunnel-zerotier/prerm
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel_zerotier/sync revert >/dev/null 2>&1
+[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel-zerotier/sync revert >/dev/null 2>&1
 exit 0
 endef
 

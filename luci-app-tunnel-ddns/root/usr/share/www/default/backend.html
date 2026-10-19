@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header class="topbar"><div class="container"><a class="brand" href="/">tunnel_ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a class="current" href="/backend.html">Backend</a><a href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
+<header class="topbar"><div class="container"><a class="brand" href="/">tunnel-ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a class="current" href="/backend.html">Backend</a><a href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
 <div class="container page">
 <aside class="sidebar"><nav>
 <div class="group">Guide</div><ul>
@@ -31,12 +31,12 @@
 <p>The backend here is not a server answering requests but a script that assembles static pages every now and then: it downloads news feeds, exchange rates, the weather, anything at all, and writes a finished <code>index.html</code>. Visitors get the file that is already built, so even a small router copes with any load.</p>
 
 <h2 id="the-contract">The contract</h2>
-<p>The archive carries a <code>.tunnel_ddns/</code> directory with an executable file <code>build</code> and whatever it needs next to it: templates, configuration, helper scripts. On upload the router moves this directory out of the web root, to <code>/etc/tunnel_ddns/sites/&lt;name&gt;/</code>, and runs <code>build</code> from there.</p>
+<p>The archive carries a <code>.tunnel-ddns/</code> directory with an executable file <code>build</code> and whatever it needs next to it: templates, configuration, helper scripts. On upload the router moves this directory out of the web root, to <code>/etc/tunnel-ddns/sites/&lt;name&gt;/</code>, and runs <code>build</code> from there.</p>
 <div class="table-wrap"><table>
 <tr><th>Variable</th><th>Value</th></tr>
 <tr><td><code>SITE_NAME</code></td><td>the name of the site, as in LuCI</td></tr>
 <tr><td><code>SITE_PUBLIC</code></td><td>the document root, <code>/usr/share/www/&lt;name&gt;</code>: write the pages here</td></tr>
-<tr><td><code>SITE_TMP</code></td><td>a scratch directory, <code>/tmp/tunnel_ddns/sites/&lt;name&gt;</code>: a cache kept between runs, lost on reboot</td></tr>
+<tr><td><code>SITE_TMP</code></td><td>a scratch directory, <code>/tmp/tunnel-ddns/sites/&lt;name&gt;</code>: a cache kept between runs, lost on reboot</td></tr>
 </table></div>
 <ul>
 <li>The current directory is the script's own, so <code>./feeds.conf</code> and <code>ucode render.uc</code> work without paths.</li>
@@ -59,7 +59,7 @@
 <li>Write the page to a temporary file in the same directory and swap it in with a single <code>mv</code>: a visitor never sees a half-written file.</li>
 <li>If the sources are unreachable, leave the old page alone and exit with a non-zero code: LuCI shows "last rebuild failed" and the site stays as it was.</li>
 <li>Download with timeouts (<code>wget -T 25</code>) and keep the last good copy of every source in <code>$SITE_TMP</code>: one failing source then does not break the page.</li>
-<li>Do not write anything into your <code>.tunnel_ddns/</code> directory that need not be kept forever, and do not write to <code>/tmp</code> directly: that is what <code>$SITE_TMP</code> is for.</li>
+<li>Do not write anything into your <code>.tunnel-ddns/</code> directory that need not be kept forever, and do not write to <code>/tmp</code> directly: that is what <code>$SITE_TMP</code> is for.</li>
 <li>Stay within seconds. Dozens of sources and a few hundred kilobytes are fine; parsing gigabytes on a router is not.</li>
 </ol>
 
@@ -75,8 +75,8 @@
 </table></div>
 
 <h2 id="example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</h2>
-<p>Two files in <code>.tunnel_ddns/</code>: <code>build</code> downloads the data and calls the renderer, <code>render.uc</code> builds the page from the template <code>index.ut</code>. The shortest complete example.</p>
-<p><code>.tunnel_ddns/build</code>:</p>
+<p>Two files in <code>.tunnel-ddns/</code>: <code>build</code> downloads the data and calls the renderer, <code>render.uc</code> builds the page from the template <code>index.ut</code>. The shortest complete example.</p>
+<p><code>.tunnel-ddns/build</code>:</p>
 <pre><code>#!/bin/sh
 # Downloads the data and renders index.html. Run by the router in this directory with
 # SITE_PUBLIC (document root) and SITE_TMP (scratch directory, kept between runs).
@@ -98,7 +98,7 @@ page="${SITE_PUBLIC:?}/.index.html.new"
 DATA_DIR="$SITE_TMP" ucode render.uc &gt; "$page" || { rm -f "$page"; echo "render failed"; exit 1; }
 mv "$page" "$SITE_PUBLIC/index.html"
 echo "index.html updated, $(wc -c &lt; "$SITE_PUBLIC/index.html") bytes"</code></pre>
-<p><code>.tunnel_ddns/render.uc</code>:</p>
+<p><code>.tunnel-ddns/render.uc</code>:</p>
 <pre><code>#!/usr/bin/ucode
 'use strict';
 // Reads the downloaded JSON files and prints index.html rendered from index.ut.
@@ -118,7 +118,7 @@ print(render('index.ut', {
 	built_at: sprintf('%02d.%02d.%d %02d:%02d', now.mday, now.mon, now.year, now.hour, now.min),
 	escape: (s) =&gt; replace(replace(replace(s ?? '', '&amp;', '&amp;amp;'), '&lt;', '&amp;lt;'), '&gt;', '&amp;gt;')
 }));</code></pre>
-<p><code>.tunnel_ddns/index.ut</code>, the template: ordinary HTML where <code>{{ }}</code> inserts a value and <code>{% %}</code> holds code:</p>
+<p><code>.tunnel-ddns/index.ut</code>, the template: ordinary HTML where <code>{{ }}</code> inserts a value and <code>{% %}</code> holds code:</p>
 <pre><code>&lt;!doctype html&gt;
 &lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;Summary&lt;/title&gt;
 &lt;link rel="stylesheet" href="/style.css?v={{ time() }}"&gt;&lt;/head&gt;
@@ -169,11 +169,11 @@ for (let chunk in slice(split(xml, '&lt;item&gt;'), 1)) {
 <ul>
 <li><strong>Rebuild log</strong> in LuCI holds the whole output of the last build; print there what you fetched and how much you wrote.</li>
 <li>The <strong>Content</strong> line of the Overview: "rebuilding now", "last rebuilt 5 minutes ago", "last rebuild failed", and whether the schedule is in effect.</li>
-<li>Over ssh: <code>/usr/libexec/tunnel_ddns/sitebuild &lt;name&gt;</code> starts a build by hand, <code>ucode -c -o /dev/null file.uc</code> checks the syntax, <code>logread -e tunnel_ddns</code> shows how the settings were applied.</li>
-<li>To fix the script without re-uploading, you may edit the files right in <code>/etc/tunnel_ddns/sites/&lt;name&gt;/</code>, but the archive is the source of truth: the next upload overwrites everything.</li>
+<li>Over ssh: <code>/usr/libexec/tunnel-ddns/sitebuild &lt;name&gt;</code> starts a build by hand, <code>ucode -c -o /dev/null file.uc</code> checks the syntax, <code>logread -e tunnel-ddns</code> shows how the settings were applied.</li>
+<li>To fix the script without re-uploading, you may edit the files right in <code>/etc/tunnel-ddns/sites/&lt;name&gt;/</code>, but the archive is the source of truth: the next upload overwrites everything.</li>
 </ul>
 <nav class="pager"><a class="prev" href="/frontend.html"><span>Previous</span>Frontend</a><a class="next" href="/login.html"><span>Next</span>Login page</a></nav>
-<footer>tunnel_ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+<footer>tunnel-ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
 </main>
 <aside class="toc"><div class="title">On this page</div><ul><li><a href="#the-contract">The contract</a></li><li><a href="#when-it-runs">When it runs</a></li><li><a href="#rules-of-a-good-build">Rules of a good build</a></li><li><a href="#what-the-router-offers">What the router offers</a></li><li><a href="#example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</a></li><li><a href="#example-2-a-feed-from-rss">Example 2: a feed from RSS</a></li><li><a href="#debugging">Debugging</a></li></ul></aside>
 </div>

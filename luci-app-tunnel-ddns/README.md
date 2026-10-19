@@ -89,8 +89,8 @@ everything off).
   `ubus_prefix` is removed as well (see below). `/etc/config/luci`: `resourcebase` and
   `mediaurlbase` point at the link described next, and with a login page `ubuspath` at the
   RPC path through `cgi-bin/luci`. The original values are kept in
-  `/etc/tunnel_ddns/uhttpd.backup` and restored when the site is switched off. Links to every
-  `/www/cgi-bin/*` entry and, under a random name kept in `/etc/tunnel_ddns/static.name`, to
+  `/etc/tunnel-ddns/uhttpd.backup` and restored when the site is switched off. Links to every
+  `/www/cgi-bin/*` entry and, under a random name kept in `/etc/tunnel-ddns/static.name`, to
   `/www/luci-static` are added to the site's directory so that LuCI stays reachable without
   its name showing up in the site's address space; files of the site with those names are
   left alone. The same random-named link is placed under `/www` while a site is served (two
@@ -99,22 +99,22 @@ everything off).
 - `/etc/crontabs/root`: the certificate renewal line (as long as there is at least one
   certificate) and, for a site with a build script, the rebuild line on the schedule from the
   administration.
-- Uploaded sites: the public files in `/usr/share/www/<name>/`, the archive's `.tunnel_ddns/`
-  directory (the build script and everything for it) in `/etc/tunnel_ddns/sites/<name>/`.
-  The result of a site's last build is kept in `/etc/tunnel_ddns/state/`.
+- Uploaded sites: the public files in `/usr/share/www/<name>/`, the archive's `.tunnel-ddns/`
+  directory (the build script and everything for it) in `/etc/tunnel-ddns/sites/<name>/`.
+  The result of a site's last build is kept in `/etc/tunnel-ddns/state/`.
 - Certificates: acme.sh's working files in `/etc/acme/<domain>_ecc/`, copies for the web
-  server in `/etc/ssl/tunnel_ddns/<domain>/fullchain.pem` and `key.pem`.
+  server in `/etc/ssl/tunnel-ddns/<domain>/fullchain.pem` and `key.pem`.
 - The `dns_begetdns` hook in `/usr/lib/acme/client/dnsapi/`: it only uses
   `dns/changeRecords`, so the Beget API password may be restricted to the "DNS" group.
 
-Logs: `/var/log/ddns/tunnel_ddns_<id>.log` (address), `/tmp/tunnel_ddns/cert-<id>.log`
-(certificate), `logread | grep tunnel_ddns` (applying the settings).
+Logs: `/var/log/ddns/tunnel_ddns_<id>.log` (address), `/tmp/tunnel-ddns/cert-<id>.log`
+(certificate), `logread | grep tunnel-ddns` (applying the settings).
 
 ## Removal
 
 `apk del luci-app-tunnel-ddns` first does "Switch everything off", then removes the files. The
-uploaded sites in `/usr/share/www/` and `/etc/tunnel_ddns/sites/`, `/etc/acme/` and
-`/etc/ssl/tunnel_ddns/` remain.
+uploaded sites in `/usr/share/www/` and `/etc/tunnel-ddns/sites/`, `/etc/acme/` and
+`/etc/ssl/tunnel-ddns/` remain.
 
 ## HTTPS port
 
@@ -127,7 +127,7 @@ port and would roll a port change back.
 
 ## Sites with their own build
 
-Besides the public files, the archive may contain a `.tunnel_ddns/` directory with an
+Besides the public files, the archive may contain a `.tunnel-ddns/` directory with an
 executable file `build` and whatever it needs. The package keeps this directory outside the
 web root and runs `build` in it with these environment variables:
 
@@ -141,7 +141,7 @@ The build runs right after the upload, on the schedule and on the button. For su
 the **Web site** section shows the **Rebuild schedule** field (a cron time, five fields; empty
 means only on the button), the **Rebuild now** button and **Rebuild log**. The schedule
 line lives in `/etc/crontabs/root`; the log of the last build in
-`/tmp/tunnel_ddns/` (lost on a reboot), its result in `/etc/tunnel_ddns/state/`.
+`/tmp/tunnel-ddns/` (lost on a reboot), its result in `/etc/tunnel-ddns/state/`.
 
 ## Own login page
 
@@ -159,14 +159,14 @@ to LuCI only with a valid session.
 The page itself gets two ucode modules from the package:
 
 ```
-import { create, verify } from 'tunnel_ddns.captcha';
+import { create, verify } from 'tunnel-ddns.captcha';
 let c = create({ language: 'en' });   // { id, png }: a base64 PNG (coloured letters and digits,
                                       // tilt, wave, noise); 'en' or 'ru'; null when too many
                                       // pictures are waiting for an answer
 verify(c.id, text)                    // true when text is the answer; checked once; case and
                                       // Latin/Cyrillic look-alikes do not matter
 
-import { login } from 'tunnel_ddns.login';
+import { login } from 'tunnel-ddns.login';
 login({ username, password, client: REMOTE_ADDR, https: true })
   // { cookie }                     logged in: send Set-Cookie and redirect to LuCI
   // { error: 'throttled', wait }   after three failures from an address: a 30 s pause,
@@ -175,7 +175,7 @@ login({ username, password, client: REMOTE_ADDR, https: true })
 ```
 
 The picture is assembled on the router without image libraries (a bitmap font in
-`/usr/share/tunnel_ddns/captcha-font.json`, the PNG is written by the module itself); the
-answer is kept in `/tmp/tunnel_ddns/captcha/` for three minutes. The package neither checks
+`/usr/share/tunnel-ddns/captcha-font.json`, the PNG is written by the module itself); the
+answer is kept in `/tmp/tunnel-ddns/captcha/` for three minutes. The package neither checks
 nor sets the root password: without one rpcd accepts any password, so set it in
 **System → Administration**.

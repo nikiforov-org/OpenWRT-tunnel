@@ -1,0 +1,17 @@
+{
+	"tunnel-server-xray": {
+		"description": "Manage the Xray server (VLESS + REALITY) of the router",
+		"read": {
+			"ubus": {
+				"tunnel-server-xray": [ "status", "keypair", "pubkey", "links", "log", "config" ]
+			},
+			"uci": [ "tunnel-server-xray" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel-server-xray": [ "restart" ]
+			},
+			"uci": [ "tunnel-server-xray" ]
+		}
+	}
+}

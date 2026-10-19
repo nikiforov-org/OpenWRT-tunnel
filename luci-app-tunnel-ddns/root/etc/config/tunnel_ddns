@@ -1,6 +1,0 @@
-config tunnel_ddns 'main'
-	option site_enabled '0'
-	option site 'default'
-	option site_port '443'
-	option site_schedule '0 3 * * *'
-	option ip_url 'https://ipv4-internet.yandex.net/api/v0/ip'

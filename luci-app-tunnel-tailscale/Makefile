@@ -10,7 +10,7 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 define Package/luci-app-tunnel-tailscale/conffiles
-/etc/config/tunnel_tailscale
+/etc/config/tunnel-tailscale
 endef
 
 define Package/luci-app-tunnel-tailscale/postinst
@@ -25,7 +25,7 @@ endef
 
 define Package/luci-app-tunnel-tailscale/prerm
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel_tailscale/sync revert >/dev/null 2>&1
+[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel-tailscale/sync revert >/dev/null 2>&1
 exit 0
 endef
 

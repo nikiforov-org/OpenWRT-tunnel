@@ -55,12 +55,12 @@ Everything only on **Save & Apply**, nothing at install time with the default co
 On a reinstall or upgrade the package's init script is started by apk, so an existing
 configuration is applied again right away.
 
-- `/etc/tunnel_server-hysteria2/config.json` (mode 600): the sing-box configuration generated
-  from `/etc/config/tunnel_server-hysteria2`, which gets mode 600 as well (it holds the
+- `/etc/tunnel-server-hysteria2/config.json` (mode 600): the sing-box configuration generated
+  from `/etc/config/tunnel-server-hysteria2`, which gets mode 600 as well (it holds the
   passwords). The file is replaced only after `sing-box check` accepts it; any error, from a
   missing certificate to a configuration rejected by sing-box, leaves the configuration in
   effect running and shows the reason in the overview. Only switching the server off stops it.
-- sing-box runs as a procd service of this package (`/etc/init.d/tunnel_server-hysteria2`,
+- sing-box runs as a procd service of this package (`/etc/init.d/tunnel-server-hysteria2`,
   as root so that it can read the certificate's private key), apart from the `sing-box`
   service of the `sing-box` package, which stays disabled as installed. A change of the
   generated file restarts it; the server off removes the file and stops it.
@@ -77,5 +77,5 @@ displays the file; **Show log** the sing-box messages from the system log;
 ## Removal
 
 `apk del luci-app-tunnel-server-hysteria2` removes the firewall rule and the generated
-configuration, stops sing-box and removes the files. `/etc/config/tunnel_server-hysteria2`
+configuration, stops sing-box and removes the files. `/etc/config/tunnel-server-hysteria2`
 stays unless `apk` is told to drop configuration files.

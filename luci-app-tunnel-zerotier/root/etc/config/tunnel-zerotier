@@ -1,0 +1,3 @@
+config tunnel-zerotier 'main'
+	option enabled '0'
+	option local_access '1'

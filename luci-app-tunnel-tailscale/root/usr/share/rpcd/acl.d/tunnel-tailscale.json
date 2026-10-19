@@ -1,0 +1,17 @@
+{
+	"tunnel-tailscale": {
+		"description": "Manage this router's Tailscale node",
+		"read": {
+			"ubus": {
+				"tunnel-tailscale": [ "status", "log" ]
+			},
+			"uci": [ "tunnel-tailscale" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel-tailscale": [ "login_link", "logout", "restart" ]
+			},
+			"uci": [ "tunnel-tailscale" ]
+		}
+	}
+}

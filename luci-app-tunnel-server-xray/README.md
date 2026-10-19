@@ -39,7 +39,7 @@ after installing; the entry appears in the **Tunnel** section.
    **XHTTP** if you want the second transport. If a router in front forwards a different
    public port, enter it under **Port in client links**.
 3. **Client links → Address**: the public name or IP address of the router (a domain from
-   the Dynamic DNS page). With the `tunnel_ddns` site on, the site's domain is used when
+   the Dynamic DNS page). With the `tunnel-ddns` site on, the site's domain is used when
    the field is empty.
 4. **Profiles → Add profile…**, give it a name (a UUID is filled in), **Save** in the dialog.
 5. Tick **Run the server** and click **Save & Apply**. The overview shows "Running" and the
@@ -58,12 +58,12 @@ Everything only on **Save & Apply**, nothing at install time with the default co
 On a reinstall or upgrade the package's init script is started by apk, so an existing
 configuration is applied again right away.
 
-- `/etc/tunnel_server-xray/config.json` (mode 600): the Xray configuration generated from
-  `/etc/config/tunnel_server-xray`, which gets mode 600 as well (it holds the private key and
+- `/etc/tunnel-server-xray/config.json` (mode 600): the Xray configuration generated from
+  `/etc/config/tunnel-server-xray`, which gets mode 600 as well (it holds the private key and
   the UUIDs). The file is replaced only after `xray run -test` accepts it; any error, from
   incomplete settings to a configuration rejected by xray, leaves the configuration in effect
   running and shows the reason in the overview. Only switching the server off stops it.
-- Xray runs as a procd service of this package (`/etc/init.d/tunnel_server-xray`), apart from
+- Xray runs as a procd service of this package (`/etc/init.d/tunnel-server-xray`), apart from
   the `xray` service of the `xray-core` package, which stays disabled as installed. A change
   of the generated file restarts it; the server off removes the file and stops it.
 - `/etc/config/firewall`: the rules `tunnel_server_xray_vision` and `tunnel_server_xray_xhttp`
@@ -78,5 +78,5 @@ from the system log; **Restart Xray** restarts the service.
 ## Removal
 
 `apk del luci-app-tunnel-server-xray` removes the firewall rules and the generated
-configuration, stops Xray and removes the files. `/etc/config/tunnel_server-xray` stays
+configuration, stops Xray and removes the files. `/etc/config/tunnel-server-xray` stays
 unless `apk` is told to drop configuration files; `xray-core` stays installed.

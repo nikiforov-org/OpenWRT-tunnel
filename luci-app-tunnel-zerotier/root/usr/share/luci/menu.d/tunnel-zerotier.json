@@ -1,0 +1,20 @@
+{
+	"admin/tunnel": {
+		"title": "Tunnel",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		}
+	},
+	"admin/tunnel/zerotier": {
+		"title": "ZeroTier",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "tunnel-zerotier"
+		},
+		"depends": {
+			"acl": [ "tunnel-zerotier" ]
+		}
+	}
+}

@@ -10,7 +10,7 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 define Package/luci-app-tunnel-server-xray/conffiles
-/etc/config/tunnel_server-xray
+/etc/config/tunnel-server-xray
 endef
 
 define Package/luci-app-tunnel-server-xray/postinst
@@ -25,7 +25,7 @@ endef
 
 define Package/luci-app-tunnel-server-xray/prerm
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel_server-xray/sync revert >/dev/null 2>&1
+[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel-server-xray/sync revert >/dev/null 2>&1
 exit 0
 endef
 

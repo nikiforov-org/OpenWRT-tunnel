@@ -1,8 +1,0 @@
-config tunnel_tailscale 'main'
-	option enabled '0'
-	option advertise_exit_node '1'
-	option accept_routes '0'
-	option accept_dns '0'
-	option ssh '0'
-	option shields_up '0'
-	option local_access '1'

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Makes root/usr/share/tunnel_ddns/captcha-font.json for the captcha module: the alphabet of
+"""Makes root/usr/share/tunnel-ddns/captcha-font.json for the captcha module: the alphabet of
 every supported language and a 1-bit bitmap of each character, rendered from a TrueType font.
 Every glyph has the same height (the line box of the font, so baselines match) and its own
 width (blank columns trimmed). Rows are strings of '.' and '#', readable as a picture.
@@ -7,7 +7,7 @@ width (blank columns trimmed). Rows are strings of '.' and '#', readable as a pi
 Needs Pillow. Any font that has the glyphs works; PT Sans Bold (SIL Open Font License) is used
 here. Run from the repository root:
 
-    python3 tunnel_ddns/tools/captcha-font.py
+    python3 tunnel-ddns/tools/captcha-font.py
 """
 import json
 import os
@@ -23,7 +23,7 @@ ALPHABETS = {
     # left out: O/0/Q, I/1, S/5, Z/2, B/8, G/6
     'en': 'ACDEFHJKLMNPRTUVWXY' + '2345679',
 }
-OUT = os.path.join(os.path.dirname(__file__), '..', 'root', 'usr', 'share', 'tunnel_ddns', 'captcha-font.json')
+OUT = os.path.join(os.path.dirname(__file__), '..', 'root', 'usr', 'share', 'tunnel-ddns', 'captcha-font.json')
 
 font = ImageFont.truetype(FONT_FILE, FONT_SIZE, index=FONT_INDEX)
 ascent, descent = font.getmetrics()

@@ -1,0 +1,21 @@
+{
+	"tunnel-ddns": {
+		"description": "Manage domains (DDNS), Let's Encrypt certificates and the web site served by the router",
+		"read": {
+			"ubus": {
+				"tunnel-ddns": [ "status", "ddns_log", "cert_log", "site_rebuild_log" ]
+			},
+			"uci": [ "tunnel-ddns" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel-ddns": [ "ddns_update", "cert_issue", "site_install", "site_delete", "site_rebuild", "set_port", "revert" ]
+			},
+			"uci": [ "tunnel-ddns" ],
+			"cgi-io": [ "upload" ],
+			"file": {
+				"/tmp/tunnel-ddns-upload.tar.gz": [ "write" ]
+			}
+		}
+	}
+}

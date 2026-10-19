@@ -45,13 +45,13 @@ Everything only on **Save & Apply**, nothing at install time with the default co
   tailscale service is enabled and started while Tailscale is switched on here, and brought
   down (`tailscale down`), stopped and disabled when it is switched off (only if it was
   switched on here: a tailscale service you run otherwise is left alone, marker
-  `/etc/tunnel_tailscale/managed`).
+  `/etc/tunnel-tailscale/managed`).
 - The node's preferences through `tailscale up --reset …` with the settings of the page and
   `--netfilter-mode=off` (the firewall rules come from the zone below, not from tailscaled).
-- `/etc/config/firewall`: the zone `tunnel_tailscale` (device `tailscale0`, input accepted or
+- `/etc/config/firewall`: the zone `tunnel-tailscale` (device `tailscale0`, input accepted or
   rejected by the access box) with forwarding to `wan`, and to and from `lan` with the
   access box; removed when Tailscale is switched off.
-- `/etc/config/tunnel_tailscale` gets mode 600 (it holds the auth key).
+- `/etc/config/tunnel-tailscale` gets mode 600 (it holds the auth key).
 
 **Show log** in the overview displays the Tailscale messages from the system log;
 **Restart Tailscale** restarts the service and applies the settings again; **Log out**
@@ -60,5 +60,5 @@ removes the router from the tailnet (a new login is needed afterwards).
 ## Removal
 
 `apk del luci-app-tunnel-tailscale` brings Tailscale down, stops the service, removes the
-firewall zone and removes the files. `/etc/config/tunnel_tailscale` and the login state in
+firewall zone and removes the files. `/etc/config/tunnel-tailscale` and the login state in
 `/etc/tailscale/` stay unless `apk` is told to drop configuration files.

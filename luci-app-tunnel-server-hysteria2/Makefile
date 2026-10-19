@@ -10,7 +10,7 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 define Package/luci-app-tunnel-server-hysteria2/conffiles
-/etc/config/tunnel_server-hysteria2
+/etc/config/tunnel-server-hysteria2
 endef
 
 define Package/luci-app-tunnel-server-hysteria2/postinst
@@ -25,7 +25,7 @@ endef
 
 define Package/luci-app-tunnel-server-hysteria2/prerm
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel_server-hysteria2/sync revert >/dev/null 2>&1
+[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel-server-hysteria2/sync revert >/dev/null 2>&1
 exit 0
 endef
 

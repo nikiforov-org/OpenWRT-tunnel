@@ -1,0 +1,20 @@
+{
+	"admin/tunnel": {
+		"title": "Tunnel",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		}
+	},
+	"admin/tunnel/tailscale": {
+		"title": "Tailscale",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "tunnel-tailscale"
+		},
+		"depends": {
+			"acl": [ "tunnel-tailscale" ]
+		}
+	}
+}

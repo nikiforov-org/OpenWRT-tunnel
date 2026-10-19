@@ -1,0 +1,355 @@
+#!/bin/sh
+# tunnel-ddns sync: make the system match /etc/config/tunnel-ddns.
+#   sync          apply the configuration (idempotent, restarts only what changed)
+#   sync revert   undo everything the package configured (used when the package is removed)
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+. /lib/functions.sh
+. /usr/libexec/tunnel-ddns/providers.sh
+
+MODE="${1:-apply}"
+SITES=/usr/share/www                 # document roots, one directory per site
+BACKENDS=/etc/tunnel-ddns/sites      # the sites' build scripts (the archive's .tunnel-ddns/)
+CERTS=/etc/ssl/tunnel-ddns
+ACME_HOME=/etc/acme
+STATE_DIR=/etc/tunnel-ddns
+UHTTPD_BACKUP="$STATE_DIR/uhttpd.backup"
+STATIC_NAME_FILE="$STATE_DIR/static.name"   # name of the link to LuCI's static files inside a served site
+LUCI_GATE=/usr/libexec/tunnel-ddns/luci-gate
+NOT_FOUND=/usr/libexec/tunnel-ddns/not-found
+SITEBUILD=/usr/libexec/tunnel-ddns/sitebuild
+
+changed_ddns=0
+changed_firewall=0
+changed_uhttpd=0
+changed_luci=0
+want_ddns=""
+want_cron=0
+
+log() {
+	logger -t tunnel-ddns "$*"
+}
+
+# set a uci option only when its value differs, remember which config changed
+uset() {
+	local cfg="$1" sec="$2" opt="$3" val="$4" cur
+	cur="$(uci -q get "$cfg.$sec.$opt")"
+	[ "$cur" = "$val" ] && return 0
+	uci set "$cfg.$sec.$opt=$val"
+	eval "changed_$cfg=1"
+}
+
+udel() {
+	local cfg="$1" sec="$2" opt="$3"
+	uci -q get "$cfg.$sec.$opt" >/dev/null 2>&1 || return 0
+	uci delete "$cfg.$sec.$opt"
+	eval "changed_$cfg=1"
+}
+
+config_load tunnel-ddns
+config_get_bool SITE_ENABLED main site_enabled 0
+config_get SITE main site default
+config_get SITE_DOMAIN main site_domain
+config_get SITE_PORT main site_port 443
+config_get SITE_SCHEDULE main site_schedule
+config_get IP_URL main ip_url 'https://ipv4-internet.yandex.net/api/v0/ip'
+
+case "$SITE_PORT" in ''|*[!0-9]*) SITE_PORT=443 ;; esac
+[ "$MODE" = apply ] || SITE_ENABLED=0
+
+# The site to serve: the selected one if it has a page, else the built-in default.
+SERVING=0
+if [ "$SITE_ENABLED" = 1 ]; then
+	[ -f "$SITES/$SITE/index.html" ] || SITE=default
+	[ -f "$SITES/$SITE/index.html" ] && SERVING=1
+fi
+# A site with its own login page takes over the LuCI login (see luci-gate).
+LOGIN_PAGE=0
+[ "$SERVING" = 1 ] && [ -f "$SITES/$SITE/cgi-bin/login" ] && LOGIN_PAGE=1
+
+# ---------- DDNS sections (ddns-scripts) ----------
+
+sync_domain() {
+	local sid="$1" enabled host dsec
+	config_get_bool enabled "$sid" enabled 0
+	config_get host "$sid" hostname
+	dsec="tunnel_ddns_$sid"
+
+	[ "$MODE" = apply ] && [ "$enabled" = 1 ] && [ -n "$host" ] || return 0
+	tdd_provider_ddns "$sid" || return 0
+
+	want_ddns="$want_ddns $dsec"
+	[ "$(uci -q get "ddns.$dsec")" = service ] || {
+		uci set "ddns.$dsec=service"
+		changed_ddns=1
+	}
+	uset ddns "$dsec" enabled 1
+	uset ddns "$dsec" service_name "$TDD_SERVICE"
+	uset ddns "$dsec" lookup_host "$host"
+	uset ddns "$dsec" domain "$TDD_DOMAIN"
+	if [ -n "$TDD_USER" ]; then uset ddns "$dsec" username "$TDD_USER"; else udel ddns "$dsec" username; fi
+	if [ -n "$TDD_PASS" ]; then uset ddns "$dsec" password "$TDD_PASS"; else udel ddns "$dsec" password; fi
+	if [ -n "$TDD_PARAM_OPT" ]; then uset ddns "$dsec" param_opt "$TDD_PARAM_OPT"; else udel ddns "$dsec" param_opt; fi
+	uset ddns "$dsec" use_ipv6 0
+	uset ddns "$dsec" ip_source web
+	uset ddns "$dsec" ip_url "$IP_URL"
+	uset ddns "$dsec" interface wan
+	uset ddns "$dsec" use_https 1
+	uset ddns "$dsec" cacert /etc/ssl/certs/ca-certificates.crt
+	uset ddns "$dsec" check_interval 10
+	uset ddns "$dsec" check_unit minutes
+	uset ddns "$dsec" force_interval 72
+	uset ddns "$dsec" force_unit hours
+	uset ddns "$dsec" retry_interval 60
+	uset ddns "$dsec" retry_unit seconds
+	uset ddns "$dsec" use_logfile 1
+
+	# a certificate issued for this domain keeps the renewal job scheduled
+	[ -f "$ACME_HOME/${host}_ecc/$host.conf" ] && want_cron=1
+}
+
+sync_ddns() {
+	local s
+	config_foreach sync_domain domain
+	for s in $(uci -q show ddns | sed -n 's/^ddns\.\(tunnel_ddns_[A-Za-z0-9_]*\)=service$/\1/p'); do
+		case " $want_ddns " in
+		*" $s "*) ;;
+		*) uci delete "ddns.$s"; changed_ddns=1 ;;
+		esac
+	done
+	[ "$changed_ddns" = 1 ] || return 0
+	uci commit ddns
+	chmod 600 /etc/config/ddns
+	/etc/init.d/ddns restart >/dev/null 2>&1
+	log "ddns sections updated: ${want_ddns:-none}"
+}
+
+# ---------- firewall ----------
+
+sync_firewall() {
+	if [ "$SERVING" = 1 ]; then
+		[ "$(uci -q get firewall.tunnel_ddns_https)" = rule ] || {
+			uci set firewall.tunnel_ddns_https=rule
+			changed_firewall=1
+		}
+		uset firewall tunnel_ddns_https name 'tunnel-ddns: HTTPS from WAN'
+		uset firewall tunnel_ddns_https src wan
+		uset firewall tunnel_ddns_https proto tcp
+		uset firewall tunnel_ddns_https dest_port "$SITE_PORT"
+		uset firewall tunnel_ddns_https target ACCEPT
+		uset firewall tunnel_ddns_https enabled 1
+	else
+		[ "$(uci -q get firewall.tunnel_ddns_https)" = rule ] && {
+			uci delete firewall.tunnel_ddns_https
+			changed_firewall=1
+		}
+	fi
+	[ "$changed_firewall" = 1 ] || return 0
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+	log "firewall rule tunnel_ddns_https: $([ "$SERVING" = 1 ] && echo "port $SITE_PORT" || echo removed)"
+}
+
+# ---------- LuCI entry points inside a site's document root ----------
+# Every /www/cgi-bin/* entry is linked by name into the served site's root, and LuCI's static
+# files (/www/luci-static) under a random name that is made once and kept in STATIC_NAME_FILE,
+# so that nothing in the site's address space names the administration software; LuCI is
+# told the new location through its resourcebase/mediaurlbase options. The same link is
+# also placed under /www while a site is served, because some LuCI pages (the status
+# overview) look their parts up on disk at /www + the resource URL. With a site login page,
+# cgi-bin/luci points at the gate instead of the stock dispatcher. A file the site ships
+# under the same name is left alone.
+
+static_name() {
+	[ -s "$STATIC_NAME_FILE" ] || { mkdir -p "$STATE_DIR"; tr -dc a-f0-9 < /dev/urandom | head -c 16 > "$STATIC_NAME_FILE"; }
+	cat "$STATIC_NAME_FILE"
+}
+
+link_set() { # link_set LINK TARGET
+	[ -L "$1" ] && [ "$(readlink "$1")" = "$2" ] && return 0
+	[ -e "$1" ] && [ ! -L "$1" ] && return 0
+	ln -sfn "$2" "$1"
+}
+
+link_remove() { # link_remove LINK: only a link into /www or to this package's scripts is removed
+	[ -L "$1" ] || return 0
+	case "$(readlink "$1")" in /www/*|/usr/libexec/tunnel-ddns/*) rm -f "$1" ;; esac
+}
+
+site_links() { # site_links add|remove DIR
+	local dir="$2" entry target
+	[ -d "$dir" ] || return 0
+	[ -L "$dir/cgi-bin" ] && rm -f "$dir/cgi-bin"      # one link for the whole directory: package 1.0.0-r1
+	if [ "$1" = add ]; then
+		mkdir -p "$dir/cgi-bin"
+		for entry in /www/cgi-bin/*; do
+			target="$entry"
+			[ "$LOGIN_PAGE" = 1 ] && [ "${entry##*/}" = luci ] && target="$LUCI_GATE"
+			link_set "$dir/cgi-bin/${entry##*/}" "$target"
+		done
+		link_set "$dir/cgi-bin/not-found" "$NOT_FOUND"
+		link_set "$dir/$(static_name)" /www/luci-static
+	else
+		for entry in "$dir"/cgi-bin/*; do link_remove "$entry"; done
+		rmdir "$dir/cgi-bin" 2>/dev/null
+	fi
+	for entry in "$dir"/* "$dir"/.[!.]*; do     # any link to LuCI's static files that is not the current one
+		[ -L "$entry" ] && [ "$(readlink "$entry")" = /www/luci-static ] && { [ "$1" = add ] && [ "$entry" = "$dir/$(static_name)" ] || rm -f "$entry"; }
+	done
+	return 0
+}
+
+# ---------- uhttpd ----------
+
+set_listen_https() { # $1 = space-separated listen items; sets uhttpd.main.listen_https if changed
+	local want="$1" cur it
+	cur="$(uci -q get uhttpd.main.listen_https)"
+	[ "$cur" = "$want" ] && return 0
+	uci -q delete uhttpd.main.listen_https
+	for it in $want; do uci add_list uhttpd.main.listen_https="$it"; done
+	changed_uhttpd=1
+}
+
+backup_get() { # backup_get KEY: the stock value saved before the site was first switched on
+	sed -n "s/^$1=//p" "$UHTTPD_BACKUP"
+}
+
+sync_uhttpd() {
+	local want_home="" want_cert="" want_key="" want_https="" want_ubus="" want_dirlists="" want_errorpage="" want_resources="" want_media="" want_ubuspath="" host d theme
+
+	if [ "$SERVING" = 1 ]; then
+		if [ ! -f "$UHTTPD_BACKUP" ]; then
+			mkdir -p "$STATE_DIR"
+			{
+				echo "home=$(uci -q get uhttpd.main.home)"
+				echo "cert=$(uci -q get uhttpd.main.cert)"
+				echo "key=$(uci -q get uhttpd.main.key)"
+				echo "https=$(uci -q get uhttpd.main.listen_https)"
+				echo "ubus=$(uci -q get uhttpd.main.ubus_prefix)"
+				echo "dirlists=$(uci -q get uhttpd.main.no_dirlists)"
+				echo "errorpage=$(uci -q get uhttpd.main.error_page)"
+				echo "resourcebase=$(uci -q get luci.main.resourcebase)"
+				echo "mediaurlbase=$(uci -q get luci.main.mediaurlbase)"
+				echo "ubuspath=$(uci -q get luci.main.ubuspath)"
+			} > "$UHTTPD_BACKUP"
+		fi
+		want_home="$SITES/$SITE"
+		want_https="0.0.0.0:$SITE_PORT [::]:$SITE_PORT"
+		host="$(uci -q get "tunnel-ddns.$SITE_DOMAIN.hostname")"
+		if [ -n "$host" ] && [ -s "$CERTS/$host/fullchain.pem" ] && [ -s "$CERTS/$host/key.pem" ]; then
+			want_cert="$CERTS/$host/fullchain.pem"
+			want_key="$CERTS/$host/key.pem"
+		else
+			want_cert="$(backup_get cert)"
+			want_key="$(backup_get key)"
+		fi
+		# With a site login page every login must pass through it, so the direct JSON-RPC
+		# endpoint (/ubus) is switched off and LuCI is told to use its RPC path through
+		# cgi-bin/luci, which the gate protects.
+		if [ "$LOGIN_PAGE" = 1 ]; then
+			want_ubuspath=/cgi-bin/luci/admin/ubus/
+		else
+			want_ubus="$(backup_get ubus)"
+			want_ubuspath="$(backup_get ubuspath)"
+		fi
+		# no directory listings, every missing address answered by not-found (the site's own
+		# 404.html with status 404), and LuCI's static files under their random name
+		want_dirlists=1
+		want_errorpage=/cgi-bin/not-found
+		theme="$(basename "$(backup_get mediaurlbase)")"; [ -n "$theme" ] || theme=bootstrap
+		want_resources="/$(static_name)/resources"
+		want_media="/$(static_name)/$theme"
+		for d in "$SITES"/*/; do [ "$d" = "$want_home/" ] || site_links remove "${d%/}"; done
+		site_links add "$want_home"
+		link_set "/www/$(static_name)" /www/luci-static
+	else
+		[ -f "$UHTTPD_BACKUP" ] || return 0
+		want_home="$(backup_get home)"
+		want_cert="$(backup_get cert)"
+		want_key="$(backup_get key)"
+		want_https="$(backup_get https)"
+		want_ubus="$(backup_get ubus)"
+		want_dirlists="$(backup_get dirlists)"
+		want_errorpage="$(backup_get errorpage)"
+		want_resources="$(backup_get resourcebase)"
+		want_media="$(backup_get mediaurlbase)"
+		want_ubuspath="$(backup_get ubuspath)"
+		[ -n "$want_home" ] || want_home=/www
+		[ -n "$want_https" ] || want_https="0.0.0.0:443 [::]:443"
+		[ -n "$want_ubus" ] || want_ubus=/ubus
+		[ -n "$want_resources" ] || want_resources=/luci-static/resources
+		[ -n "$want_media" ] || want_media=/luci-static/bootstrap
+		[ -n "$want_ubuspath" ] || want_ubuspath=/ubus/
+		for d in "$SITES"/*/; do site_links remove "${d%/}"; done
+		[ -s "$STATIC_NAME_FILE" ] && link_remove "/www/$(static_name)"
+	fi
+
+	uset uhttpd main home "$want_home"
+	if [ -n "$want_cert" ]; then
+		uset uhttpd main cert "$want_cert"
+		uset uhttpd main key "$want_key"
+	else
+		udel uhttpd main cert
+		udel uhttpd main key
+	fi
+	set_listen_https "$want_https"
+	if [ -n "$want_ubus" ]; then
+		uset uhttpd main ubus_prefix "$want_ubus"
+	else
+		udel uhttpd main ubus_prefix
+	fi
+	if [ -n "$want_dirlists" ]; then uset uhttpd main no_dirlists "$want_dirlists"; else udel uhttpd main no_dirlists; fi
+	if [ -n "$want_errorpage" ]; then uset uhttpd main error_page "$want_errorpage"; else udel uhttpd main error_page; fi
+	if [ -n "$want_resources" ]; then uset luci main resourcebase "$want_resources"; else udel luci main resourcebase; fi
+	if [ -n "$want_media" ]; then uset luci main mediaurlbase "$want_media"; else udel luci main mediaurlbase; fi
+	if [ -n "$want_ubuspath" ]; then uset luci main ubuspath "$want_ubuspath"; else udel luci main ubuspath; fi
+	[ "$changed_luci" = 1 ] && { uci commit luci; rm -f /tmp/luci-indexcache*; }
+	[ "$SERVING" = 1 ] || rm -f "$UHTTPD_BACKUP"
+	[ "$changed_uhttpd" = 1 ] || return 0
+	uci commit uhttpd
+	sleep 2        # let LuCI confirm its apply before the web server goes away for a moment
+	/etc/init.d/uhttpd restart >/dev/null 2>&1
+	log "uhttpd: home=$want_home port=$SITE_PORT cert=${want_cert:-none} login_page=$LOGIN_PAGE"
+}
+
+# ---------- cron: certificate renewal and the site's build schedule ----------
+
+valid_schedule() { # five cron time fields made of digits, '*', ',', '/' and '-'
+	set -f; set -- $1; set +f     # split into fields without expanding the '*'
+	[ $# -eq 5 ] || return 1
+	for f in "$@"; do
+		case "$f" in *[!0-9*,/-]*) return 1 ;; esac
+	done
+	return 0
+}
+
+sync_cron() {
+	local site_line="" current wanted
+	if [ "$SERVING" = 1 ] && [ -x "$BACKENDS/$SITE/build" ] && [ -n "$SITE_SCHEDULE" ]; then
+		if valid_schedule "$SITE_SCHEDULE"; then
+			site_line="$SITE_SCHEDULE $SITEBUILD $SITE # tunnel-ddns-site"
+		else
+			log "site schedule '$SITE_SCHEDULE' is not a valid cron time, not scheduled"
+		fi
+	fi
+	wanted="$(
+		[ "$want_cron" = 1 ] && echo "17 3 * * * /usr/libexec/tunnel-ddns/cert renew-all # tunnel-ddns-cert"
+		[ -n "$site_line" ] && echo "$site_line"
+	)"
+	current="$(grep '# tunnel-ddns-' /etc/crontabs/root 2>/dev/null)"
+	[ "$current" = "$wanted" ] && return 0
+	mkdir -p /etc/crontabs
+	{
+		grep -v '# tunnel-ddns-' /etc/crontabs/root 2>/dev/null
+		[ -n "$wanted" ] && echo "$wanted"
+	} > /etc/crontabs/root.tdd
+	mv /etc/crontabs/root.tdd /etc/crontabs/root
+	/etc/init.d/cron restart >/dev/null 2>&1
+	log "cron: cert=$want_cron site=$([ -n "$site_line" ] && echo yes || echo no)"
+}
+
+sync_ddns
+sync_firewall
+sync_uhttpd
+sync_cron
+exit 0
