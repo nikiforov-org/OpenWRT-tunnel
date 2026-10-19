@@ -101,6 +101,7 @@ everything off).
   administration.
 - Uploaded sites: the public files in `/usr/share/www/<name>/`, the archive's `.tunnel_ddns/`
   directory (the build script and everything for it) in `/etc/tunnel_ddns/sites/<name>/`.
+  The result of a site's last build is kept in `/etc/tunnel_ddns/state/`.
 - Certificates: acme.sh's working files in `/etc/acme/<domain>_ecc/`, copies for the web
   server in `/etc/ssl/tunnel_ddns/<domain>/fullchain.pem` and `key.pem`.
 - The `dns_begetdns` hook in `/usr/lib/acme/client/dnsapi/`: it only uses
@@ -139,8 +140,8 @@ SITE_TMP     a scratch directory kept between runs (under /tmp, lost on reboot)
 The build runs right after the upload, on the schedule and on the button. For such a site
 the **Web site** section shows the **Rebuild schedule** field (a cron time, five fields; empty
 means only on the button), the **Rebuild now** button and **Rebuild log**. The schedule
-line lives in `/etc/crontabs/root`; the log and the result of the last build in
-`/tmp/tunnel_ddns/`.
+line lives in `/etc/crontabs/root`; the log of the last build in
+`/tmp/tunnel_ddns/` (lost on a reboot), its result in `/etc/tunnel_ddns/state/`.
 
 ## Own login page
 

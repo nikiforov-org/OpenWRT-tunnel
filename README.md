@@ -9,8 +9,8 @@ Docker is needed (OrbStack, for example). The script builds **unsigned** `.apk` 
 OpenWrt 25.12 into `dist/` with the official OpenWrt SDK:
 
 ```sh
-./build.sh            # 25.12.5 by default
-./build.sh 25.12.5
+./build.sh            # 25.12.6 by default
+./build.sh 25.12.6
 ```
 
 Every package is a directory `luci-app-tunnel_<name>/` with a `Makefile` based on `luci.mk`. The last
@@ -31,7 +31,7 @@ alternative is `scp -O`, the old protocol).
 
 ```sh
 # ROUTER is the router's address, e.g. 192.168.1.1
-ssh root@ROUTER 'cat > /tmp/luci-app-tunnel_ddns.apk' < dist/luci-app-tunnel_ddns-1.0.0-r2.apk
+ssh root@ROUTER 'cat > /tmp/luci-app-tunnel_ddns.apk' < dist/luci-app-tunnel_ddns-1.0.0-r1.apk
 ssh root@ROUTER 'apk update'
 ssh root@ROUTER 'apk add --allow-untrusted /tmp/luci-app-tunnel_ddns.apk'
 ```
@@ -42,7 +42,7 @@ permissions are cached per session): the packages appear in the **Tunnel** secti
 menu.
 
 Upgrading uses the same commands: `apk add` replaces the installed package in place even when
-the version number has not changed (`Replacing luci-app-tunnel_ddns (1.0.0-r2 -> 1.0.0-r2)`) and runs
+the version number has not changed (`Replacing luci-app-tunnel_ddns (1.0.0-r1 -> 1.0.0-r1)`) and runs
 the package's postinst (LuCI cache reset, rpcd restart).
 
 Removing: `apk del luci-app-tunnel_ddns`.
@@ -52,3 +52,4 @@ Removing: `apk del luci-app-tunnel_ddns`.
 | Package | LuCI menu | Purpose |
 |---|---|---|
 | [`luci-app-tunnel_ddns`](luci-app-tunnel_ddns/README.md) | Tunnel → Dynamic DNS | domains at several providers (dynamic DNS), Let's Encrypt certificates with automatic renewal, a web site served over HTTPS from the router; a site may have its own scheduled build and its own login page in place of the standard LuCI login. Setup: [luci-app-tunnel_ddns/README.md](luci-app-tunnel_ddns/README.md) |
+| [`luci-app-tunnel_server-xray`](luci-app-tunnel_server-xray/README.md) | Tunnel → Xray server | a VLESS + REALITY server (Xray) with two transports, TCP + XTLS-Vision and XHTTP; clients with links and QR codes, keys generated on the router, firewall rules while it runs. Setup: [luci-app-tunnel_server-xray/README.md](luci-app-tunnel_server-xray/README.md) |

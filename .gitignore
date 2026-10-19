@@ -18,3 +18,6 @@ credentials.md
 # internal notes, not for the public repository
 CLAUDE.md
 luci-app-tunnel_ddns/REQUIREMENTS.md
+
+# certificates saved from the router for DEV checks (private keys)
+/certs/

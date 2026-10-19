@@ -7,7 +7,7 @@ LUCI_MAINTAINER:=Evgenii Nikiforov
 LUCI_URL:=https://github.com/nikiforov-org/OpenWRT-tunnel
 
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=2
+PKG_RELEASE:=1
 
 define Package/luci-app-tunnel_ddns/conffiles
 /etc/config/tunnel_ddns

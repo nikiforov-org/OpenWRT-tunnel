@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REL="${1:-25.12.5}"
+REL="${1:-25.12.6}"
 SDK="openwrt/sdk:x86-64-${REL}"
 REPO="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$REPO/dist"

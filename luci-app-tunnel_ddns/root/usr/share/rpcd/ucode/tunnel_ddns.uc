@@ -11,6 +11,7 @@ const BACKENDS  = '/etc/tunnel_ddns/sites';    // the sites' build scripts (the 
 const CERTS     = '/etc/ssl/tunnel_ddns';
 const ACME_HOME = '/etc/acme';
 const RUN       = '/tmp/tunnel_ddns';
+const STATE     = '/etc/tunnel_ddns/state';     // result of the last site build, kept across reboots
 const UPLOAD    = '/tmp/tunnel_ddns-upload.tar.gz';
 const DDNS_RUN  = '/var/run/ddns';
 const DDNS_LOG  = '/var/log/ddns';
@@ -125,7 +126,7 @@ function parse_state(path, timeout) {
 }
 
 function job_state(sid) { return parse_state(`${RUN}/cert-${sid}.state`, 120); }
-function site_job_state(name) { return parse_state(`${RUN}/site-${name}.state`, 120); }
+function site_job_state(name) { return parse_state(`${STATE}/site-${name}.state`, 120); }
 
 function svc_running(name) {
 	let r = exec(`ubus call service list ${shq('{"name":"' + name + '"}')} 2>/dev/null`);
@@ -167,7 +168,8 @@ function site_list() {
 // starts a build of the site in the background; sitebuild reports through the state file
 function start_build(name) {
 	mkdir(RUN, 0o755);
-	writefile(`${RUN}/site-${name}.state`, `starting ${time()}`);
+	mkdir(STATE, 0o755);
+	writefile(`${STATE}/site-${name}.state`, `starting ${time()}`);
 	exec(`setsid ${SITEBUILD} ${shq(name)} >/dev/null 2>&1 </dev/null &`);
 }
 
@@ -399,6 +401,7 @@ methods.site_delete = {
 			uci.commit(CFG);
 		}
 		exec(`rm -rf ${shq(SITES + '/' + name)} ${shq(BACKENDS + '/' + name)}`);
+		unlink(`${STATE}/site-${name}.state`);
 		if (was_active)
 			exec(`${SYNC} 2>&1`);
 		return { ok: true, switched_to_default: was_active };
