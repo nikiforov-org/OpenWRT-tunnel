@@ -44,7 +44,10 @@ after installing.
 - **DNS.** dnsmasq asks xray only. xray resolves the names that go through the tunnel at the
   resolver set on the page (1.1.1.1 by default) through the active link, and the other names
   at the provider's resolvers; a listed name never falls back to the provider when the tunnel
-  is down. The names of the servers themselves are always resolved at the provider.
+  is down. The names of the servers themselves are always resolved at the provider. When an
+  interface of the firewall zone `wan` comes up or goes down (a second uplink such as a USB
+  modem, a cable pulled), the client applies its settings again, so the provider's resolvers
+  are always those of the uplinks that are up.
 - **The active link.** *By hand*: strictly the chosen profile and transport, even when it
   fails. *Automatic*: every N minutes (10 by default) the test payload is downloaded through
   every link of every profile at once; the fastest replaces the active one when it is faster by
