@@ -56,7 +56,7 @@ config_get IP_URL main ip_url 'https://ipv4-internet.yandex.net/api/v0/ip'
 
 case "$SITE_PORT" in ''|*[!0-9]*) SITE_PORT=443 ;; esac
 [ "$MODE" = apply ] || SITE_ENABLED=0
-XRAY_CONF=/etc/tunnel-server-xray/config.json    # the Xray server's configuration in effect
+XRAY_CONF=/etc/tunnel-server/config.json         # the xray server's configuration in effect
 BEHIND_PORT=4443                                 # where uhttpd serves HTTPS while Xray holds its port
 
 # The site to serve: the selected one if it has a page, else the built-in default.
@@ -81,8 +81,9 @@ if [ "$SERVING" != 1 ]; then
 	case "$HTTPS_PORT" in ''|*[!0-9]*) HTTPS_PORT=443 ;; esac
 fi
 XRAY_FRONT=0
-if [ -s "$XRAY_CONF" ] && [ "$(uci -q get tunnel-server-xray.main.enabled)" = 1 ]; then
-	for p in $(jsonfilter -i "$XRAY_CONF" -e '@.inbounds[*].port' 2>/dev/null); do
+if [ -s "$XRAY_CONF" ] && [ "$(uci -q get tunnel-server.main.enabled)" = 1 ]; then
+	# only the TCP transports (VLESS) take the site's port; Hysteria2 listens on UDP
+	for p in $(jsonfilter -i "$XRAY_CONF" -e '@.inbounds[@.protocol="vless"].port' 2>/dev/null); do
 		[ "$p" = "$HTTPS_PORT" ] && XRAY_FRONT=1
 	done
 fi

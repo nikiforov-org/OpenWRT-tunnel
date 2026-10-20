@@ -1,5 +1,0 @@
-config tunnel-server-hysteria2 'main'
-	option enabled '0'
-	option port '443'
-	option cert_source 'ddns'
-	option local_access '1'

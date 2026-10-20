@@ -1,0 +1,20 @@
+{
+	"admin/tunnel": {
+		"title": "Tunnel",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		}
+	},
+	"admin/tunnel/client": {
+		"title": "Client",
+		"order": 25,
+		"action": {
+			"type": "view",
+			"path": "tunnel-client"
+		},
+		"depends": {
+			"acl": [ "tunnel-client" ]
+		}
+	}
+}

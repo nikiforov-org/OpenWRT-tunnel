@@ -1,7 +1,0 @@
-{
-	"package": "tunnel-client-hysteria2",
-	"title": "Hysteria2",
-	"description": "hysteria2:// links (QUIC over UDP), optional Salamander obfuscation and certificate pinning.",
-	"schemes": [ "hysteria2", "hy2" ],
-	"config": "tunnel-client-hysteria2"
-}

@@ -80,12 +80,13 @@ configuration. On a reinstall or upgrade the package's init script is started by
 existing configuration is applied again right away (useful after `apk del`, which switches
 everything off).
 
-- With the Xray server of `luci-app-tunnel-server-xray` running on the site's HTTPS port
-  (443 by default), the site is served behind it: uhttpd listens for HTTPS on `127.0.0.1:4443`
-  only, the port is opened by the Xray package's rule, and the overview says so. Xray passes
-  every visitor that is not one of its clients through to the site; the site's own login page
-  and LuCI work the same way. The decision is taken from Xray's configuration file in effect
-  (`/etc/tunnel-server-xray/config.json`) on every `sync`, which the Xray package runs after
+- With a VLESS transport of the server of `luci-app-tunnel-server` running on the site's
+  HTTPS port (TCP 443 by default), the site is served behind it: uhttpd listens for HTTPS on
+  `127.0.0.1:4443` only, the port is opened by the server package's rule, and the overview
+  says so. xray passes every connection without a client key through to the site; the site's
+  own login page and LuCI work the same way. Hysteria2 listens on UDP and does not take the
+  site's port. The decision is taken from the server's configuration file in effect
+  (`/etc/tunnel-server/config.json`) on every `sync`, which the server package runs after
   each change of its own.
 
 - `/etc/config/ddns`: sections `tunnel_ddns_<id>` for every enabled domain; the file gets

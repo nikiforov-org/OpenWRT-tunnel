@@ -1,0 +1,129 @@
+#!/usr/bin/env ucode
+// measure [health]: downloads the test payload through every client at once (each client has its own
+// local tap in xray: a fixed forward to the test host through that client only) and records speed and
+// latency in /tmp/tunnel-client/measure.json and history.json. In the automatic mode the fastest
+// client becomes the active one when it beats the current one by the threshold, or at once when the
+// current one failed. "health" checks only the active client with a small download and runs the full
+// measurement when it fails. The default test target is the server's own site through the tunnel,
+// https://127.0.0.1/cgi-bin/speed?bytes=N (the site of luci-app-tunnel-ddns serves it); a link may
+// name its own URL.
+
+'use strict';
+
+import { readfile, writefile, mkdir, unlink, stat } from 'fs';
+import { cursor } from 'uci';
+import { RUN, shq, exec } from 'tunnel-client.common';
+
+const CFG   = 'tunnel-client';
+const STATE = `${RUN}/state.json`;
+const OUT   = `${RUN}/measure.json`;
+const HIST  = `${RUN}/history.json`;
+const LOCK  = `${RUN}/measure.lock`;
+const AUTO  = '/etc/tunnel-client/auto.json';
+const API   = '127.0.0.1:61085';
+const HISTORY = 24;
+
+function log(msg) { system(`logger -t ${CFG} ${shq(msg)}`); }
+
+function read_json(path, dflt) {
+	let v = null;
+	try { v = json(readfile(path) ?? ''); } catch (e) { v = null; }
+	return (type(v) == type(dflt)) ? v : dflt;
+}
+
+function current_active() {
+	return trim(exec(`xray api bi --server=${API} active 2>/dev/null | awk '/Selecting Override:/{s="o";next} /Selects:/{s="s";next} /^[ \\t]*[0-9]+[ \\t]+/{if(s=="o"&&o=="")o=$2; if(s=="s"&&x=="")x=$2} END{print (o!="")?o:x}'`).out);
+}
+
+// the curl command for one client: through its tap; the URL's host keeps its name for TLS
+function curl_cmd(c, bytes, timeout, out) {
+	let fmt = "'%{http_code} %{size_download} %{time_total} %{time_starttransfer} %{speed_download} %{errormsg}'";
+	if (length(c.test_url)) {
+		let m = match(c.test_url, /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
+		let port = (m && m[4]) ? m[4] : ((m && m[1] == 'http') ? '80' : '443');
+		return `curl -sk -m ${timeout} --connect-to ${shq((m ? m[2] : '') + ':' + port + ':127.0.0.1:' + c.tap_port)} -o /dev/null -w ${fmt} ${shq(c.test_url)} > ${shq(out)} 2>/dev/null &\n`;
+	}
+	return `curl -sk -m ${timeout} -o /dev/null -w ${fmt} 'https://127.0.0.1:${c.tap_port}/cgi-bin/speed?bytes=${bytes}' > ${shq(out)} 2>/dev/null &\n`;
+}
+
+// runs the downloads through all given clients at once; returns { tag: result }
+function run(clients, bytes, timeout) {
+	let cmd = '';
+	for (let c in clients) cmd += curl_cmd(c, bytes, timeout, `${RUN}/m-${c.tag}.out`);
+	system(cmd + 'wait\n');
+	let out = {};
+	for (let c in clients) {
+		let f = `${RUN}/m-${c.tag}.out`, p = split(trim(readfile(f) ?? ''), ' ');
+		unlink(f);
+		let r = { time: time(), http: int(p[0] ?? 0), bytes: int(p[1] ?? 0), total: +(p[2] ?? 0), latency: +(p[3] ?? 0),
+		          speed: int(+(p[4] ?? 0)), error: join(' ', slice(p, 5)) };
+		r.ok = (r.http == 200 && r.bytes > 0);
+		if (!r.ok && !length(r.error)) r.error = r.http ? `HTTP ${r.http}` : 'no answer';
+		out[c.tag] = r;
+	}
+	return out;
+}
+
+// ---- main ----
+
+let uci = cursor();
+uci.load(CFG);
+let main = uci.get_all(CFG, 'main') ?? {};
+if (main.enabled != '1') exit(0);
+let st = read_json(STATE, {});
+let clients = (type(st.clients) == 'array') ? st.clients : [];
+if (!length(clients)) exit(0);
+mkdir(RUN, 0o755);
+let s = stat(LOCK);
+if (s && time() - s.mtime < 300) exit(0);
+writefile(LOCK, `${time()}\n`);
+
+let bytes = int(main.test_bytes ?? 5000000); if (bytes < 10000) bytes = 10000; if (bytes > 20000000) bytes = 20000000;
+let timeout = int(main.test_timeout ?? 30); if (timeout < 5) timeout = 5;
+let threshold = int(main.test_threshold ?? 20); if (threshold < 0) threshold = 0;
+let active = current_active();
+
+if (ARGV[0] == 'health') {
+	let cur = filter(clients, c => c.tag == active);
+	if (!length(cur)) { unlink(LOCK); exit(0); }
+	let r = run(cur, 1000, 10)[active];
+	let m = read_json(OUT, {});
+	m.health = { time: time(), tag: active, ok: r.ok, error: r.error };
+	writefile(OUT, sprintf('%J\n', m));
+	if (r.ok || main.mode == 'manual') { unlink(LOCK); exit(0); }
+	log(`health check of ${active} failed (${r.error}): measuring all clients`);
+}
+
+let results = run(clients, bytes, timeout);
+let hist = read_json(HIST, {});
+for (let tag, r in results) {
+	let h = (type(hist[tag]) == 'array') ? hist[tag] : [];
+	push(h, { time: r.time, speed: r.speed, latency: r.latency, ok: r.ok });
+	if (length(h) > HISTORY) h = slice(h, length(h) - HISTORY);
+	hist[tag] = h;
+}
+for (let tag in keys(hist)) if (!length(filter(clients, c => c.tag == tag))) delete hist[tag];
+writefile(HIST, sprintf('%J\n', hist));
+
+let decision = '', switched = '';
+if (main.mode != 'manual') {
+	let best = null;
+	for (let c in clients) {
+		let r = results[c.tag];
+		if (r.ok && (best == null || r.speed > results[best].speed)) best = c.tag;
+	}
+	let cur = results[active] ?? null;
+	if (best == null) decision = 'no client answered; nothing changed';
+	else if (!cur || !cur.ok) { decision = `${active || 'none'} failed, ${best} is the fastest`; switched = best; }
+	else if (best != active && results[best].speed > cur.speed * (100 + threshold) / 100) { decision = `${best} is more than ${threshold}% faster than ${active}`; switched = best; }
+	else decision = `${active} stays (best ${best})`;
+	if (switched && switched != active) {
+		writefile(AUTO, sprintf('%J\n', { active: switched, time: time(), reason: decision }));
+		if (exec(`/usr/libexec/tunnel-client/select ${shq(switched)}`).code != 0) decision += ' (switching failed)';
+	}
+	else switched = '';
+}
+writefile(OUT, sprintf('%J\n', { time: time(), bytes: bytes, mode: main.mode ?? 'auto', active_before: active, active_after: switched || active,
+                                 decision: decision, clients: results, health: read_json(OUT, {}).health ?? null }));
+log(`measured ${length(clients)} clients: ` + join(', ', map(clients, c => `${c.tag} ${results[c.tag].ok ? int(results[c.tag].speed / 1024) + ' KB/s' : 'failed'}`)) + (decision ? `; ${decision}` : ''));
+unlink(LOCK);

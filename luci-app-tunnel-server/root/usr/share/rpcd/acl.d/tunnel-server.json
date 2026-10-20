@@ -1,0 +1,17 @@
+{
+	"tunnel-server": {
+		"description": "Manage the xray server of the router (VLESS + REALITY, Hysteria2)",
+		"read": {
+			"ubus": {
+				"tunnel-server": [ "status", "keypair", "pubkey", "links", "log", "config" ]
+			},
+			"uci": [ "tunnel-server" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel-server": [ "restart" ]
+			},
+			"uci": [ "tunnel-server" ]
+		}
+	}
+}

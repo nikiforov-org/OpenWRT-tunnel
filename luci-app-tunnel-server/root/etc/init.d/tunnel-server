@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+# Runs xray with the configuration that sync generates from /etc/config/tunnel-server: one
+# process for every enabled transport (TCP + XTLS-Vision, XHTTP, Hysteria2). LuCI's apply
+# triggers a reload: sync runs again and procd restarts xray only when the generated file
+# changed; with the server switched off the file is removed and xray stops.
+
+START=99
+USE_PROCD=1
+
+PROG=/usr/bin/xray
+CONF=/etc/tunnel-server/config.json
+
+start_service() {
+	/usr/libexec/tunnel-server/sync
+	[ -s "$CONF" ] && [ -x "$PROG" ] || return 0
+	procd_open_instance xray
+	procd_set_param command "$PROG" run -config "$CONF"
+	procd_set_param file "$CONF"
+	procd_set_param limits nofile="16384 16384"
+	procd_set_param respawn
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "tunnel-server"
+}

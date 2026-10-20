@@ -1,0 +1,24 @@
+config tunnel-client 'main'
+	option enabled '0'
+	option mode 'auto'
+	option active ''
+	option split '1'
+	option split_mode 'list'
+	option resolver '1.1.1.1'
+	option test_interval '10'
+	option test_bytes '5000000'
+	option test_threshold '20'
+	option test_timeout '30'
+	list rule 'ru'
+	list rule 'su'
+	list rule 'xn--p1ai'
+
+config source
+	option name 'ru-subnets'
+	option url 'https://raw.githubusercontent.com/ipverse/rir-ip/master/country/ru/ipv4-aggregated.txt'
+	option enabled '1'
+
+config source
+	option name 'ru-services'
+	option url 'https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/category-ru'
+	option enabled '1'

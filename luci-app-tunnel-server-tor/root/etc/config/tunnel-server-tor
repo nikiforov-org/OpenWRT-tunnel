@@ -1,6 +1,0 @@
-config tunnel-server-tor 'main'
-	option enabled '0'
-	option bridges 'builtin'
-	list port '22'
-	list port '80'
-	list port '443'
