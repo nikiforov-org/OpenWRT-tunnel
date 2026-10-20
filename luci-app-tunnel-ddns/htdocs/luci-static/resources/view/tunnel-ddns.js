@@ -128,6 +128,8 @@ return view.extend({
 
 	overviewAccess: function() {
 		var m = this.status.main || {};
+		if (m.xray_front)
+			return span(COLOR.ok, _('Port %s is served by the Xray server in front of the site (its firewall rule); the site answers behind it on 127.0.0.1:%s for every visitor that is not an Xray client').format(m.site_port || '443', m.behind_port || '4443'));
 		return m.firewall_rule
 			? span(COLOR.ok, _('Port %s is open from the Internet (firewall rule "tunnel-ddns: HTTPS from WAN")').format(m.site_port || '443'))
 			: span(COLOR.dim, _('Closed — no port is open from the Internet'));
@@ -604,7 +606,7 @@ return view.extend({
 		o.default = 'default';
 
 		o = s.option(form.DummyValue, '_site_port', _('HTTPS port'),
-			_('Port the site and the router admin (/cgi-bin/luci/) are served on. The usual choice is 443.'));
+			_('Port the site and the router admin (/cgi-bin/luci/) are served on. The usual choice is 443. When the Xray server of this router runs on the same port, it takes the port and the site is served behind it on 127.0.0.1:4443; visitors still get the site on this port.'));
 		o.renderWidget = function() {
 			return E('span', {}, [
 				E('strong', { 'style': 'margin-right:1em' }, (st.main && st.main.site_port) || '443'),

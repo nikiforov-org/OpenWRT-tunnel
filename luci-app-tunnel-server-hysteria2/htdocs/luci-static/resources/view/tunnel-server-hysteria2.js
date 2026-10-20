@@ -258,7 +258,7 @@ return view.extend({
 		o = s.option(form.Value, 'port', _('UDP port'), _('The port clients connect to.'));
 		o.datatype = 'port';
 		o.rmempty = false;
-		o.placeholder = '8443';
+		o.placeholder = '443';
 
 		o = s.option(form.ListValue, 'cert_source', _('Certificate'),
 			_('Where the TLS certificate comes from.'));

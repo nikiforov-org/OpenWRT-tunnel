@@ -14,8 +14,8 @@ after installing; the page is a tab of **Tunnel → Server**.
 - **An onion service** (version 3) on the router's own tor, with client authorization: the
   address is `<56 characters>.onion`, created on the first start and kept in
   `/etc/tor/tunnel-server-tor`. Every port in the **Ports** list leads to the same port on the
-  router itself; the default list is 22 (SSH), 80 (the web interface or the site) and 8443
-  (the Xray server).
+  router itself; the default list is 22 (SSH), 80 (the web interface or the site) and 443
+  (the site over HTTPS, with the Xray server in front of it when it runs).
 - **Bridges.** The router's tor connects to the Tor network by itself; where direct
   connections are blocked, it goes through bridges. **Built-in bridges** starts from the set
   of snowflake and obfs4 bridges shipped with the package
@@ -48,12 +48,12 @@ itself: a tor that carried the request works and keeps its bridges until its nex
    connecting to the Tor network and then "connected"; the onion address appears right away,
    the service answers a minute or two after the connection is made.
 4. **Key** next to a profile:
-   - **Tor Browser**: open `http://<address>.onion/` (or `:22`, `:8443` for the other
-     ports); when it asks for the key of the onion service, paste the private key.
+   - **Tor Browser**: open `http://<address>.onion/` (or `https://<address>.onion/` for
+     443); when it asks for the key of the onion service, paste the private key.
    - **A tor daemon** (a computer, a server, Orbot): put the line shown into the file
      `<name>.auth_private` in the daemon's `ClientOnionAuthDir`, restart it, and connect
      through its SOCKS port: `ssh -o ProxyCommand='nc -x 127.0.0.1:9050 %h %p' root@<address>.onion`,
-     or point an Xray client at `<address>.onion:8443` through that proxy.
+     or point an Xray client at `<address>.onion:443` through that proxy.
 
 Switching a profile off (or deleting it) locks its key out at the next apply; the address
 stays the same. A new key pair for a profile means the client has to get the new key.

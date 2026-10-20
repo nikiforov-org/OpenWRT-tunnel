@@ -30,7 +30,7 @@ after installing; the page is a tab of **Tunnel → Server**.
 
 ## Step by step
 
-1. **Server.** Leave the **UDP port** at 8443 or pick another one. Choose the
+1. **Server.** Leave the **UDP port** at 443 (free: the site uses TCP) or pick another one. Choose the
    **Certificate**: a domain from the Dynamic DNS page (it must have a certificate already)
    or files on the router with the TLS server name.
 2. Optionally set an **Obfuscation password** (Random password) and a **Masquerade**.

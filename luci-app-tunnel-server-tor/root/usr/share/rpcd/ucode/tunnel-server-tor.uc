@@ -84,6 +84,15 @@ function public_key(priv) {
 	return base32(substr(r.out, length(r.out) - 32));
 }
 
+// the port of the Xray server when it is on and among the onion service's ports, else ''
+function xray_port(ports) {
+	let uci = cursor();
+	if (!uci.load('tunnel-server-xray') || uci.get('tunnel-server-xray', 'main', 'enabled') != '1') return '';
+	for (let p in ports)
+		if (`${p}` == `${uci.get('tunnel-server-xray', 'main', 'vision_port') ?? '443'}`) return `${p}`;
+	return '';
+}
+
 function onion() {
 	return trim(readfile(`${HS}/hostname`) ?? '');
 }
@@ -203,7 +212,7 @@ methods.links = {
 			auth_line: `${replace(addr, '.onion', '')}:descriptor:x25519:${p.private_key}`,
 			auth_file: `${name}.auth_private`,
 			ports: ports,
-			xray: (index(ports, '8443') >= 0 && uci.load('tunnel-server-xray') && uci.get('tunnel-server-xray', 'main', 'enabled') == '1')
+			xray_port: xray_port(ports)
 		};
 	}
 };

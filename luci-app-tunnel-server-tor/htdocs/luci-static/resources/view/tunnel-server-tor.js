@@ -220,8 +220,8 @@ return view.extend({
 				E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': function() { return copyText(key); } }, _('Copy the key')), ' ',
 				E('button', { 'class': 'btn cbi-button', 'click': function() { return copyText(line.value); } }, _('Copy the line'))
 			]),
-			E('p', { 'style': 'color:' + COLOR.dim }, (r.xray
-				? _('Ports of this router through the address: %s. The Xray server answers on %s:8443 too, so an Xray client can be pointed at it through a local tor.').format(r.ports.join(', '), r.onion)
+			E('p', { 'style': 'color:' + COLOR.dim }, (r.xray_port
+				? _('Ports of this router through the address: %s. The Xray server answers on %s:%s too, so an Xray client can be pointed at it through a local tor.').format(r.ports.join(', '), r.onion, r.xray_port)
 				: _('Ports of this router through the address: %s.').format(r.ports.join(', ')))),
 			qrNode(r.auth_line),
 			E('div', { 'class': 'right' }, E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close')))
@@ -378,7 +378,7 @@ return view.extend({
 		};
 
 		o = s.option(form.DynamicList, 'port', _('Ports'),
-			_('Ports of this router reachable through the onion address, each to the same port on the router itself: 22 is SSH, 80 the web interface (or the site), 8443 the Xray server.'));
+			_('Ports of this router reachable through the onion address, each to the same port on the router itself: 22 is SSH, 80 the web interface (or the site), 443 the site over HTTPS and the Xray server in front of it.'));
 		o.datatype = 'port';
 		o.rmempty = false;
 		o.validate = function(section_id, value) {

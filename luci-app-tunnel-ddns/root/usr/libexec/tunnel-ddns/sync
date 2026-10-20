@@ -56,6 +56,8 @@ config_get IP_URL main ip_url 'https://ipv4-internet.yandex.net/api/v0/ip'
 
 case "$SITE_PORT" in ''|*[!0-9]*) SITE_PORT=443 ;; esac
 [ "$MODE" = apply ] || SITE_ENABLED=0
+XRAY_CONF=/etc/tunnel-server-xray/config.json    # the Xray server's configuration in effect
+BEHIND_PORT=4443                                 # where uhttpd serves HTTPS while Xray holds its port
 
 # The site to serve: the selected one if it has a page, else the built-in default.
 SERVING=0
@@ -66,6 +68,24 @@ fi
 # A site with its own login page takes over the LuCI login (see luci-gate).
 LOGIN_PAGE=0
 [ "$SERVING" = 1 ] && [ -f "$SITES/$SITE/cgi-bin/login" ] && LOGIN_PAGE=1
+
+# The HTTPS port uhttpd would listen on: the site's port, or the stock one when no site is served.
+# When the Xray server (its configuration file in effect, so a rejected one does not count) listens
+# on that port, it sits in front: uhttpd serves HTTPS on 127.0.0.1:BEHIND_PORT only, Xray passes
+# every connection that is not one of its clients through to it (the REALITY target), and the
+# port is opened from WAN by the Xray package's own rule.
+HTTPS_PORT=$SITE_PORT
+if [ "$SERVING" != 1 ]; then
+	HTTPS_PORT="$( { [ -f "$UHTTPD_BACKUP" ] && sed -n 's/^https=//p' "$UHTTPD_BACKUP"; } || uci -q get uhttpd.main.listen_https)"
+	HTTPS_PORT="${HTTPS_PORT%% *}"; HTTPS_PORT="${HTTPS_PORT##*:}"
+	case "$HTTPS_PORT" in ''|*[!0-9]*) HTTPS_PORT=443 ;; esac
+fi
+XRAY_FRONT=0
+if [ -s "$XRAY_CONF" ] && [ "$(uci -q get tunnel-server-xray.main.enabled)" = 1 ]; then
+	for p in $(jsonfilter -i "$XRAY_CONF" -e '@.inbounds[*].port' 2>/dev/null); do
+		[ "$p" = "$HTTPS_PORT" ] && XRAY_FRONT=1
+	done
+fi
 
 # ---------- DDNS sections (ddns-scripts) ----------
 
@@ -127,7 +147,7 @@ sync_ddns() {
 # ---------- firewall ----------
 
 sync_firewall() {
-	if [ "$SERVING" = 1 ]; then
+	if [ "$SERVING" = 1 ] && [ "$XRAY_FRONT" != 1 ]; then
 		[ "$(uci -q get firewall.tunnel_ddns_https)" = rule ] || {
 			uci set firewall.tunnel_ddns_https=rule
 			changed_firewall=1
@@ -147,7 +167,7 @@ sync_firewall() {
 	[ "$changed_firewall" = 1 ] || return 0
 	uci commit firewall
 	/etc/init.d/firewall reload >/dev/null 2>&1
-	log "firewall rule tunnel_ddns_https: $([ "$SERVING" = 1 ] && echo "port $SITE_PORT" || echo removed)"
+	log "firewall rule tunnel_ddns_https: $([ "$SERVING" = 1 ] && [ "$XRAY_FRONT" != 1 ] && echo "port $SITE_PORT" || echo removed)"
 }
 
 # ---------- LuCI entry points inside a site's document root ----------
@@ -214,25 +234,28 @@ backup_get() { # backup_get KEY: the stock value saved before the site was first
 	sed -n "s/^$1=//p" "$UHTTPD_BACKUP"
 }
 
+backup_make() { # the stock uhttpd and LuCI values, saved once before anything is changed
+	[ -f "$UHTTPD_BACKUP" ] && return 0
+	mkdir -p "$STATE_DIR"
+	{
+		echo "home=$(uci -q get uhttpd.main.home)"
+		echo "cert=$(uci -q get uhttpd.main.cert)"
+		echo "key=$(uci -q get uhttpd.main.key)"
+		echo "https=$(uci -q get uhttpd.main.listen_https)"
+		echo "ubus=$(uci -q get uhttpd.main.ubus_prefix)"
+		echo "dirlists=$(uci -q get uhttpd.main.no_dirlists)"
+		echo "errorpage=$(uci -q get uhttpd.main.error_page)"
+		echo "resourcebase=$(uci -q get luci.main.resourcebase)"
+		echo "mediaurlbase=$(uci -q get luci.main.mediaurlbase)"
+		echo "ubuspath=$(uci -q get luci.main.ubuspath)"
+	} > "$UHTTPD_BACKUP"
+}
+
 sync_uhttpd() {
 	local want_home="" want_cert="" want_key="" want_https="" want_ubus="" want_dirlists="" want_errorpage="" want_resources="" want_media="" want_ubuspath="" host d theme
 
 	if [ "$SERVING" = 1 ]; then
-		if [ ! -f "$UHTTPD_BACKUP" ]; then
-			mkdir -p "$STATE_DIR"
-			{
-				echo "home=$(uci -q get uhttpd.main.home)"
-				echo "cert=$(uci -q get uhttpd.main.cert)"
-				echo "key=$(uci -q get uhttpd.main.key)"
-				echo "https=$(uci -q get uhttpd.main.listen_https)"
-				echo "ubus=$(uci -q get uhttpd.main.ubus_prefix)"
-				echo "dirlists=$(uci -q get uhttpd.main.no_dirlists)"
-				echo "errorpage=$(uci -q get uhttpd.main.error_page)"
-				echo "resourcebase=$(uci -q get luci.main.resourcebase)"
-				echo "mediaurlbase=$(uci -q get luci.main.mediaurlbase)"
-				echo "ubuspath=$(uci -q get luci.main.ubuspath)"
-			} > "$UHTTPD_BACKUP"
-		fi
+		backup_make
 		want_home="$SITES/$SITE"
 		want_https="0.0.0.0:$SITE_PORT [::]:$SITE_PORT"
 		host="$(uci -q get "tunnel-ddns.$SITE_DOMAIN.hostname")"
@@ -263,7 +286,8 @@ sync_uhttpd() {
 		site_links add "$want_home"
 		link_set "/www/$(static_name)" /www/luci-static
 	else
-		[ -f "$UHTTPD_BACKUP" ] || return 0
+		[ -f "$UHTTPD_BACKUP" ] || [ "$XRAY_FRONT" = 1 ] || return 0
+		backup_make
 		want_home="$(backup_get home)"
 		want_cert="$(backup_get cert)"
 		want_key="$(backup_get key)"
@@ -283,6 +307,7 @@ sync_uhttpd() {
 		for d in "$SITES"/*/; do site_links remove "${d%/}"; done
 		[ -s "$STATIC_NAME_FILE" ] && link_remove "/www/$(static_name)"
 	fi
+	[ "$XRAY_FRONT" = 1 ] && want_https="127.0.0.1:$BEHIND_PORT [::1]:$BEHIND_PORT"
 
 	uset uhttpd main home "$want_home"
 	if [ -n "$want_cert" ]; then
@@ -304,12 +329,12 @@ sync_uhttpd() {
 	if [ -n "$want_media" ]; then uset luci main mediaurlbase "$want_media"; else udel luci main mediaurlbase; fi
 	if [ -n "$want_ubuspath" ]; then uset luci main ubuspath "$want_ubuspath"; else udel luci main ubuspath; fi
 	[ "$changed_luci" = 1 ] && { uci commit luci; rm -f /tmp/luci-indexcache*; }
-	[ "$SERVING" = 1 ] || rm -f "$UHTTPD_BACKUP"
+	[ "$SERVING" = 1 ] || [ "$XRAY_FRONT" = 1 ] || rm -f "$UHTTPD_BACKUP"
 	[ "$changed_uhttpd" = 1 ] || return 0
 	uci commit uhttpd
 	sleep 2        # let LuCI confirm its apply before the web server goes away for a moment
 	/etc/init.d/uhttpd restart >/dev/null 2>&1
-	log "uhttpd: home=$want_home port=$SITE_PORT cert=${want_cert:-none} login_page=$LOGIN_PAGE"
+	log "uhttpd: home=$want_home https=$want_https cert=${want_cert:-none} login_page=$LOGIN_PAGE behind_xray=$XRAY_FRONT"
 }
 
 # ---------- cron: certificate renewal and the site's build schedule ----------

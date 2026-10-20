@@ -35,7 +35,7 @@ after installing; the entry appears in the **Tunnel** section.
 1. **Server.** Enter the **Target** and the **Server names** (for the router's own site:
    `127.0.0.1:443` and the site's domain), click **Generate keypair** and
    **Add a random short ID**.
-2. **Transports.** Leave **TCP + XTLS-Vision** on port 8443, or pick another port; switch on
+2. **Transports.** Leave **TCP + XTLS-Vision** on port 443, or pick another port; switch on
    **XHTTP** if you want the second transport. If a router in front forwards a different
    public port, enter it under **Port in client links**.
 3. **Client links → Address**: the public name or IP address of the router (a domain from
@@ -51,6 +51,20 @@ forwarded to it (or opened through UPnP) before clients from the Internet can co
 
 Changing the private key, a short ID, a port, the path or the address breaks the existing
 links: export them again.
+
+### The server on port 443
+
+The usual REALITY layout is the server on 443 in front of the site it imitates, and that is
+the default here: **TCP + XTLS-Vision** on 443 with the target `127.0.0.1:443`. When the
+Dynamic DNS package serves the router's site, it sees from this server's configuration in
+effect that the port is taken, moves its web server to `127.0.0.1:4443` (HTTPS only; port 80
+stays) and leaves the firewall rule for the port to this package; the target `127.0.0.1:443`
+is read as "this router's site" and the generated configuration points at `127.0.0.1:4443`.
+Browsers that open the router's domain on 443 are passed through to the site unchanged, with
+its Let's Encrypt certificate. Switching the server off (or moving it to another port) puts
+the web server back on 443 and its rule back. The hand-over happens inside `sync`: a running
+Xray is stopped before the Dynamic DNS package is told to reload, so the port is free for
+whichever of the two has to take it, and procd starts Xray again right after.
 
 ## What the package changes on the router
 

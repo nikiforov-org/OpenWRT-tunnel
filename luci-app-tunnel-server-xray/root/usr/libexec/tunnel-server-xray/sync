@@ -19,6 +19,8 @@ const NEW   = `${DIR}/config.new.json`;      // xray takes the format from the e
 const RUN   = '/tmp/tunnel-server-xray';
 const ERROR = `${RUN}/error`;
 const XRAY  = '/usr/bin/xray';
+const DDNS_INIT   = '/etc/init.d/tunnel-ddns';   // the package that runs the router's own site (uhttpd)
+const BEHIND_PORT = 4443;                        // where that site listens while this server holds its port
 const RULES = {
 	vision: { section: 'tunnel_server_xray_vision', name: 'tunnel-server-xray: TCP + Vision from WAN' },
 	xhttp:  { section: 'tunnel_server_xray_xhttp',  name: 'tunnel-server-xray: XHTTP from WAN' }
@@ -90,7 +92,15 @@ function build(main, clients) {
 	if (length(errors))
 		return { errors: errors };
 
-	let reality = { target: main.target, serverNames: names, privateKey: main.private_key, shortIds: sids };
+	// "127.0.0.1:<port>" with the port of a transport means the router's own site: while this
+	// server holds that port, the Dynamic DNS package serves the site on 127.0.0.1:BEHIND_PORT
+	let target = main.target, behind = false;
+	let m = match(target, /^(127\.0\.0\.1|localhost):([0-9]+)$/);
+	if (m && ((vision && int(m[2]) == vport) || (xhttp && int(m[2]) == xport))) {
+		target = `127.0.0.1:${BEHIND_PORT}`;
+		behind = true;
+	}
+	let reality = { target: target, serverNames: names, privateKey: main.private_key, shortIds: sids };
 	let sniffing = { enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: true };
 	let users = function(with_flow) {
 		let out = [];
@@ -105,14 +115,14 @@ function build(main, clients) {
 	let inbounds = [];
 	if (vision)
 		push(inbounds, {
-			tag: 'vision', listen: '0.0.0.0', port: vport, protocol: 'vless',
+			tag: 'vision', listen: '::', port: vport, protocol: 'vless',
 			settings: { clients: users(true), decryption: 'none' },
 			streamSettings: { network: 'tcp', security: 'reality', realitySettings: reality },
 			sniffing: sniffing
 		});
 	if (xhttp)
 		push(inbounds, {
-			tag: 'xhttp', listen: '0.0.0.0', port: xport, protocol: 'vless',
+			tag: 'xhttp', listen: '::', port: xport, protocol: 'vless',
 			settings: { clients: users(false), decryption: 'none' },
 			streamSettings: {
 				network: 'xhttp',
@@ -132,7 +142,8 @@ function build(main, clients) {
 			outbounds: [ { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' } ],
 			routing: { domainStrategy: 'AsIs', rules: rules }
 		},
-		ports: { vision: vision ? vport : 0, xhttp: xhttp ? xport : 0 }
+		ports: { vision: vision ? vport : 0, xhttp: xhttp ? xport : 0 },
+		behind: behind
 	};
 }
 
@@ -174,21 +185,22 @@ function set_error(msg) {
 	log(`not applied: ${msg}`);
 }
 
+// true when a configuration file was removed
 function remove_config() {
-	if (access(CONF) == true) {
-		unlink(CONF);
-		log('configuration removed, Xray stops');
-	}
 	unlink(NEW);
+	if (access(CONF) != true) return false;
+	unlink(CONF);
+	log('configuration removed, Xray stops');
+	return true;
 }
 
-// true when CONF holds this configuration (already or after a successful test)
+// 'same' when CONF already holds this configuration, 'written' after a successful test, false otherwise
 function write_config(config) {
 	mkdir(DIR, 0o700);
 	let text = sprintf('%.2J\n', config);
 	if (readfile(CONF) == text) {
 		chmod(CONF, 0o600);
-		return true;
+		return 'same';
 	}
 	if (access(XRAY, 'x') != true) {
 		set_error('xray-core is not installed (/usr/bin/xray is missing)');
@@ -206,7 +218,18 @@ function write_config(config) {
 	}
 	rename(NEW, CONF);
 	log('configuration written');
-	return true;
+	return 'written';
+}
+
+// The site package decides from the configuration file in effect whether this server holds the
+// port its web server would use; it moves uhttpd behind the server or back. Procd restarts Xray
+// only after this script returns, so a running instance is stopped first when the file changed:
+// the port is then free for whichever of the two has to take it.
+function hand_over(changed) {
+	if (!changed) return;
+	system(`ubus call service delete '{"name":"tunnel-server-xray","instance":"xray"}' >/dev/null 2>&1`);
+	if (access(DDNS_INIT, 'x') == true)
+		system(`${DDNS_INIT} reload >/dev/null 2>&1`);
 }
 
 // the transport ports of the configuration file in effect (kept when a new one is rejected)
@@ -232,21 +255,26 @@ uci.foreach(CFG, 'client', function(s) {
 chmod(`/etc/config/${CFG}`, 0o600);
 unlink(ERROR);
 
-let ports = { vision: 0, xhttp: 0 };
+let ports = { vision: 0, xhttp: 0 }, changed = false;
 if (mode == 'apply' && flag(main.enabled, false)) {
 	let b = build(main, clients);
 	if (b.errors) {
 		set_error(join('; ', b.errors));
 		ports = ports_of_file();
 	}
-	else if (write_config(b.config)) {
-		ports = b.ports;
-	}
 	else {
-		ports = ports_of_file();
+		let w = write_config(b.config);
+		if (w) {
+			ports = b.ports;
+			changed = (w == 'written');
+			if (changed && b.behind) log(`target ${main.target} is this router's site: served behind the server on 127.0.0.1:${BEHIND_PORT}`);
+		}
+		else
+			ports = ports_of_file();
 	}
 }
 else {
-	remove_config();
+	changed = remove_config();
 }
+hand_over(changed);
 sync_firewall(ports);

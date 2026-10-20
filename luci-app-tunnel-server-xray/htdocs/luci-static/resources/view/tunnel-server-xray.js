@@ -314,7 +314,7 @@ return view.extend({
 			_('Starts Xray with the settings below and opens the ports of the enabled transports from the Internet (firewall rules "tunnel-server-xray: …"). Switch off to stop it and close the ports.'));
 		o.rmempty = false;
 
-		var targetDesc = _('Address and port that visitors without a client link are forwarded to; the certificate there must match the server names. "127.0.0.1:443" is this router\'s own HTTPS site (Tunnel → Dynamic DNS). A public site that answers over TLS 1.3, for example "www.samsung.com:443", works too.');
+		var targetDesc = _('Address and port that visitors without a client link are forwarded to; the certificate there must match the server names. "127.0.0.1:443" is this router\'s own HTTPS site (Tunnel → Dynamic DNS); when a transport of this server runs on that port itself, the site is served behind it on 127.0.0.1:4443 and the target follows. A public site that answers over TLS 1.3, for example "www.samsung.com:443", works too.');
 		if (site && site.enabled && site.hostname)
 			targetDesc += ' ' + _('The router currently serves the site for %s on port %s.').format(site.hostname, site.port);
 		o = s.option(form.Value, 'target', _('Target'), targetDesc);
@@ -394,10 +394,10 @@ return view.extend({
 			_('The primary transport, supported by every current client app.'));
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'vision_port', _('Port'), _('TCP port of this transport on the router.'));
+		o = s.option(form.Value, 'vision_port', _('Port'), _('TCP port of this transport on the router. On 443 the server sits in front of the router\'s own site: the Dynamic DNS package serves it behind the server on 127.0.0.1:4443 and visitors without a client key get the site on 443 as before.'));
 		o.datatype = 'port';
 		o.rmempty = false;
-		o.placeholder = '8443';
+		o.placeholder = '443';
 		o.depends('vision_enabled', '1');
 
 		o = s.option(form.Value, 'vision_link_port', _('Port in client links'),
@@ -413,7 +413,7 @@ return view.extend({
 		o = s.option(form.Value, 'xhttp_port', _('Port'), _('TCP port of this transport on the router.'));
 		o.datatype = 'port';
 		o.rmempty = false;
-		o.placeholder = '8444';
+		o.placeholder = '8443';
 		o.depends('xhttp_enabled', '1');
 
 		o = s.option(form.Value, 'xhttp_path', _('Path'),

@@ -240,6 +240,8 @@ methods.status = {
 				uhttpd_running: svc_running('uhttpd'),
 				serving: (home == `${SITES}/${site}`),
 				firewall_rule: (uci.get('firewall', 'tunnel_ddns_https') == 'rule'),
+				xray_front: (index(`${uci.get('uhttpd', 'main', 'listen_https') ?? ''}`, '127.0.0.1:4443') >= 0),
+				behind_port: 4443,
 				cron: index(crontab, '# tunnel-ddns-cert') >= 0,
 				overlay_free_kb: overlay_free_kb()
 			},
