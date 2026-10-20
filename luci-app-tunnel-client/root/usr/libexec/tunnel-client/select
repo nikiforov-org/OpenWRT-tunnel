@@ -1,17 +1,18 @@
 #!/bin/sh
-# select [TAG]: makes TAG the active client of the running xray (balancer "active", through its API,
-# without a restart). Without an argument: the configured client (manual mode) or the last automatic
-# choice. Waits up to 30 s for the API after a start. Prints nothing; logs a switch.
+# select [TAG]: makes TAG the active link of the running xray (balancer "active", through its API,
+# without a restart). Without an argument: the choice sync made for the configuration in effect
+# (the configured link by hand, the last automatic choice, or the first link). Only a link of the
+# configuration in effect is selected: xray accepts an override to any tag, also a removed one.
+# Waits up to 30 s for the API after a start. Prints nothing; logs a switch.
 API=127.0.0.1:61085
+STATE=/tmp/tunnel-client/state.json
 TAG="$1"
-if [ -z "$TAG" ]; then
-	if [ "$(uci -q get tunnel-client.main.mode)" = manual ]; then
-		TAG="$(uci -q get tunnel-client.main.active)"
-	else
-		TAG="$(jsonfilter -i /etc/tunnel-client/auto.json -e '@.active' 2>/dev/null)"
-	fi
-fi
+[ -n "$TAG" ] || TAG="$(jsonfilter -i $STATE -e '@.active' 2>/dev/null)"
 [ -n "$TAG" ] || exit 0
+if [ -z "$(jsonfilter -i $STATE -e "@.clients[@.tag='$TAG'].tag" 2>/dev/null)" ]; then
+	logger -t tunnel-client "not selected: $TAG is not a link of the configuration in effect"
+	exit 1
+fi
 # the current choice: the override if one is set, else the balancer's own selection
 current() {
 	xray api bi --server=$API active 2>/dev/null | awk '
@@ -29,8 +30,8 @@ done
 [ -n "$NOW" ] || exit 1
 [ "$NOW" = "$TAG" ] && exit 0
 if xray api bo --server=$API -b active "$TAG" >/dev/null 2>&1 && [ "$(current)" = "$TAG" ]; then
-	logger -t tunnel-client "active client: $TAG"
+	logger -t tunnel-client "active link: $TAG"
 else
-	logger -t tunnel-client "could not make $TAG the active client"
+	logger -t tunnel-client "could not make $TAG the active link"
 	exit 1
 fi

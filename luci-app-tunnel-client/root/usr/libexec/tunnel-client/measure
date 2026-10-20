@@ -78,6 +78,11 @@ let s = stat(LOCK);
 if (s && time() - s.mtime < 300) exit(0);
 writefile(LOCK, `${time()}\n`);
 
+// "profile: transport" for the messages on the page and in the log
+let names = {};
+for (let c in clients) names[c.tag] = `${c.profile_name ?? c.profile}: ${c.title ?? c.protocol}`;
+function name(tag) { return names[tag] ?? (tag || 'none'); }
+
 let bytes = int(main.test_bytes ?? 5000000); if (bytes < 10000) bytes = 10000; if (bytes > 20000000) bytes = 20000000;
 let timeout = int(main.test_timeout ?? 30); if (timeout < 5) timeout = 5;
 let threshold = int(main.test_threshold ?? 20); if (threshold < 0) threshold = 0;
@@ -85,13 +90,18 @@ let active = current_active();
 
 if (ARGV[0] == 'health') {
 	let cur = filter(clients, c => c.tag == active);
-	if (!length(cur)) { unlink(LOCK); exit(0); }
+	if (!length(cur)) {
+		// xray holds no link of the configuration in effect: apply the one sync chose
+		exec('/usr/libexec/tunnel-client/select');
+		unlink(LOCK);
+		exit(0);
+	}
 	let r = run(cur, 1000, 10)[active];
 	let m = read_json(OUT, {});
 	m.health = { time: time(), tag: active, ok: r.ok, error: r.error };
 	writefile(OUT, sprintf('%J\n', m));
 	if (r.ok || main.mode == 'manual') { unlink(LOCK); exit(0); }
-	log(`health check of ${active} failed (${r.error}): measuring all clients`);
+	log(`health check of ${name(active)} failed (${r.error}): measuring all links`);
 }
 
 let results = run(clients, bytes, timeout);
@@ -113,10 +123,10 @@ if (main.mode != 'manual') {
 		if (r.ok && (best == null || r.speed > results[best].speed)) best = c.tag;
 	}
 	let cur = results[active] ?? null;
-	if (best == null) decision = 'no client answered; nothing changed';
-	else if (!cur || !cur.ok) { decision = `${active || 'none'} failed, ${best} is the fastest`; switched = best; }
-	else if (best != active && results[best].speed > cur.speed * (100 + threshold) / 100) { decision = `${best} is more than ${threshold}% faster than ${active}`; switched = best; }
-	else decision = `${active} stays (best ${best})`;
+	if (best == null) decision = 'no link answered; nothing changed';
+	else if (!cur || !cur.ok) { decision = `${name(active)} failed, ${name(best)} is the fastest`; switched = best; }
+	else if (best != active && results[best].speed > cur.speed * (100 + threshold) / 100) { decision = `${name(best)} is more than ${threshold}% faster than ${name(active)}`; switched = best; }
+	else decision = (best == active) ? `${name(active)} stays, the fastest` : `${name(active)} stays, ${name(best)} is faster by less than ${threshold}%`;
 	if (switched && switched != active) {
 		writefile(AUTO, sprintf('%J\n', { active: switched, time: time(), reason: decision }));
 		if (exec(`/usr/libexec/tunnel-client/select ${shq(switched)}`).code != 0) decision += ' (switching failed)';
@@ -125,5 +135,5 @@ if (main.mode != 'manual') {
 }
 writefile(OUT, sprintf('%J\n', { time: time(), bytes: bytes, mode: main.mode ?? 'auto', active_before: active, active_after: switched || active,
                                  decision: decision, clients: results, health: read_json(OUT, {}).health ?? null }));
-log(`measured ${length(clients)} clients: ` + join(', ', map(clients, c => `${c.tag} ${results[c.tag].ok ? int(results[c.tag].speed / 1024) + ' KB/s' : 'failed'}`)) + (decision ? `; ${decision}` : ''));
+log(`measured ${length(clients)} links: ` + join(', ', map(clients, c => `${name(c.tag)} ${results[c.tag].ok ? int(results[c.tag].speed / 1024) + ' KB/s' : 'failed'}`)) + (decision ? `; ${decision}` : ''));
 unlink(LOCK);

@@ -208,6 +208,7 @@ function build(main, clients, sources, resolvers) {
 		let auto = null;
 		try { auto = json(readfile(AUTO) ?? ''); } catch (e) { auto = null; }
 		if (type(auto) == 'object') active = `${auto.active ?? ''}`;
+		if (length(active) && !length(filter(clients, c => c.tag == active))) unlink(AUTO);   // its link is gone
 	}
 	if (!length(filter(clients, c => c.tag == active))) active = have ? clients[0].tag : '';
 
