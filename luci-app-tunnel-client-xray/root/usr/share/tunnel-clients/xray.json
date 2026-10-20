@@ -1,0 +1,7 @@
+{
+	"package": "tunnel-client-xray",
+	"title": "Xray",
+	"description": "VLESS links (Xray servers): TCP + XTLS-Vision, XHTTP, WebSocket, gRPC, HTTPUpgrade; REALITY or TLS.",
+	"schemes": [ "vless" ],
+	"config": "tunnel-client-xray"
+}

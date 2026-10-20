@@ -1,0 +1,4 @@
+#!/bin/sh
+# the WAN came up or changed: the resolvers of the provider may have changed
+[ "$ACTION" = ifup ] && [ "$INTERFACE" = wan ] && [ "$(uci -q get tunnel-clients.main.enabled)" = 1 ] && /etc/init.d/tunnel-clients reload
+exit 0

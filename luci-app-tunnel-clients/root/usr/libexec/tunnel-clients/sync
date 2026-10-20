@@ -1,0 +1,519 @@
+#!/usr/bin/env ucode
+// tunnel-clients sync: make the system match /etc/config/tunnel-clients and the installed client
+// packages (their runtime descriptors in /tmp/tunnel-clients/<package>.json).
+//   sync          apply: the xray configuration (interception of the LAN, the lists, DNS, the active
+//                 client), the nftables rules (fw4 include), the mark routing (netifd), the kill
+//                 switch (no lan -> wan forwarding), IPv6 off for the LAN, dnsmasq through xray, cron
+//   sync revert   undo everything (package removal)
+// The configuration file is replaced only after "xray run -test" accepts it; an error keeps the file
+// in effect and shows the reason on the page.
+
+'use strict';
+
+import { access, readfile, writefile, mkdir, unlink, chmod, rename, lsdir } from 'fs';
+import { cursor } from 'uci';
+import { RUN, shq, exec, descriptors } from 'tunnel-clients.common';
+
+const CFG      = 'tunnel-clients';
+const DIR      = '/etc/tunnel-clients';
+const CONF     = `${DIR}/config.json`;
+const NEW      = `${DIR}/config.new.json`;
+const SOURCES  = `${DIR}/sources`;
+const AUTO     = `${DIR}/auto.json`;             // the automatic choice, kept across restarts
+const BACKUP   = `${DIR}/backup.json`;           // stock values changed while enabled
+const NFT      = `${DIR}/tproxy.nft`;            // included by fw4 into chain mangle_prerouting
+const STATE    = `${RUN}/state.json`;            // what sync decided: for the page, measure and sources
+const ERROR    = `${RUN}/error`;
+const XRAY     = '/usr/bin/xray';
+const CRONTAB  = '/etc/crontabs/root';
+const CRONTAG  = '# tunnel-clients-';
+const MARK     = '0x2222';
+const TABLE    = '2222';
+const TPROXY_PORT  = 61001;
+const DNS_PORT     = 61053;
+const API          = '127.0.0.1:61085';
+const TAP_BASE     = 61100;                     // 61101..: one per client, for the speed test
+const SRC_TAP_BASE = 61200;                     // 61201..: one per list host, downloads through the active client
+const OWN_PORTS    = '61000-61299';
+const PRIVATE  = [ '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+                   '172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4' ];
+
+const mode = ARGV[0] ?? 'apply';
+
+function log(msg) {
+	system(`logger -t ${CFG} ${shq(msg)}`);
+}
+
+function flag(v, dflt) {
+	return (v == null || v == '') ? dflt : (v == '1');
+}
+
+function list(v) {
+	if (type(v) == 'array') return v;
+	return (v == null || v == '') ? [] : [ v ];
+}
+
+function set_error(msg) {
+	mkdir(RUN, 0o755);
+	writefile(ERROR, msg);
+	log(`not applied: ${msg}`);
+}
+
+function uset(uci, cfg, sec, opt, val) {
+	let cur = uci.get(cfg, sec, opt);
+	if (type(val) == 'array' ? (type(cur) == 'array' && join('\n', cur) == join('\n', val)) : (cur == val)) return false;
+	uci.set(cfg, sec, opt, val);
+	return true;
+}
+
+// ---- inputs ----
+
+// the devices of the firewall zone "lan": the LAN devices connect through them
+function lan_devices() {
+	let uci = cursor(), nets = [];
+	uci.load('firewall');
+	uci.foreach('firewall', 'zone', function(z) {
+		if (z.name == 'lan') for (let n in list(z.network)) push(nets, n);
+	});
+	if (!length(nets)) push(nets, 'lan');
+	let out = [];
+	for (let n in nets) {
+		let st = null;
+		try { st = json(exec(`ubus call network.interface.${n} status 2>/dev/null`).out); } catch (e) { st = null; }
+		let dev = st?.l3_device ?? st?.device;
+		if (dev && index(out, dev) < 0) push(out, dev);
+	}
+	if (!length(out)) push(out, 'br-lan');
+	return out;
+}
+
+// the provider's resolvers (netifd writes them for dnsmasq)
+function isp_resolvers() {
+	let out = [];
+	for (let f in [ '/tmp/resolv.conf.d/resolv.conf.auto', '/tmp/resolv.conf.auto' ]) {
+		for (let l in split(readfile(f) ?? '', '\n')) {
+			let m = match(l, /^nameserver ([0-9.]+)$/);
+			if (m && index(out, m[1]) < 0) push(out, m[1]);
+		}
+		if (length(out)) break;
+	}
+	return out;
+}
+
+// an own entry: "10.1.2.0/24" or "10.1.2.3" -> ip; "example.com", "*.example.com", ".example.com" -> domain
+function parse_rule(entry) {
+	let s = lc(trim(entry ?? ''));
+	if (!length(s)) return null;
+	if (match(s, /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/))
+		return { kind: 'ip', value: (index(s, '/') < 0) ? s + '/32' : s };
+	s = replace(s, /^\*?\./, '');
+	if (!match(s, /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/)) return null;
+	return { kind: 'domain', value: `domain:${s}` };
+}
+
+// a URL -> { scheme, host, port, hostport }
+function url_parts(url) {
+	let m = match(url ?? '', /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
+	if (!m) return null;
+	let port = m[4] ? int(m[4]) : (m[1] == 'https' ? 443 : 80);
+	return { scheme: m[1], host: m[2], port: port, hostport: `${m[2]}:${port}` };
+}
+
+// the sources and what the sources script fetched for them
+function sources_info(uci) {
+	let out = [];
+	uci.foreach(CFG, 'source', function(s) {
+		let name = trim(s.name ?? '');
+		if (!match(name, /^[A-Za-z0-9._-]{1,64}$/)) return;
+		let src = { sid: s['.name'], name: name, url: trim(s.url ?? ''), enabled: (s.enabled != '0'), ready: false,
+		            format: '', kind: '', tag: '', file: '', domains: 0, ips: 0, time: 0, error: '' };
+		let meta = null;
+		try { meta = json(readfile(`${SOURCES}/${name}.meta`) ?? ''); } catch (e) { meta = null; }
+		if (type(meta) == 'object') {
+			src.format = meta.format ?? ''; src.kind = meta.kind ?? ''; src.tag = meta.tag ?? ''; src.file = meta.file ?? '';
+			src.domains = int(meta.domains ?? 0); src.ips = int(meta.ips ?? 0); src.time = int(meta.time ?? 0); src.error = `${meta.error ?? ''}`;
+			src.ready = (src.format == 'dat') ? (access(`${SOURCES}/${src.file}`) == true)
+			                                  : (access(`${SOURCES}/${name}.domains`) == true || access(`${SOURCES}/${name}.ips`) == true);
+		}
+		push(out, src);
+	});
+	return out;
+}
+
+// the speed test target of a client: its own URL, or the server's site through the tunnel
+function test_target(url) {
+	let u = url_parts(url);
+	if (u) return { host: u.host, port: u.port, url: url };
+	return { host: '127.0.0.1', port: 443, url: '' };
+}
+
+// the files of sources that are no longer in the configuration
+function prune_sources(sources) {
+	let keep = {};
+	for (let s in sources)
+		for (let ext in [ 'domains', 'ips', 'dat', 'meta' ]) keep[`${s.name}.${ext}`] = true;
+	for (let f in (lsdir(SOURCES) ?? []))
+		if (substr(f, 0, 1) != '.' && !keep[f]) unlink(`${SOURCES}/${f}`);
+}
+
+function read_lines(path, into, seen) {
+	for (let l in split(readfile(path) ?? '', '\n'))
+		if (length(l) && !(l in seen)) { seen[l] = true; push(into, l); }
+}
+
+// ---- the xray configuration ----
+
+function build(main, clients, sources, resolvers) {
+	let split = flag(main.split, true), except = (main.split_mode == 'except');
+	let resolver = trim(main.resolver ?? '') || '1.1.1.1';
+	let isp = length(resolvers) ? resolvers : [ resolver ];
+	let have = (length(clients) > 0);
+
+	// the list: own entries and the fetched sources
+	let domains = [], ips = [], seen = {};
+	for (let e in list(main.rule)) {
+		let r = parse_rule(e);
+		if (r && !(r.value in seen)) { seen[r.value] = true; push(r.kind == 'ip' ? ips : domains, r.value); }
+	}
+	let own = { domains: length(domains), ips: length(ips) };
+	for (let s in sources) {
+		if (!s.enabled || !s.ready) continue;
+		if (s.format == 'dat') { push(s.kind == 'ip' ? ips : domains, `ext:${s.file}:${s.tag}`); continue; }
+		read_lines(`${SOURCES}/${s.name}.domains`, domains, seen);
+		read_lines(`${SOURCES}/${s.name}.ips`, ips, seen);
+	}
+
+	// the active client: strictly the chosen one, or the last automatic choice
+	let active = '';
+	if (main.mode == 'manual') active = trim(main.active ?? '');
+	else {
+		let auto = null;
+		try { auto = json(readfile(AUTO) ?? ''); } catch (e) { auto = null; }
+		if (type(auto) == 'object') active = `${auto.active ?? ''}`;
+	}
+	if (!length(filter(clients, c => c.tag == active))) active = have ? clients[0].tag : '';
+
+	let to_tunnel = have ? { balancerTag: 'active' } : { outboundTag: 'block' };
+	let inbounds = [
+		{ tag: 'lan', listen: '0.0.0.0', port: TPROXY_PORT, protocol: 'dokodemo-door',
+		  settings: { network: 'tcp,udp', followRedirect: true }, streamSettings: { sockopt: { tproxy: 'tproxy' } },
+		  sniffing: { enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: true } },
+		{ tag: 'dns-in', listen: '127.0.0.1', port: DNS_PORT, protocol: 'dokodemo-door', settings: { address: isp[0], port: 53, network: 'tcp,udp' } }
+	];
+	let outbounds = [ { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }, { tag: 'dns-out', protocol: 'dns' } ];
+	let rules = [], detail = [], n = 0;
+	for (let c in clients) {
+		let ob = json(sprintf('%J', c.outbound));
+		ob.tag = c.tag;
+		push(outbounds, ob);
+		let t = test_target(c.test_url), tap = TAP_BASE + (++n);
+		push(inbounds, { tag: `tap-${c.tag}`, listen: '127.0.0.1', port: tap, protocol: 'dokodemo-door', settings: { address: t.host, port: t.port, network: 'tcp' } });
+		push(rules, { type: 'field', inboundTag: [ `tap-${c.tag}` ], outboundTag: c.tag });
+		push(detail, { tag: c.tag, name: c.name, package: c.package, title: c.title, transport: c.transport,
+		               server_host: c.server_host, server_port: c.server_port, test_url: t.url, tap_port: tap });
+	}
+	// the hosts of the list sources: downloads go through the active client
+	let src_taps = {}, m = 0;
+	for (let s in sources) {
+		let u = url_parts(s.url);
+		if (!s.enabled || !u || (u.hostport in src_taps) || m >= 99) continue;
+		let tap = SRC_TAP_BASE + (++m);
+		src_taps[u.hostport] = tap;
+		push(inbounds, { tag: `src-${m}`, listen: '127.0.0.1', port: tap, protocol: 'dokodemo-door', settings: { address: u.host, port: u.port, network: 'tcp' } });
+		push(rules, { type: 'field', inboundTag: [ `src-${m}` ], ...(have ? { balancerTag: 'active' } : { outboundTag: 'direct' }) });
+	}
+	push(rules,
+		{ type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' },
+		{ type: 'field', inboundTag: [ 'dns-internal' ], ip: [ resolver ], ...to_tunnel },
+		{ type: 'field', inboundTag: [ 'dns-internal' ], outboundTag: 'direct' },
+		{ type: 'field', inboundTag: [ 'lan' ], ip: PRIVATE, outboundTag: 'direct' });
+	if (split) {
+		let via = except ? { outboundTag: 'direct' } : to_tunnel;
+		if (length(domains)) push(rules, { type: 'field', inboundTag: [ 'lan' ], domain: domains, ...via });
+		if (length(ips)) push(rules, { type: 'field', inboundTag: [ 'lan' ], ip: ips, ...via });
+		push(rules, { type: 'field', inboundTag: [ 'lan' ], ...(except ? to_tunnel : { outboundTag: 'direct' }) });
+	}
+	else push(rules, { type: 'field', inboundTag: [ 'lan' ], ...to_tunnel });
+
+	// DNS: the names of the servers always at the provider; the listed names through the tunnel
+	// (or the unlisted ones in the "except" mode); without a client everything at the provider
+	let servers = [], names = [];
+	for (let c in clients)
+		if (c.server_host && !match(c.server_host, /^[0-9.]+$/) && index(names, `full:${c.server_host}`) < 0) push(names, `full:${c.server_host}`);
+	if (length(names)) push(servers, { address: isp[0], domains: names, skipFallback: true });
+	if (have && split && !except) {
+		if (length(domains)) push(servers, { address: resolver, domains: domains, skipFallback: true });
+		for (let r in isp) push(servers, r);
+	}
+	else if (have && split && except) {
+		if (length(domains)) push(servers, { address: isp[0], domains: domains, skipFallback: true });
+		push(servers, resolver);
+	}
+	else if (have) push(servers, resolver);
+	else for (let r in isp) push(servers, r);
+
+	return {
+		config: {
+			log: { loglevel: 'warning', access: 'none' },
+			api: { tag: 'api', listen: API, services: [ 'RoutingService' ] },
+			// disableFallbackIfMatch: a name that matched a server's list is asked only there (no leak
+			// of a listed name to the provider when the tunnel is down)
+			dns: { tag: 'dns-internal', queryStrategy: 'UseIPv4', disableFallbackIfMatch: true, servers: servers },
+			inbounds: inbounds,
+			outbounds: outbounds,
+			routing: { domainStrategy: 'AsIs', rules: rules, balancers: have ? [ { tag: 'active', selector: [ active ] } ] : [] }
+		},
+		state: { active: active, clients: detail, src_taps: src_taps, own: own, domains: length(domains), ips: length(ips), resolver: resolver, isp: isp }
+	};
+}
+
+// 'same' | 'written' | false
+function write_config(config) {
+	mkdir(DIR, 0o700);
+	let text = sprintf('%J\n', config);
+	if (readfile(CONF) == text) { chmod(CONF, 0o600); return 'same'; }
+	if (access(XRAY, 'x') != true) { set_error('xray-core is not installed (/usr/bin/xray is missing)'); return false; }
+	writefile(NEW, text);
+	chmod(NEW, 0o600);
+	let r = exec(`XRAY_LOCATION_ASSET=${shq(SOURCES)} ${XRAY} run -test -format json -c ${shq(NEW)} 2>&1`);
+	if (r.code != 0) {
+		unlink(NEW);
+		let lines = split(rtrim(r.out, '\n'), '\n');
+		let reason = split(lines[length(lines) - 1] ?? '', ' > ');
+		set_error('xray rejected the configuration: ' + trim(reason[length(reason) - 1]));
+		return false;
+	}
+	rename(NEW, CONF);
+	log('configuration written');
+	return 'written';
+}
+
+// ---- the system around xray ----
+
+function backup_read() {
+	let b = null;
+	try { b = json(readfile(BACKUP) ?? ''); } catch (e) { b = null; }
+	return (type(b) == 'object') ? b : {};
+}
+
+// the interception: packets of the LAN devices to non-local addresses go to xray (TPROXY); direct
+// connections from the LAN to xray's own ports are refused (they would loop). Returns
+// { file, uci }: whether the rules file and the fw4 include section changed.
+function sync_nft(fw, enabled, devs) {
+	let want = null;
+	if (enabled) {
+		let set = '{ ' + join(', ', map(devs, d => `"${d}"`)) + ' }';
+		want = join('\n', [
+			`iifname ${set} meta l4proto tcp socket transparent 1 meta mark set ${MARK} accept comment "tunnel-clients"`,
+			`iifname ${set} fib daddr type local meta l4proto { tcp, udp } th dport ${OWN_PORTS} drop comment "tunnel-clients"`,
+			`iifname ${set} meta nfproto ipv4 fib daddr type != { local, broadcast, multicast } meta l4proto { tcp, udp } meta mark set ${MARK} tproxy ip to :${TPROXY_PORT} accept comment "tunnel-clients"`
+		]) + '\n';
+	}
+	let changed = { file: false, uci: false };
+	if (readfile(NFT) != want) {
+		if (want == null) unlink(NFT); else { mkdir(DIR, 0o700); writefile(NFT, want); }
+		changed.file = true;
+	}
+	if (enabled) {
+		if (fw.get('firewall', 'tunnel_clients') != 'include') { fw.set('firewall', 'tunnel_clients', 'include'); changed.uci = true; }
+		changed.uci = uset(fw, 'firewall', 'tunnel_clients', 'type', 'nftables') || changed.uci;
+		changed.uci = uset(fw, 'firewall', 'tunnel_clients', 'path', NFT) || changed.uci;
+		changed.uci = uset(fw, 'firewall', 'tunnel_clients', 'position', 'chain-pre') || changed.uci;
+		changed.uci = uset(fw, 'firewall', 'tunnel_clients', 'chain', 'mangle_prerouting') || changed.uci;
+	}
+	else if (fw.get('firewall', 'tunnel_clients')) { fw.delete('firewall', 'tunnel_clients'); changed.uci = true; }
+	return changed;
+}
+
+// kill switch: the LAN reaches the Internet only through xray (no lan -> wan forwarding)
+function sync_forwarding(uci, enabled, backup) {
+	let changed = false;
+	if (enabled) {
+		uci.foreach('firewall', 'forwarding', function(s) {
+			if (s.src == 'lan' && s.dest == 'wan' && s.enabled != '0') {
+				backup.lan_wan_forwarding = s['.name'];
+				uci.set('firewall', s['.name'], 'enabled', '0');
+				changed = true;
+			}
+		});
+	}
+	else if (backup.lan_wan_forwarding) {
+		if (uci.get('firewall', backup.lan_wan_forwarding) == 'forwarding') { uci.delete('firewall', backup.lan_wan_forwarding, 'enabled'); changed = true; }
+		delete backup.lan_wan_forwarding;
+	}
+	return changed;
+}
+
+// the routing of marked packets to the local machine (TPROXY delivery), kept by netifd
+function sync_mark_routing(uci, enabled) {
+	let changed = false;
+	if (enabled) {
+		if (uci.get('network', 'tunnel_clients_rule') != 'rule') { uci.set('network', 'tunnel_clients_rule', 'rule'); changed = true; }
+		changed = uset(uci, 'network', 'tunnel_clients_rule', 'mark', MARK) || changed;
+		changed = uset(uci, 'network', 'tunnel_clients_rule', 'lookup', TABLE) || changed;
+		changed = uset(uci, 'network', 'tunnel_clients_rule', 'priority', '100') || changed;
+		if (uci.get('network', 'tunnel_clients_route') != 'route') { uci.set('network', 'tunnel_clients_route', 'route'); changed = true; }
+		changed = uset(uci, 'network', 'tunnel_clients_route', 'interface', 'loopback') || changed;
+		changed = uset(uci, 'network', 'tunnel_clients_route', 'type', 'local') || changed;
+		changed = uset(uci, 'network', 'tunnel_clients_route', 'target', '0.0.0.0/0') || changed;
+		changed = uset(uci, 'network', 'tunnel_clients_route', 'table', TABLE) || changed;
+	}
+	else for (let s in [ 'tunnel_clients_rule', 'tunnel_clients_route' ])
+		if (uci.get('network', s)) { uci.delete('network', s); changed = true; }
+	return changed;
+}
+
+// no IPv6 for the LAN while the clients are on: nothing leaves next to the tunnel
+function sync_ipv6(dhcp, net, enabled, backup) {
+	let changed = { dhcp: false, network: false };
+	if (enabled) {
+		if (!backup.ipv6)
+			backup.ipv6 = { ra: dhcp.get('dhcp', 'lan', 'ra'), dhcpv6: dhcp.get('dhcp', 'lan', 'dhcpv6'), ndp: dhcp.get('dhcp', 'lan', 'ndp'),
+			                ip6assign: net.get('network', 'lan', 'ip6assign'), wan6_disabled: net.get('network', 'wan6', 'disabled') };
+		for (let o in [ 'ra', 'dhcpv6', 'ndp' ]) changed.dhcp = uset(dhcp, 'dhcp', 'lan', o, 'disabled') || changed.dhcp;
+		if (net.get('network', 'lan', 'ip6assign') != null) { net.delete('network', 'lan', 'ip6assign'); changed.network = true; }
+		if (net.get('network', 'wan6') && net.get('network', 'wan6', 'disabled') != '1') { net.set('network', 'wan6', 'disabled', '1'); changed.network = true; }
+	}
+	else if (backup.ipv6) {
+		let b = backup.ipv6;
+		for (let o in [ 'ra', 'dhcpv6', 'ndp' ]) {
+			if (b[o] == null) { if (dhcp.get('dhcp', 'lan', o) != null) { dhcp.delete('dhcp', 'lan', o); changed.dhcp = true; } }
+			else changed.dhcp = uset(dhcp, 'dhcp', 'lan', o, b[o]) || changed.dhcp;
+		}
+		if (b.ip6assign != null) changed.network = uset(net, 'network', 'lan', 'ip6assign', b.ip6assign) || changed.network;
+		if (net.get('network', 'wan6')) {
+			if (b.wan6_disabled == null) { if (net.get('network', 'wan6', 'disabled') != null) { net.delete('network', 'wan6', 'disabled'); changed.network = true; } }
+			else changed.network = uset(net, 'network', 'wan6', 'disabled', b.wan6_disabled) || changed.network;
+		}
+		delete backup.ipv6;
+	}
+	return changed;
+}
+
+// dnsmasq asks xray only (noresolv, server 127.0.0.1#DNS_PORT); xray splits the names by the list.
+// Done in /etc/config/dhcp: a file dropped into /tmp/dnsmasq.d is not read by the dnsmasq of
+// OpenWrt 25.12 (each instance has its own conf-dir). The user's servers for single domains
+// ("/domain/address") stay; the original values are kept in the backup and restored.
+function sync_dnsmasq(dhcp, enabled, backup) {
+	let ours = `127.0.0.1#${DNS_PORT}`, changed = false;
+	if (enabled) {
+		backup.dnsmasq ??= {};
+		dhcp.foreach('dhcp', 'dnsmasq', function(s) {
+			let sec = s['.name'];
+			if (!(sec in backup.dnsmasq))
+				backup.dnsmasq[sec] = { noresolv: s.noresolv ?? null, server: (type(s.server) == 'array') ? s.server : (s.server ? [ s.server ] : null) };
+			let keep = filter(list(backup.dnsmasq[sec].server), x => substr(x, 0, 1) == '/');
+			changed = uset(dhcp, 'dhcp', sec, 'noresolv', '1') || changed;
+			changed = uset(dhcp, 'dhcp', sec, 'server', [ ...keep, ours ]) || changed;
+		});
+	}
+	else if (backup.dnsmasq) {
+		for (let sec, b in backup.dnsmasq) {
+			if (dhcp.get('dhcp', sec) != 'dnsmasq') continue;
+			if (b.noresolv == null) { if (dhcp.get('dhcp', sec, 'noresolv') != null) { dhcp.delete('dhcp', sec, 'noresolv'); changed = true; } }
+			else changed = uset(dhcp, 'dhcp', sec, 'noresolv', b.noresolv) || changed;
+			if (b.server == null) { if (dhcp.get('dhcp', sec, 'server') != null) { dhcp.delete('dhcp', sec, 'server'); changed = true; } }
+			else changed = uset(dhcp, 'dhcp', sec, 'server', b.server) || changed;
+		}
+		delete backup.dnsmasq;
+	}
+	if (access('/tmp/dnsmasq.d/tunnel-clients.conf') == true) unlink('/tmp/dnsmasq.d/tunnel-clients.conf');   // left by version 1 of this package
+	return changed;
+}
+
+function sync_cron(enabled, interval) {
+	let lines = filter(split(readfile(CRONTAB) ?? '', '\n'), l => length(l));
+	let ours = filter(lines, l => index(l, CRONTAG) >= 0);
+	let want = [];
+	if (enabled) {
+		let n = int(interval); if (n < 1 || n > 1440) n = 10;
+		let when = (n < 60) ? `*/${n} * * * *` : (n == 60 ? '0 * * * *' : `0 */${int(n / 60)} * * *`);
+		let kept = filter(ours, l => index(l, `${CRONTAG}sources`) >= 0);
+		let r = readfile('/dev/urandom', 2) ?? '';
+		let minute = (length(r) > 1) ? ord(r, 0) % 60 : 41, hour = (length(r) > 1) ? ord(r, 1) % 24 : 3;
+		push(want, `${when} /usr/libexec/tunnel-clients/measure >/dev/null 2>&1 ${CRONTAG}measure`);
+		push(want, `* * * * * /usr/libexec/tunnel-clients/measure health >/dev/null 2>&1 ${CRONTAG}health`);
+		push(want, length(kept) ? kept[0] : `${minute} ${hour} * * * /usr/libexec/tunnel-clients/sources >/dev/null 2>&1 ${CRONTAG}sources`);
+	}
+	if (join('\n', ours) == join('\n', want)) return;
+	lines = filter(lines, l => index(l, CRONTAG) < 0);
+	for (let l in want) push(lines, l);
+	if (length(lines)) {
+		mkdir('/etc/crontabs', 0o755);
+		writefile(`${CRONTAB}.tcl`, join('\n', lines) + '\n');
+		rename(`${CRONTAB}.tcl`, CRONTAB);
+	}
+	else unlink(CRONTAB);           // no jobs left: without a crontab the cron service does not run
+	system('/etc/init.d/cron restart >/dev/null 2>&1');
+	log(enabled ? 'cron: measurements and list updates scheduled' : 'cron: lines removed');
+}
+
+// ---- main ----
+
+let uci = cursor();
+uci.load(CFG);
+let main = uci.get_all(CFG, 'main') ?? {};
+chmod(`/etc/config/${CFG}`, 0o600);
+mkdir(RUN, 0o755);
+unlink(ERROR);
+
+let enabled = (mode == 'apply' && flag(main.enabled, false));
+let backup = backup_read();
+let devs = lan_devices();
+let state = { time: time(), enabled: enabled, lan_devices: devs, resolvers: [], active: '', clients: [], src_taps: {},
+              own: { domains: 0, ips: 0 }, domains: 0, ips: 0, sources: [], error: '' };
+
+if (enabled && access(XRAY, 'x') != true) {
+	set_error('xray-core is not installed (/usr/bin/xray is missing)');
+	enabled = false;
+}
+if (enabled) {
+	mkdir(SOURCES, 0o755);
+	let clients = [];
+	for (let d in descriptors())
+		for (let c in d.clients)
+			if (c.enabled && !c.error && type(c.outbound) == 'object') push(clients, { ...c, package: d.package, title: d.title });
+	let resolvers = isp_resolvers();
+	let sources = sources_info(uci);
+	prune_sources(sources);
+	let b = build(main, clients, sources, resolvers);
+	state = { ...state, ...b.state, resolvers: resolvers, sources: sources };
+	write_config(b.config);
+	if (access(CONF) != true) enabled = false;         // nothing in effect: the system stays as it is
+	for (let s in sources)
+		if (s.enabled && !s.ready && !s.time) { exec('setsid /usr/libexec/tunnel-clients/sources >/dev/null 2>&1 </dev/null &'); break; }
+}
+else {
+	unlink(NEW);
+	if (access(CONF) == true) { unlink(CONF); log('configuration removed, xray stops'); }
+}
+
+let fw = cursor(); fw.load('firewall');
+let nft = sync_nft(fw, enabled, devs);
+let fwd = sync_forwarding(fw, enabled, backup);
+if (nft.uci || fwd) fw.commit('firewall');
+if (nft.file || nft.uci || fwd) {
+	system('/etc/init.d/firewall reload >/dev/null 2>&1');
+	log(enabled ? `firewall: LAN interception on ${join(', ', devs)}, lan -> wan forwarding off (kill switch)` : 'firewall: interception removed, lan -> wan forwarding back');
+}
+let net = cursor(); net.load('network');
+let dhcp = cursor(); dhcp.load('dhcp');
+let mark = sync_mark_routing(net, enabled);
+let v6 = sync_ipv6(dhcp, net, enabled, backup);
+if (mark || v6.network) {
+	net.commit('network');
+	system('/etc/init.d/network reload >/dev/null 2>&1');
+	log(enabled ? 'network: mark routing for the interception, IPv6 off for the LAN' : 'network: mark routing removed, IPv6 settings restored');
+}
+let dns = sync_dnsmasq(dhcp, enabled, backup);
+if (v6.dhcp || dns) dhcp.commit('dhcp');
+if (v6.dhcp) system('/etc/init.d/odhcpd reload >/dev/null 2>&1');
+if (dns) {
+	system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
+	log(enabled ? `dnsmasq: upstream is xray (127.0.0.1#${DNS_PORT})` : 'dnsmasq: upstream restored');
+}
+sync_cron(enabled, main.test_interval);
+if (length(keys(backup))) writefile(BACKUP, sprintf('%J\n', backup)); else unlink(BACKUP);
+state.enabled = enabled;
+state.error = readfile(ERROR) ?? '';
+writefile(STATE, sprintf('%J\n', state));

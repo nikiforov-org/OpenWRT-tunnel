@@ -25,7 +25,8 @@ docker run --rm \
 		find /tmp/custom -type f -exec chmod 644 {} +
 		find /tmp/custom \( -path "*/root/etc/init.d/*" -o -path "*/root/usr/libexec/*" \
 			-o -path "*/root/usr/bin/*" -o -path "*/root/usr/sbin/*" \
-			-o -path "*/root/etc/hotplug.d/*" -o -path "*/root/etc/uci-defaults/*" \) \
+			-o -path "*/root/etc/hotplug.d/*" -o -path "*/root/etc/uci-defaults/*" \
+			-o -path "*/root/usr/share/www/*/cgi-bin/*" \) \
 			-type f -exec chmod 755 {} +
 
 		cp feeds.conf.default feeds.conf
@@ -35,6 +36,11 @@ docker run --rm \
 		./scripts/feeds update luci custom
 		./scripts/feeds install $PKGS
 
+		# Kernel modules are runtime dependencies only, like xray-core (the packages are
+		# noarch): without the SDK package tree of the kernel, a dependency on a kmod-*
+		# package stays in the package metadata and no longer makes the SDK pack all of
+		# its kernel modules first.
+		rm -rf package/kernel/linux
 		make defconfig >/dev/null
 		for p in $PKGS; do
 			make "package/$p/compile" V=s

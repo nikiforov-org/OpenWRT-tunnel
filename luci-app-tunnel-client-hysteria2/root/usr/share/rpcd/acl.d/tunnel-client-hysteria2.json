@@ -1,0 +1,7 @@
+{
+	"tunnel-client-hysteria2": {
+		"description": "Hysteria2 client links of the Tunnel > Clients page",
+		"read": { "uci": [ "tunnel-client-hysteria2" ] },
+		"write": { "uci": [ "tunnel-client-hysteria2" ] }
+	}
+}

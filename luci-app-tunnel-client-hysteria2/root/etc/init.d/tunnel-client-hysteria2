@@ -1,0 +1,18 @@
+#!/bin/sh /etc/rc.common
+# Parses the links into xray outbounds for luci-app-tunnel-clients (sync) on boot and on every
+# change; the outbounds run inside the xray process of luci-app-tunnel-clients.
+
+START=94
+USE_PROCD=1
+
+start_service() {
+	/usr/libexec/tunnel-client-hysteria2/sync
+}
+
+reload_service() {
+	/usr/libexec/tunnel-client-hysteria2/sync
+}
+
+service_triggers() {
+	procd_add_reload_trigger "tunnel-client-hysteria2"
+}

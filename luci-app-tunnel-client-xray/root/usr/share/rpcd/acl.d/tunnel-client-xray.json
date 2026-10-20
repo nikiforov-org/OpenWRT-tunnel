@@ -1,0 +1,7 @@
+{
+	"tunnel-client-xray": {
+		"description": "Xray client links of the Tunnel > Clients page",
+		"read": { "uci": [ "tunnel-client-xray" ] },
+		"write": { "uci": [ "tunnel-client-xray" ] }
+	}
+}

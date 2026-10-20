@@ -1,0 +1,17 @@
+{
+	"tunnel-clients": {
+		"description": "Tunnel > Clients: routing of the LAN through tunnel clients",
+		"read": {
+			"ubus": {
+				"tunnel-clients": [ "status", "log", "config" ]
+			},
+			"uci": [ "tunnel-clients" ]
+		},
+		"write": {
+			"ubus": {
+				"tunnel-clients": [ "measure", "update_sources", "restart" ]
+			},
+			"uci": [ "tunnel-clients" ]
+		}
+	}
+}

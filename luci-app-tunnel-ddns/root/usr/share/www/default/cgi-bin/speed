@@ -1,0 +1,13 @@
+#!/bin/sh
+# A bandwidth test endpoint: GET /cgi-bin/speed?bytes=N answers with N zero bytes (default
+# 5000000, at most 20000000) taken from /dev/zero. Nothing is stored and nothing is read from
+# disk, so it costs no space on the router. Use it to measure the throughput of a path to this
+# server from wherever the request is made:
+#   curl -o /dev/null -w '%{speed_download}\n' 'https://example.com/cgi-bin/speed?bytes=5000000'
+MAX=20000000
+N=$(printf '%s\n' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^bytes=\([0-9]\{1,8\}\)$/\1/p' | head -n 1)
+[ -n "$N" ] || N=5000000
+[ "$N" -gt "$MAX" ] && N=$MAX
+[ "$N" -ge 1 ] || N=1
+printf 'Status: 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %s\r\nCache-Control: no-store\r\n\r\n' "$N"
+[ "${REQUEST_METHOD:-GET}" = HEAD ] || head -c "$N" /dev/zero

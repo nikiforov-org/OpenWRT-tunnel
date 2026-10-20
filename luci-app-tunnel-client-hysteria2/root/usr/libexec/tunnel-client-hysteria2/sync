@@ -1,0 +1,47 @@
+#!/usr/bin/env ucode
+// tunnel-client-hysteria2 sync: turn the links of /etc/config/tunnel-client-hysteria2 into xray outbounds and
+// hand them to luci-app-tunnel-clients through the runtime descriptor. The outbounds run inside the
+// xray process of luci-app-tunnel-clients, so this package starts no process of its own.
+//   sync          apply: write the descriptor, reload luci-app-tunnel-clients when it changed
+//   sync revert   remove the descriptor (package removal)
+
+'use strict';
+
+import { access, readfile, chmod, unlink } from 'fs';
+import { cursor } from 'uci';
+import { RUN, parse_link, hysteria2_to_xray, write_descriptor } from 'tunnel-clients.common';
+
+const CFG = 'tunnel-client-hysteria2';
+const CLIENTS_INIT = '/etc/init.d/tunnel-clients';
+const mode = ARGV[0] ?? 'apply';
+
+let uci = cursor();
+uci.load(CFG);
+chmod(`/etc/config/${CFG}`, 0o600);
+
+let before = readfile(`${RUN}/${CFG}.json`);
+if (mode == 'apply') {
+	let clients = [];
+	uci.foreach(CFG, 'link', function(s) {
+		let sid = s['.name'];
+		let c = { tag: `hysteria2-${sid}`, name: trim(s.name ?? ''), enabled: (s.enabled != '0'), transport: '', server_host: '', server_port: 0, test_url: trim(s.test_url ?? ''), error: '' };
+		let p = parse_link(s.link ?? '');
+		if (!p || p.scheme != 'hysteria2' && p.scheme != 'hy2')
+			c.error = 'not a hysteria2:// link';
+		else {
+			let o = hysteria2_to_xray(p);
+			if (o.error) c.error = o.error;
+			else {
+				c.outbound = o.outbound; c.transport = o.transport; c.server_host = p.host; c.server_port = p.port;
+				if (!length(c.name)) c.name = length(p.name) ? p.name : `${p.host}:${p.port}`;
+			}
+		}
+		push(clients, c);
+	});
+	write_descriptor(CFG, { package: CFG, clients: clients, error: '' });
+}
+else
+	unlink(`${RUN}/${CFG}.json`);
+
+if (readfile(`${RUN}/${CFG}.json`) != before && access(CLIENTS_INIT, 'x') == true)
+	system(`${CLIENTS_INIT} reload >/dev/null 2>&1`);

@@ -18,7 +18,7 @@
 <li><a class="pagelink" href="/frontend.html">Frontend</a>
 </li>
 <li><a class="pagelink current" href="/backend.html">Backend</a>
-<ul class="sections"><li><a href="#the-contract">The contract</a></li><li><a href="#when-it-runs">When it runs</a></li><li><a href="#rules-of-a-good-build">Rules of a good build</a></li><li><a href="#what-the-router-offers">What the router offers</a></li><li><a href="#example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</a></li><li><a href="#example-2-a-feed-from-rss">Example 2: a feed from RSS</a></li><li><a href="#debugging">Debugging</a></li></ul>
+<ul class="sections"><li><a href="#the-contract">The contract</a></li><li><a href="#when-it-runs">When it runs</a></li><li><a href="#rules-of-a-good-build">Rules of a good build</a></li><li><a href="#what-the-router-offers">What the router offers</a></li><li><a href="#example-1-rates-and-weather-from-json">Example 1: rates and weather from JSON</a></li><li><a href="#example-2-a-feed-from-rss">Example 2: a feed from RSS</a></li><li><a href="#a-bandwidth-test-endpoint">A bandwidth test endpoint</a></li><li><a href="#debugging">Debugging</a></li></ul>
 </li>
 <li><a class="pagelink" href="/login.html">Login page</a>
 </li>
@@ -164,6 +164,11 @@ for (let chunk in slice(split(xml, '&lt;item&gt;'), 1)) {
 	});
 }</code></pre>
 <p>Then the same <code>render('index.ut', { items, … })</code>. Several feeds: a loop over a list of addresses in your own <code>feeds.conf</code>. Sorting by date: turn <code>pubDate</code> into a number and <code>sort(items, (a, b) =&gt; b.key - a.key)</code>.</p>
+
+<h2 id="a-bandwidth-test-endpoint">A bandwidth test endpoint</h2>
+<p>The site ships a small CGI, <code>cgi-bin/speed</code>, that answers <code>GET /cgi-bin/speed?bytes=N</code> with N zero bytes (default 5 000 000, at most 20 000 000) taken straight from <code>/dev/zero</code>: nothing is stored and nothing is read from disk, so it costs no space on the router. It exists to measure the throughput of a path to this server from wherever the request is made: a tunnel client checking its connection, a monitoring script, a one-off test from a terminal:</p>
+<pre>curl -o /dev/null -w '%{speed_download}\n' 'https://example.com/cgi-bin/speed?bytes=5000000'</pre>
+<p>The endpoint needs no login and answers anyone, up to the cap per request; remove the file from the archive if the site should not offer it. A site of your own gets the same by copying the file into its <code>cgi-bin/</code> (it must be executable).</p>
 
 <h2 id="debugging">Debugging</h2>
 <ul>

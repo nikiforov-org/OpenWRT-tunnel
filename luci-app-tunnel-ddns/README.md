@@ -118,6 +118,15 @@ everything off).
 Logs: `/var/log/ddns/tunnel_ddns_<id>.log` (address), `/tmp/tunnel-ddns/cert-<id>.log`
 (certificate), `logread | grep tunnel-ddns` (applying the settings).
 
+## Bandwidth test endpoint
+
+The built-in site carries `cgi-bin/speed`: `GET /cgi-bin/speed?bytes=N` answers with N zero
+bytes from `/dev/zero` (default 5 000 000, at most 20 000 000), nothing is stored on the
+router. It is there to measure the throughput of a path to this router from wherever the
+request is made, for example `curl -o /dev/null -w '%{speed_download}\n'
+'https://<host>/cgi-bin/speed?bytes=5000000'`. It needs no login and answers anyone up to the
+cap; a site of your own offers it by shipping the same file in its `cgi-bin/`.
+
 ## Removal
 
 `apk del luci-app-tunnel-ddns` first does "Switch everything off", then removes the files. The
