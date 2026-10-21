@@ -39,6 +39,14 @@ after installing; the entry appears in the **Tunnel** section.
   held back again after 30 minutes of circuits through the other bridges, 24 hours after they
   were added, or when the daily bridge update brings a changed list. A list of snowflake lines
   only is used as it is.
+- **Uplink changes.** When an interface of the firewall zone `wan` comes up, goes down or
+  changes its addresses (a cable pulled or plugged, a USB modem as the second uplink) and the
+  route to the Internet now leaves through another interface or address, the package tells tor
+  `DisableNetwork 1` and `0` through its control port: tor closes its connections, which are
+  still bound to the old address, and connects again through the route in effect. Without it,
+  tor noticed nothing for 7 minutes after the WAN cable was pulled and for more than 8 after it
+  was plugged back, and the onion address did not answer meanwhile; with it, the onion service
+  had its introduction circuits back after 10-20 seconds and its descriptor uploaded after 30-40.
 - **Traffic options.** **Keep tor's cache on the router's storage** moves tor's data
   directory (about 33 MB, mostly the relay descriptors) from `/var/lib/tor` in the memory to
   `/etc/tor/tunnel-tor-data`, so that tor does not download the directory again after a
@@ -107,6 +115,9 @@ configuration is applied again right away.
   `/usr/libexec/tunnel-tor/watch`; its last result is in `/tmp/tunnel-tor/watch.json`, and
   `/etc/tunnel-tor/snowflake.on` (the time it was written) exists while the snowflake lines are
   added.
+- `/etc/hotplug.d/iface/90-tunnel-tor`: on ifup, ifdown and ifupdate of an interface of the wan
+  zone, 3 seconds later, `watch reconnect` (one at a time); the route in effect is kept in
+  `/tmp/tunnel-tor/uplink`, and tor is reconnected only when it changed.
 - `/etc/tor/tunnel-tor-data/` (tor:tor, mode 700) while the cache is kept on the router's
   storage. When the option is switched on or off, the cache files (`cached-*`, `state`) are
   copied to the other directory before tor restarts, so that tor does not download the
