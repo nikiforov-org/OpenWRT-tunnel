@@ -95,7 +95,8 @@ configuration is applied again right away.
   `/etc/config/tunnel-tor` (which gets mode 600, it holds the private keys): the bridge
   lines, the onion service directory, its version and ports, the traffic options, and a
   control port on 127.0.0.1 (`ControlPort auto`, the port written to `control.port` in the
-  data directory, `CookieAuthentication 1`) for the watch script. It is added to the stock tor
+  data directory, `CookieAuthentication 1`) for the watch script and the overview, which asks
+  tor there for its bootstrap progress. It is added to the stock tor
   configuration through `tor.conf.tail_include` in `/etc/config/tor`, the way the tor package
   provides for. The file is replaced only after `tor --verify-config` accepts it together
   with the stock `/etc/tor/torrc`; any error, from an unreadable bridge line to a

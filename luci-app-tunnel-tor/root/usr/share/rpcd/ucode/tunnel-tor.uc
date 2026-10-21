@@ -1,14 +1,13 @@
 'use strict';
 
-import { access, popen, readfile, writefile, mkdir, unlink, chmod, stat, lsdir } from 'fs';
+import { access, readfile, writefile, mkdir, unlink, chmod, stat, lsdir } from 'fs';
 import { cursor } from 'uci';
+import { RUN, CONF, exec, shq, base32, valid_key, public_key, tor_instance, bootstrap_phase } from 'tunnel-tor.common';
 
 const CFG     = 'tunnel-tor';
 const DIR     = '/etc/tunnel-tor';
-const CONF    = `${DIR}/torrc`;
 const HS      = '/etc/tor/tunnel-tor';
 const CLIENTS = `${HS}/authorized_clients`;
-const RUN     = '/tmp/tunnel-tor';
 const ERROR   = `${RUN}/error`;
 const TOR     = '/usr/sbin/tor';
 const INIT    = '/etc/init.d/tunnel-tor';
@@ -17,18 +16,6 @@ const LIST    = `${DIR}/bridges.txt`;
 const BSTATE  = `${DIR}/bridges.state`;
 const BRUN    = `${RUN}/bridges.running`;
 const UPDATE  = '/usr/libexec/tunnel-tor/bridges-update';
-
-function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-}
-
-function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-}
 
 function tail(text, n) {
 	let lines = split(rtrim(text ?? '', '\n'), '\n');
@@ -39,49 +26,6 @@ function tail(text, n) {
 
 function valid_sid(s) {
 	return type(s) == 'string' && match(s, /^[A-Za-z0-9_]{1,64}$/) != null;
-}
-
-function base32(bytes) {
-	const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-	let out = '', bits = 0, val = 0;
-	for (let i = 0; i < length(bytes); i++) {
-		val = ((val << 8) | ord(bytes, i)) & 0x1fff;
-		bits += 8;
-		while (bits >= 5) { out += substr(A, (val >> (bits - 5)) & 31, 1); bits -= 5; }
-	}
-	if (bits > 0) out += substr(A, (val << (5 - bits)) & 31, 1);
-	return out;
-}
-
-function base32_decode(s) {
-	const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-	let out = '', bits = 0, val = 0;
-	for (let i = 0; i < length(s); i++) {
-		let v = index(A, uc(substr(s, i, 1)));
-		if (v < 0) return null;
-		val = ((val << 5) | v) & 0x1fff;
-		bits += 5;
-		if (bits >= 8) { out += chr((val >> (bits - 8)) & 255); bits -= 8; }
-	}
-	return out;
-}
-
-function valid_key(s) {
-	return type(s) == 'string' && match(s, /^[A-Z2-7]{52}$/) != null;
-}
-
-function public_key(priv) {
-	if (!valid_key(priv)) return '';
-	let raw = base32_decode(priv);
-	if (raw == null || length(raw) != 32) return '';
-	mkdir(RUN, 0o700);
-	let pem = `${RUN}/key-${time()}.pem`;
-	writefile(pem, "-----BEGIN PRIVATE KEY-----\n" + b64enc(hexdec('302e020100300506032b656e04220420') + raw) + "\n-----END PRIVATE KEY-----\n");
-	chmod(pem, 0o600);
-	let r = exec(`openssl pkey -in ${shq(pem)} -pubout -outform DER 2>/dev/null`);
-	unlink(pem);
-	if (r.code != 0 || length(r.out) < 32) return '';
-	return base32(substr(r.out, length(r.out) - 32));
 }
 
 // the port of the server's TCP + Vision transport (luci-app-tunnel-server) when it runs and is
@@ -99,12 +43,31 @@ function onion() {
 	return trim(readfile(`${HS}/hostname`) ?? '');
 }
 
-// the last bootstrap message of the running tor process
-function bootstrap(pid) {
-	let out = exec(`logread 2>/dev/null | grep -E 'Tor\\[${pid}\\]: Bootstrapped [0-9]+%' | tail -1`).out;
-	let m = match(out, /Bootstrapped ([0-9]+)% \(([a-z_]+)\): ?(.*)$/);
-	if (!m) return null;
-	return { percent: int(m[1]), text: (m[2] == 'done') ? '' : trim(m[3]) };
+// tor's bootstrap: asked on its control port (the log lines are gone once the log buffer wrapped),
+// kept once done for that process (rpcd keeps this plugin loaded); in the first seconds of a start,
+// before the control port is there, the last log line of that process
+let boot = { pid: null, value: null };
+function bootstrap(inst) {
+	if (boot.pid == inst.pid && boot.value?.percent == 100) return boot.value;
+	let v = bootstrap_phase();
+	if (v == null) {
+		let m = match(exec(`logread 2>/dev/null | grep -E 'Tor\\[${inst.pid}\\]: Bootstrapped [0-9]+%' | tail -1`).out,
+		              /Bootstrapped ([0-9]+)% \(([a-z_]+)\): ?(.*)$/);
+		v = m ? { percent: int(m[1]), text: (m[2] == 'done') ? '' : trim(m[3]) } : null;
+	}
+	if (v) boot = { pid: inst.pid, value: v };
+	return v;
+}
+
+// the tor version, read again only when the binary changed
+let version = { key: null, value: '' };
+function tor_version() {
+	let st = stat(TOR), key = st ? `${st.mtime}/${st.size}` : null;
+	if (key != version.key) {
+		let m = key ? match(exec(`${TOR} --version 2>/dev/null`).out, /Tor version ([0-9]+(\.[0-9]+)*)/) : null;
+		version = { key: key, value: m ? m[1] : '' };
+	}
+	return version.value;
 }
 
 // the snowflake bridges: the mode, how many snowflake and other lines the configured list has,
@@ -170,8 +133,8 @@ methods.status = {
 		uci.load(CFG);
 		let main = uci.get_all(CFG, 'main') ?? {};
 		let enabled = (main.enabled == '1');
-		let pid = trim(exec('pidof tor 2>/dev/null').out);
-		let running = (pid != '');
+		let inst = tor_instance();
+		let running = (inst != null);
 		let profiles = [];
 		uci.foreach(CFG, 'profile', function(s) {
 			let name = trim(s.name ?? '');
@@ -179,11 +142,10 @@ methods.status = {
 				authorized: (name != '' && access(`${CLIENTS}/${name}.auth`) == true) });
 		});
 		let st = stat(CONF);
-		let bs = running ? bootstrap(split(pid, ' ')[0]) : null;
-		let version = match(exec(`${TOR} --version 2>/dev/null | head -1`).out, /Tor version ([0-9]+(\.[0-9]+)*)/);
+		let bs = running ? bootstrap(inst) : null;
 		return {
 			installed: (access(TOR, 'x') == true),
-			version: version ? version[1] : '',
+			version: tor_version(),
 			enabled: enabled,
 			running: running,
 			bootstrap: bs ? bs.percent : (running ? 0 : null),

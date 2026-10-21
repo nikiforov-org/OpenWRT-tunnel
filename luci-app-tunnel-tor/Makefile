@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=Tor onion service: reach this router through the Tor network, with per-client authorization
-LUCI_DEPENDS:=+tor +obfs4proxy +snowflake-client +curl +openssl-util +luci-lib-uqr +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci
+LUCI_DEPENDS:=+tor +obfs4proxy +snowflake-client +curl +openssl-util +luci-lib-uqr +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus
 LUCI_PKGARCH:=all
 LUCI_MAINTAINER:=Evgenii Nikiforov
 LUCI_URL:=https://github.com/nikiforov-org/OpenWRT-tunnel

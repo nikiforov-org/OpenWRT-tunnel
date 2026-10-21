@@ -10,8 +10,9 @@
 
 'use strict';
 
-import { access, popen, readfile, writefile, mkdir, unlink, chmod, rename, lsdir } from 'fs';
+import { access, readfile, writefile, mkdir, unlink, chmod, rename, lsdir } from 'fs';
 import { cursor } from 'uci';
+import { shq, exec, public_key, tor_instance } from 'tunnel-tor.common';
 
 const CFG     = 'tunnel-tor';
 const DIR     = '/etc/tunnel-tor';
@@ -34,18 +35,6 @@ const FLASH_DATA = '/etc/tor/tunnel-tor-data';      // tor's DataDirectory with 
 
 const mode = ARGV[0] ?? 'apply';
 
-function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-}
-
-function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-}
-
 function log(msg) {
 	system(`logger -t ${CFG} ${shq(msg)}`);
 }
@@ -63,52 +52,6 @@ function set_error(msg) {
 	mkdir(RUN, 0o755);
 	writefile(ERROR, msg);
 	log(`not applied: ${msg}`);
-}
-
-// ---- client keys: x25519, base32 as Tor expects them ----
-
-function base32(bytes) {
-	const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-	let out = '', bits = 0, val = 0;
-	for (let i = 0; i < length(bytes); i++) {
-		val = ((val << 8) | ord(bytes, i)) & 0x1fff;
-		bits += 8;
-		while (bits >= 5) { out += substr(A, (val >> (bits - 5)) & 31, 1); bits -= 5; }
-	}
-	if (bits > 0) out += substr(A, (val << (5 - bits)) & 31, 1);
-	return out;
-}
-
-function base32_decode(s) {
-	const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-	let out = '', bits = 0, val = 0;
-	for (let i = 0; i < length(s); i++) {
-		let v = index(A, uc(substr(s, i, 1)));
-		if (v < 0) return null;
-		val = ((val << 5) | v) & 0x1fff;
-		bits += 5;
-		if (bits >= 8) { out += chr((val >> (bits - 8)) & 255); bits -= 8; }
-	}
-	return out;
-}
-
-function valid_key(s) {
-	return type(s) == 'string' && match(s, /^[A-Z2-7]{52}$/) != null;
-}
-
-// the public key of a base32 private key, through openssl (DER prefix of an x25519 private key)
-function public_key(priv) {
-	if (!valid_key(priv)) return '';
-	let raw = base32_decode(priv);
-	if (raw == null || length(raw) != 32) return '';
-	mkdir(RUN, 0o700);
-	let pem = `${RUN}/key.pem`;
-	writefile(pem, "-----BEGIN PRIVATE KEY-----\n" + b64enc(hexdec('302e020100300506032b656e04220420') + raw) + "\n-----END PRIVATE KEY-----\n");
-	chmod(pem, 0o600);
-	let r = exec(`openssl pkey -in ${shq(pem)} -pubout -outform DER 2>/dev/null`);
-	unlink(pem);
-	if (r.code != 0 || length(r.out) < 32) return '';
-	return base32(substr(r.out, length(r.out) - 32));
 }
 
 // ---- the configuration file ----
@@ -294,7 +237,7 @@ function sync_tor(enabled, changed) {
 		else uci.delete('tor', 'conf', 'tail_include');
 		uci.commit('tor');
 	}
-	let running = (exec('pidof tor >/dev/null 2>&1').code == 0);
+	let running = (tor_instance() != null);
 	if (enabled) {
 		if (access(MANAGED) != true && system('/etc/init.d/tor enabled >/dev/null 2>&1') != 0)
 			writefile(MANAGED, '');                 // the service was off: this package switches it on

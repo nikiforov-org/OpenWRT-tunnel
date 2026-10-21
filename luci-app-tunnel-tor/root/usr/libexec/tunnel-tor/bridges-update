@@ -11,6 +11,7 @@
 
 import { access, popen, readfile, writefile, mkdir, unlink, rename, stat } from 'fs';
 import { cursor } from 'uci';
+import { tor_instance } from 'tunnel-tor.common';
 
 const CFG     = 'tunnel-tor';
 const DIR     = '/etc/tunnel-tor';
@@ -100,7 +101,7 @@ let st = { time: time(), country: country, via: '', lines: 0, by: {}, changed: f
 
 // whether the stock tor service runs (its SOCKS port is then worth a try)
 function tor_running() {
-	try { return json(exec(`ubus call service list '{"name":"tor"}'`).out)?.tor?.instances?.instance1?.running == true; } catch (e) { return false; }
+	return tor_instance() != null;
 }
 
 if ((main.bridges ?? 'builtin') != 'builtin') {
