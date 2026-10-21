@@ -13,7 +13,7 @@
 
 import { access, readfile, writefile, mkdir, unlink, rename, stat } from 'fs';
 import { cursor } from 'uci';
-import { RUN, shq, exec } from 'tunnel-client.common';
+import { RUN, shq, exec, lock, cidr } from 'tunnel-client.common';
 
 const CFG   = 'tunnel-client';
 const DIR   = '/etc/tunnel-client/sources';
@@ -51,8 +51,10 @@ function parse_line(line) {
 	tok = lc(tok);
 	let m = match(tok, /^include:([a-z0-9._!-]+)$/);
 	if (m) return [ 'include', m[1] ];
-	if (match(tok, /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/))
-		return [ 'ip', (index(tok, '/') < 0) ? tok + '/32' : tok ];
+	if (match(tok, /^[0-9.\/]+$/)) {
+		let c = cidr(tok);
+		return c ? [ 'ip', c ] : null;
+	}
 	if (index(tok, ':') >= 0 && match(tok, /^[0-9a-f:]+(\/[0-9]+)?$/)) return null;     // IPv6: the LAN has none
 	m = match(tok, /^(domain|full|keyword|regexp):(.+)$/);
 	if (m) return [ 'domain', `${m[1]}:${m[2]}` ];
@@ -105,9 +107,8 @@ function store_list(path, items) {
 
 mkdir(RUN, 0o755);
 mkdir(DIR, 0o755);
-let s = stat(LOCK);
-if (s && time() - s.mtime < 900) exit(0);
-writefile(LOCK, `${time()}\n`);
+let held = lock(LOCK);
+if (!held) exit(0);
 let st = null;
 try { st = json(readfile(STATE) ?? ''); } catch (e) { st = null; }
 // the taps exist while the shared xray runs with the client's file (xray-service)
@@ -169,5 +170,5 @@ uci.foreach(CFG, 'source', function(sec) {
 	push(report, `${name}: ` + (meta.format ? `${meta.domains} domains, ${meta.ips} subnets` : '') + (meta.error ? ` (${meta.error})` : ''));
 });
 log('sources: ' + join('; ', report) + (changed ? ' (changed, routing reloaded)' : ''));
-unlink(LOCK);
+held.close();
 if (changed) system('/etc/init.d/tunnel-client reload >/dev/null 2>&1');

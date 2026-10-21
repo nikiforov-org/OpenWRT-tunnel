@@ -10,7 +10,8 @@
 // joined file of two files replaces the one in effect only after "xray run -test" accepts it (a
 // single file was tested by its package's sync). Both packages ship this same script; a package's
 // file counts while that package ships it too. After xray started with the client's file, the
-// client's active link is applied again through xray's API (select).
+// client's active link is applied again through xray's API (measure started: select, and a
+// measurement when the links changed).
 
 'use strict';
 
@@ -28,7 +29,7 @@ const LOCK    = '/var/lock/tunnel-xray';
 const PARTS   = [
 	{ conf: '/etc/tunnel-server/config.json', script: '/usr/libexec/tunnel-server/xray-service' },
 	{ conf: '/etc/tunnel-client/config.json', script: '/usr/libexec/tunnel-client/xray-service',
-	  after: '/usr/libexec/tunnel-client/select' }
+	  after: '/usr/libexec/tunnel-client/measure started' }
 ];
 
 function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
@@ -137,6 +138,6 @@ ubus.call('service', 'set', {
 if (replaced || !before?.running || join(' ', before?.command ?? []) != join(' ', command)) {
 	let old = before?.running ? before.pid : 0;
 	for (let p in used)
-		if (p.after && access(p.after, 'x'))
+		if (p.after && access(split(p.after, ' ')[0], 'x'))
 			system(`(i=0; while [ $i -lt 10 ] && [ "$(ubus call service list '{"name":"${SERVICE}"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')" = "${old}" ]; do sleep 1; i=$((i+1)); done; ${p.after}) >/dev/null 2>&1 &`);
 }

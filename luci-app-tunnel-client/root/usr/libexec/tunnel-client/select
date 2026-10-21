@@ -4,10 +4,12 @@
 # choice (also one made by measure after the last sync) while it is a link of the configuration in
 # effect, else the choice sync made (the first link). Only a link of the configuration in effect is
 # selected: xray accepts an override to any tag, also a removed one. Waits up to 30 s for the API
-# after a start. Prints nothing; logs a switch.
+# after a start. Prints nothing; logs a switch. The link in effect is written with the pid of that
+# xray to /tmp/tunnel-client/active, where the status and the measurements read it.
 API=127.0.0.1:61085
 STATE=/tmp/tunnel-client/state.json
 AUTO=/etc/tunnel-client/auto.json
+ACTIVE=/tmp/tunnel-client/active
 known() { [ -n "$1" ] && [ -n "$(jsonfilter -i $STATE -e "@.clients[@.tag='$1'].tag" 2>/dev/null)" ]; }
 TAG="$1"
 if [ -z "$TAG" ]; then
@@ -34,8 +36,13 @@ for i in $(seq 1 30); do
 	sleep 1
 done
 [ -n "$NOW" ] || exit 1
-[ "$NOW" = "$TAG" ] && exit 0
+PID="$(ubus call service list '{"name":"tunnel-xray"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')"
+if [ "$NOW" = "$TAG" ]; then
+	echo "$TAG $PID" > $ACTIVE
+	exit 0
+fi
 if xray api bo --server=$API -b active "$TAG" >/dev/null 2>&1 && [ "$(current)" = "$TAG" ]; then
+	echo "$TAG $PID" > $ACTIVE
 	logger -t tunnel-client "active link: $TAG"
 else
 	logger -t tunnel-client "could not make $TAG the active link"

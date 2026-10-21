@@ -104,7 +104,7 @@ configuration is applied again right away.
   service `tunnel-xray`, apart from the `xray` service of the `xray-core` package, which stays
   disabled as installed. The joined file replaces the one in effect only after `xray run -test`
   accepts it. One process instead of two saves about 10 MB of memory (measured on the router:
-  15.5 MB of its own memory for both against 11.1 + 15.2 MB). A change of either file restarts
+  13.3 MB of its own memory for both against 13.2 + 12.9 MB as two processes). A change of either file restarts
   it, so a change of the client's settings or its daily list update also restarts the server's
   transports for a moment (clients reconnect); the server off removes its file, and xray goes
   on with the client's alone or stops.

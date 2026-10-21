@@ -30,9 +30,10 @@ after installing.
   forwarding of the firewall is switched off: if xray stops, the LAN has no way to the
   Internet (kill switch), and protocols other than TCP and UDP (ping) do not leave the LAN.
   The router's own traffic (updates, dynamic DNS, the server) is not intercepted and goes
-  directly. IPv6 is switched off for the LAN meanwhile, so nothing leaves next to the tunnel.
-  Private destinations (the networks behind the router, ZeroTier, Tailscale) are reached
-  directly.
+  directly. IPv6 is switched off for the LAN meanwhile, so nothing leaves next to the tunnel:
+  the router advertisements stay on with a router lifetime of 0 and without a prefix, so the
+  LAN devices drop their IPv6 default route at once. Private destinations (the networks behind
+  the router, ZeroTier, Tailscale) are reached directly.
 - **Split tunnelling** (on by default): **only what is in the list** goes through the client,
   or **everything except the list**, or everything with the splitting off. The list holds your
   entries (domains with their subdomains, subnets) and sources fetched once a day: text lists
@@ -41,7 +42,11 @@ after installing.
   name of the list inside). Shipped: the IPv4 networks of Russia (ipverse, aggregated from the
   RIR data) and the main Russian services (v2fly `category-ru`), plus the entries `ru`, `su`,
   `xn--p1ai`; remove or replace them as you like. List downloads go through the active link
-  when one works.
+  when one works. The listed subnets are an nftables set in the kernel: connections of the LAN
+  to them reach xray on an inbound of their own, which is routed as a whole (measured on the
+  router with the 8 664 subnets of the shipped source: xray 13.3 MB instead of 15.4 MB, the set
+  about 1 MB of kernel memory, the configuration test 0.17 s instead of 1.7 s); the domains are
+  matched by xray (TLS server name, HTTP host, QUIC).
 - **DNS.** dnsmasq asks xray only. xray resolves the names that go through the tunnel at the
   resolver set on the page (1.1.1.1 by default) through the active link, and the other names
   at the provider's resolvers; a listed name never falls back to the provider when the tunnel
@@ -50,15 +55,20 @@ after installing.
   modem, a cable pulled), the client applies its settings again, so the provider's resolvers
   are always those of the uplinks that are up.
 - **The active link.** *By hand*: strictly the chosen profile and transport, even when it
-  fails. *Automatic*: every N minutes (10 by default) the test payload is downloaded through
-  every link of every profile at once; the fastest replaces the active one when it is faster by
-  the threshold (20 %), or at once when the active one failed. A health check of the active
-  link runs every minute and starts the measurement when it fails. Switching goes through
-  xray's API, without a restart. The test target is the server's own site through the tunnel,
-  `https://127.0.0.1/cgi-bin/speed?bytes=N`, served by the site of
-  [`luci-app-tunnel-ddns`](../luci-app-tunnel-ddns/README.md#bandwidth-test-endpoint) on the
-  server (with access to local networks allowed there); a profile may name another URL for
-  servers that do not have it.
+  fails. *Automatic* with two links or more: every N minutes (60 by default) the test payload
+  (2 MB by default) is downloaded through every link of every profile, one link after the
+  other; the fastest replaces the active one when it is faster by the threshold (20 %), or at
+  once when the active one failed. Every minute the active link gets a small request (a HEAD
+  request to its test URL, or one byte from the server's site, about 12 KB with the
+  handshakes); when it does not answer, the other links get the same request and the one that
+  answers first becomes active. By hand or with a single link nothing runs on its own (**Measure
+  now** still works), and no measurement runs on its own while the router's default route goes
+  through an interface of **Metered uplinks**. After xray started with new links they are
+  measured once. Switching goes through xray's API, without a restart. The test target is the
+  server's own site through the tunnel, `https://127.0.0.1/cgi-bin/speed?bytes=N`, served by
+  the site of [`luci-app-tunnel-ddns`](../luci-app-tunnel-ddns/README.md#bandwidth-test-endpoint)
+  on the server (with access to local networks allowed there); a profile may name another URL
+  for servers that do not have it, and its download is cut off after the test size.
 - **Links that are refused:** VLESS over other transports (WebSocket, gRPC and others), TCP
   header obfuscation, an unchecked TLS certificate (`allowInsecure=1`, or `insecure=1`
   without `pinSHA256` for Hysteria2: xray has no switch for an unchecked certificate), and
@@ -88,22 +98,27 @@ Everything only on **Save & Apply**, nothing at install time. While the client i
   with `xray run -test` too) and runs xray with it as the procd service `tunnel-xray`; xray
   restarts only when the joined file changed, and the active link is then applied again. The
   active link is a balancer target switched through xray's API on
-  `127.0.0.1:61085`; the automatic choice is kept in `/etc/tunnel-client/auto.json`. Local
-  ports 61001 (interception), 61053 (DNS), 61101… (one per link, for the speed test) and
-  61201… (one per list host) belong to it; direct connections from the LAN to them are refused.
-- `/etc/config/firewall`: the include `tunnel_client` (rules in
-  `/etc/tunnel-client/tproxy.nft`, chain `mangle_prerouting`) and `enabled 0` on the lan → wan
-  forwarding.
+  `127.0.0.1:61085`; the automatic choice is kept in `/etc/tunnel-client/auto.json`, the
+  provider's resolvers of the last uplink in `/etc/tunnel-client/resolvers` (used at a start
+  before an uplink is up). Local ports 61001 (interception), 61002 (the listed subnets), 61053
+  (DNS), 61101… (one per link, for the speed test) and 61201… (one per list host) belong to it;
+  direct connections from the LAN to them are refused.
+- `/etc/config/firewall`: the includes `tunnel_client` (rules in
+  `/etc/tunnel-client/tproxy.nft`, chain `mangle_prerouting`) and `tunnel_client_set` (the set
+  `tunnel_client_listed` in `/etc/tunnel-client/listed.nft`, checked with `nft -c` before it
+  replaces the one in effect), and `enabled 0` on the lan → wan forwarding.
 - `/etc/config/network`: the rule `tunnel_client_rule` (fwmark 0x2222 → table 2222) and the
   route `tunnel_client_route` (local 0.0.0.0/0 in table 2222); for the LAN `ip6assign` removed
   and `wan6` disabled.
-- `/etc/config/dhcp`: `ra`, `dhcpv6`, `ndp` of the LAN set to `disabled`; dnsmasq `noresolv 1`
+- `/etc/config/dhcp`: `dhcpv6` and `ndp` of the LAN set to `disabled`, `ra_default` removed
+  (`ra relay` becomes `server`); dnsmasq `noresolv 1`
   and `server 127.0.0.1#61053` (your servers for single domains, `/domain/address`, stay), and
   `localuse 0`: the router's own lookups go to the provider's resolvers directly
   (`/tmp/resolv.conf` → `resolv.conf.auto`), so its services (dynamic DNS, updates,
   certificates) work without the active link, as its own traffic is not intercepted either.
-- `/etc/crontabs/root`: the measurement, the health check every minute, the daily update of
-  the sources (`# tunnel-client-…` lines); the file is removed when no other line is left.
+- `/etc/crontabs/root`: in the automatic mode with two links or more the measurement and the
+  check every minute, and the daily update of the sources while there are any (`#
+  tunnel-client-…` lines); the file is removed when no other line is left.
 - `/etc/tunnel-client/sources/`: the fetched lists and their `.meta` (the files of a removed
   source go at the next apply); `/tmp/tunnel-client/`: measurements, history, state.
 

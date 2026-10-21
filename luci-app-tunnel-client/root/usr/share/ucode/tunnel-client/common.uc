@@ -1,11 +1,14 @@
 'use strict';
 // Shared helpers of luci-app-tunnel-client: the links of a profile (one per transport of the
-// server page: TCP + XTLS-Vision, XHTTP, Hysteria2) into xray outbounds.
+// server page: TCP + XTLS-Vision, XHTTP, Hysteria2) into xray outbounds, the running xray and its
+// active link, locks, IPv4 subnets.
 //   import { PROTOCOLS, link_outbound } from 'tunnel-client.common';
 
-import { popen } from 'fs';
+import { popen, readfile, open } from 'fs';
+import { connect } from 'ubus';
 
 export const RUN = '/tmp/tunnel-client';
+export const ACTIVE = `${RUN}/active`;          // "TAG PID": the link select applied to that xray process
 export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2' ];
 export const TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2' };
 
@@ -19,6 +22,75 @@ export function exec(command) {
 		return { code: -1, out: '' };
 	let out = p.read('all') ?? '';
 	return { code: p.close(), out: out };
+};
+
+// an exclusive lock held until the process exits (flock: a clock change cannot make it look stale);
+// null when another process holds it
+export function lock(path) {
+	let f = open(path, 'w');
+	return f?.lock('xn') ? f : null;
+};
+
+// whether another process holds the lock of lock()
+export function locked(path) {
+	let f = open(path, 'r');
+	if (!f) return false;
+	let free = f.lock('sn');
+	f.close();
+	return !free;
+};
+
+let bus = null;
+
+// the running xray of the tunnel packages (procd service "tunnel-xray") while its joined
+// configuration holds this client's file, else null
+export function instance() {
+	if (index(split(readfile('/tmp/tunnel-xray/parts') ?? '', '\n'), '/etc/tunnel-client/config.json') < 0) return null;
+	bus ??= connect();
+	let inst = bus?.call('service', 'list', { name: 'tunnel-xray' })?.['tunnel-xray']?.instances?.xray;
+	return (inst?.running == true) ? inst : null;
+};
+
+// the active link of that xray: the one select applied to this process, else the one of the
+// balancer's selector, which a start of xray uses (state.active of the configuration in effect)
+export function active_link(inst, state) {
+	if (!inst) return '';
+	let f = split(trim(readfile(ACTIVE) ?? ''), ' ');
+	return (length(f[0]) && int(f[1]) == inst.pid) ? f[0] : `${state?.active ?? ''}`;
+};
+
+// the interface the router's IPv4 default route goes through (the lowest metric of the interfaces
+// that are up, as netifd reports them; routes of other tables or types, such as this client's
+// local route in table 2222, do not count), or null
+export function uplink() {
+	bus ??= connect();
+	let best = null, metric = null;
+	for (let i in bus?.call('network.interface', 'dump')?.interface ?? []) {
+		if (!i.up) continue;
+		for (let r in i.route ?? [])
+			if (r.target == '0.0.0.0' && r.mask == 0 && r.table == null && r.type == null && (metric == null || (r.metric ?? 0) < metric)) {
+				best = i.interface;
+				metric = r.metric ?? 0;
+			}
+	}
+	return best;
+};
+
+// an IPv4 subnet or address -> "a.b.c.d/p" with the host bits cleared, or null
+export function cidr(s) {
+	let m = match(trim(s ?? ''), /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(\/([0-9]{1,2}))?$/);
+	if (!m) return null;
+	let p = (m[6] != null) ? int(m[6]) : 32, n = 0;
+	if (p > 32) return null;
+	for (let i = 1; i <= 4; i++) {
+		let o = int(m[i]);
+		if (o > 255) return null;
+		n = n * 256 + o;
+	}
+	let size = 1;
+	for (let i = 0; i < 32 - p; i++) size *= 2;
+	n -= n % size;
+	return sprintf('%d.%d.%d.%d/%d', n / 16777216 % 256, n / 65536 % 256, n / 256 % 256, n % 256, p);
 };
 
 function urldecode(s) {

@@ -2,7 +2,7 @@
 
 import { access, readfile, stat } from 'fs';
 import { cursor } from 'uci';
-import { RUN, exec } from 'tunnel-client.common';
+import { RUN, exec, instance, active_link, locked, uplink } from 'tunnel-client.common';
 
 const CFG     = 'tunnel-client';
 const CONF    = '/etc/tunnel-client/config.json';
@@ -12,7 +12,6 @@ const STATE   = `${RUN}/state.json`;
 const MEASURE = `${RUN}/measure.json`;
 const HISTORY = `${RUN}/history.json`;
 const XRAY    = '/usr/bin/xray';
-const API     = '127.0.0.1:61085';
 
 function tail(text, n) {
 	let lines = split(rtrim(text ?? '', '\n'), '\n');
@@ -26,16 +25,15 @@ function read_json(path, dflt) {
 	return (type(v) == type(dflt)) ? v : dflt;
 }
 
-// xray runs once for the tunnel packages (procd service "tunnel-xray", see xray-service); it is
-// this client's while its joined configuration holds the client's file
-function instance() {
-	let inst = null;
-	try { inst = json(exec(`ubus call service list '{"name":"tunnel-xray"}'`).out)?.['tunnel-xray']?.instances?.xray; } catch (e) { inst = null; }
-	return (index(split(readfile('/tmp/tunnel-xray/parts') ?? '', '\n'), '/etc/tunnel-client/config.json') >= 0) ? inst : null;
-}
-
-function current_active() {
-	return trim(exec(`${XRAY} api bi --server=${API} active 2>/dev/null | awk '/Selecting Override:/{s="o";next} /Selects:/{s="s";next} /^[ \\t]*[0-9]+[ \\t]+/{if(s=="o"&&o=="")o=$2; if(s=="s"&&x=="")x=$2} END{print (o!="")?o:x}'`).out);
+// the xray version, read again only when the binary changed (rpcd keeps this plugin loaded)
+let version = { key: null, value: '' };
+function xray_version() {
+	let st = stat(XRAY), key = st ? `${st.mtime}/${st.size}` : null;
+	if (key != version.key) {
+		let m = key ? match(exec(`${XRAY} version 2>/dev/null`).out, /Xray ([0-9.]+)/) : null;
+		version = { key: key, value: m ? m[1] : '' };
+	}
+	return version.value;
 }
 
 const methods = {};
@@ -46,9 +44,9 @@ methods.status = {
 		uci.load(CFG);
 		let main = uci.get_all(CFG, 'main') ?? {};
 		let inst = instance();
-		let running = (inst != null && inst.running == true);
-		let now = running ? current_active() : '';
+		let running = (inst != null);
 		let state = read_json(STATE, {});
+		let now = active_link(inst, state);
 		let measure = read_json(MEASURE, {}), history = read_json(HISTORY, {});
 		let in_config = {};
 		for (let c in (state.clients ?? [])) in_config[c.tag] = true;
@@ -61,12 +59,11 @@ methods.status = {
 				measure: measure.clients?.[l.tag] ?? null,
 				history: history[l.tag] ?? [] });
 		}
-		let version = match(exec(`${XRAY} version 2>/dev/null | head -1`).out, /Xray ([0-9.]+)/);
 		let st = stat(CONF);
 		delete state.links;
 		return {
 			installed: (access(XRAY, 'x') == true),
-			version: version ? version[1] : '',
+			version: xray_version(),
 			enabled: (main.enabled == '1'),
 			mode: main.mode ?? 'auto',
 			active_config: main.active ?? '',
@@ -78,8 +75,9 @@ methods.status = {
 			state: state,
 			links: links,
 			measure: { time: measure.time ?? 0, decision: measure.decision ?? '', bytes: measure.bytes ?? 0, health: measure.health ?? null },
-			measuring: (stat(`${RUN}/measure.lock`) != null),
-			updating: (stat(`${RUN}/sources.lock`) != null),
+			uplink: uplink(),
+			measuring: locked(`${RUN}/measure.lock`),
+			updating: locked(`${RUN}/sources.lock`),
 			error: trim(readfile(ERROR) ?? '') || trim(readfile('/tmp/tunnel-xray/error') ?? ''),
 			log_last: (main.enabled == '1' && !running) ? tail(exec(`logread 2>/dev/null | grep -E '${CFG}|xray\\['`).out, 3) : ''
 		};
@@ -88,15 +86,15 @@ methods.status = {
 
 methods.measure = {
 	call: function() {
-		if (stat(`${RUN}/measure.lock`) != null) return { running: true };
-		exec('setsid /usr/libexec/tunnel-client/measure >/dev/null 2>&1 </dev/null &');
+		if (locked(`${RUN}/measure.lock`)) return { running: true };
+		exec('setsid /usr/libexec/tunnel-client/measure now >/dev/null 2>&1 </dev/null &');
 		return { started: true };
 	}
 };
 
 methods.update_sources = {
 	call: function() {
-		if (stat(`${RUN}/sources.lock`) != null) return { running: true };
+		if (locked(`${RUN}/sources.lock`)) return { running: true };
 		exec('setsid /usr/libexec/tunnel-client/sources >/dev/null 2>&1 </dev/null &');
 		return { started: true };
 	}

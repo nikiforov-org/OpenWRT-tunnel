@@ -1,27 +1,38 @@
 #!/usr/bin/env ucode
-// measure [health]: downloads the test payload through every client at once (each client has its own
-// local tap in xray: a fixed forward to the test host through that client only) and records speed and
-// latency in /tmp/tunnel-client/measure.json and history.json. In the automatic mode the fastest
-// client becomes the active one when it beats the current one by the threshold, or at once when the
-// current one failed. "health" checks only the active client with a small download and runs the full
-// measurement when it fails. The default test target is the server's own site through the tunnel,
-// https://127.0.0.1/cgi-bin/speed?bytes=N (the site of luci-app-tunnel-ddns serves it); a link may
-// name its own URL.
+// measure [now|health|started]: speed and latency of the links, recorded in /tmp/tunnel-client/
+// measure.json and history.json. Each link has its own local tap in xray (a fixed forward to the
+// test host through that link only); the links are measured one after the other, so that none
+// shares the way out with another. The test is a download of test_bytes from the server's own site
+// through the tunnel, https://127.0.0.1/cgi-bin/speed?bytes=N (the site of luci-app-tunnel-ddns
+// serves it), or from the URL a profile names, cut off after test_bytes.
+//   (none)   from cron: only in the automatic mode with two links or more, and not while the route
+//            to the Internet goes through an interface of the "metered" list; the fastest link
+//            becomes active when it beats the current one by the threshold, or at once when the
+//            current one failed
+//   now      the same at once, in every mode and on every uplink (the page's button); a link chosen
+//            by hand stays
+//   health   from cron every minute in the automatic mode with two links or more: the active link
+//            gets a small request (HEAD, or one byte from the default target), any HTTP answer will
+//            do; when none comes, the other links get the same request and the one that answers
+//            first becomes active
+//   started  after a start of xray (xray-service): the choice is applied (select), then measured
+//            as from cron when the links changed since the last measurement or none was made
 
 'use strict';
 
-import { readfile, writefile, mkdir, unlink, stat } from 'fs';
+import { readfile, writefile, mkdir, unlink } from 'fs';
 import { cursor } from 'uci';
-import { RUN, shq, exec } from 'tunnel-client.common';
+import { RUN, shq, exec, lock, instance, active_link, uplink } from 'tunnel-client.common';
 
-const CFG   = 'tunnel-client';
-const STATE = `${RUN}/state.json`;
-const OUT   = `${RUN}/measure.json`;
-const HIST  = `${RUN}/history.json`;
-const LOCK  = `${RUN}/measure.lock`;
-const AUTO  = '/etc/tunnel-client/auto.json';
-const API   = '127.0.0.1:61085';
+const CFG    = 'tunnel-client';
+const STATE  = `${RUN}/state.json`;
+const OUT    = `${RUN}/measure.json`;
+const HIST   = `${RUN}/history.json`;
+const LOCK   = `${RUN}/measure.lock`;
+const AUTO   = '/etc/tunnel-client/auto.json';
+const SELECT = '/usr/libexec/tunnel-client/select';
 const HISTORY = 24;
+const FMT    = '%{http_code} %{size_download} %{time_total} %{time_starttransfer} %{speed_download} %{errormsg}';
 
 function log(msg) { system(`logger -t ${CFG} ${shq(msg)}`); }
 
@@ -31,34 +42,49 @@ function read_json(path, dflt) {
 	return (type(v) == type(dflt)) ? v : dflt;
 }
 
-function current_active() {
-	return trim(exec(`xray api bi --server=${API} active 2>/dev/null | awk '/Selecting Override:/{s="o";next} /Selects:/{s="s";next} /^[ \\t]*[0-9]+[ \\t]+/{if(s=="o"&&o=="")o=$2; if(s=="s"&&x=="")x=$2} END{print (o!="")?o:x}'`).out);
+function list(v) {
+	if (type(v) == 'array') return v;
+	return (v == null || v == '') ? [] : [ v ];
 }
 
-// the curl command for one client: through its tap; the URL's host keeps its name for TLS
-function curl_cmd(c, bytes, timeout, out) {
-	let fmt = "'%{http_code} %{size_download} %{time_total} %{time_starttransfer} %{speed_download} %{errormsg}'";
-	if (length(c.test_url)) {
-		let m = match(c.test_url, /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
-		let port = (m && m[4]) ? m[4] : ((m && m[1] == 'http') ? '80' : '443');
-		return `curl -sk -m ${timeout} --connect-to ${shq((m ? m[2] : '') + ':' + port + ':127.0.0.1:' + c.tap_port)} -o /dev/null -w ${fmt} ${shq(c.test_url)} > ${shq(out)} 2>/dev/null &\n`;
-	}
-	return `curl -sk -m ${timeout} -o /dev/null -w ${fmt} 'https://127.0.0.1:${c.tap_port}/cgi-bin/speed?bytes=${bytes}' > ${shq(out)} 2>/dev/null &\n`;
+// whether the route to the Internet goes through an interface of the "metered" list
+function metered_uplink(main) {
+	let want = list(main.metered);
+	return length(want) > 0 && (uplink() in want);
 }
 
-// runs the downloads through all given clients at once; returns { tag: result }
-function run(clients, bytes, timeout) {
+// one curl through the tap of a link; the URL's host keeps its name for TLS. small: a request with
+// a small answer (HEAD to the link's own URL, one byte from the default target)
+function curl_cmd(c, bytes, timeout, small, out) {
+	if (!length(c.test_url))
+		return `curl -sk -m ${timeout} -o /dev/null -w '${FMT}' 'https://127.0.0.1:${c.tap_port}/cgi-bin/speed?bytes=${small ? 1 : bytes}' > ${shq(out)} 2>/dev/null`;
+	let m = match(c.test_url, /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
+	let port = (m && m[4]) ? m[4] : ((m && m[1] == 'http') ? '80' : '443');
+	let to = `--connect-to ${shq((m ? m[2] : '') + ':' + port + ':127.0.0.1:' + c.tap_port)}`;
+	if (small)
+		return `curl -sk -m ${timeout} -I ${to} -o /dev/null -w '${FMT}' ${shq(c.test_url)} > ${shq(out)} 2>/dev/null`;
+	// a server may ignore Range: head ends the download after the given bytes (curl reports a write error)
+	return `curl -sk -m ${timeout} ${to} -w '%{stderr}${FMT}' ${shq(c.test_url)} 2> ${shq(out)} | head -c ${bytes} > /dev/null`;
+}
+
+// runs the requests through the given links (small ones at once, downloads one after the other)
+function run(clients, bytes, timeout, small) {
 	let cmd = '';
-	for (let c in clients) cmd += curl_cmd(c, bytes, timeout, `${RUN}/m-${c.tag}.out`);
-	system(cmd + 'wait\n');
+	for (let c in clients) {
+		let line = curl_cmd(c, bytes, timeout, small, `${RUN}/m-${c.tag}.out`);
+		if (small) cmd += `${line} &\n`;
+		else system(line);
+	}
+	if (small && length(cmd)) system(cmd + 'wait\n');
 	let out = {};
 	for (let c in clients) {
 		let f = `${RUN}/m-${c.tag}.out`, p = split(trim(readfile(f) ?? ''), ' ');
 		unlink(f);
 		let r = { time: time(), http: int(p[0] ?? 0), bytes: int(p[1] ?? 0), total: +(p[2] ?? 0), latency: +(p[3] ?? 0),
 		          speed: int(+(p[4] ?? 0)), error: join(' ', slice(p, 5)) };
-		r.ok = (r.http == 200 && r.bytes > 0);
-		if (!r.ok && !length(r.error)) r.error = r.http ? `HTTP ${r.http}` : 'no answer';
+		r.ok = small ? (r.http > 0) : ((r.http == 200 || r.http == 206) && r.bytes > 0);
+		if (r.ok) r.error = '';
+		else if (!length(r.error)) r.error = r.http ? `HTTP ${r.http}` : 'no answer';
 		out[c.tag] = r;
 	}
 	return out;
@@ -70,41 +96,66 @@ let uci = cursor();
 uci.load(CFG);
 let main = uci.get_all(CFG, 'main') ?? {};
 if (main.enabled != '1') exit(0);
+let what = ARGV[0] ?? '';
 let st = read_json(STATE, {});
 let clients = (type(st.clients) == 'array') ? st.clients : [];
+let auto = (main.mode != 'manual');
+
+if (what == 'started') {
+	system(`${SELECT} >/dev/null 2>&1`);
+	let last = read_json(OUT, {}).clients ?? {};
+	let same = (length(clients) == length(keys(last)) && !length(filter(clients, c => !exists(last, c.tag))));
+	if (same) exit(0);
+	what = '';
+}
+if (what == '' && (!auto || length(clients) < 2 || metered_uplink(main))) exit(0);
+if (what == 'health' && (!auto || length(clients) < 2)) exit(0);
 if (!length(clients)) exit(0);
 mkdir(RUN, 0o755);
-let s = stat(LOCK);
-if (s && time() - s.mtime < 300) exit(0);
-writefile(LOCK, `${time()}\n`);
+let held = lock(LOCK);
+if (!held) exit(0);
+let inst = instance();
+if (!inst) exit(0);
 
 // "profile: transport" for the messages on the page and in the log
 let names = {};
 for (let c in clients) names[c.tag] = `${c.profile_name ?? c.profile}: ${c.title ?? c.protocol}`;
 function name(tag) { return names[tag] ?? (tag || 'none'); }
 
-let bytes = int(main.test_bytes ?? 5000000); if (bytes < 10000) bytes = 10000; if (bytes > 20000000) bytes = 20000000;
-let timeout = int(main.test_timeout ?? 30); if (timeout < 5) timeout = 5;
+let bytes = int(main.test_bytes ?? 2000000); if (bytes < 10000) bytes = 10000; if (bytes > 20000000) bytes = 20000000;
+let timeout = int(main.test_timeout ?? 15); if (timeout < 5) timeout = 5;
 let threshold = int(main.test_threshold ?? 20); if (threshold < 0) threshold = 0;
-let active = current_active();
+let active = active_link(inst, st);
 
-if (ARGV[0] == 'health') {
+function switch_to(tag, reason) {
+	writefile(AUTO, sprintf('%J\n', { active: tag, time: time(), reason: reason }));
+	return exec(`${SELECT} ${shq(tag)}`).code == 0;
+}
+
+if (what == 'health') {
 	let cur = filter(clients, c => c.tag == active);
 	if (!length(cur)) {
 		// xray holds no link of the configuration in effect: apply the one sync chose
-		exec('/usr/libexec/tunnel-client/select');
-		unlink(LOCK);
+		system(`${SELECT} >/dev/null 2>&1`);
 		exit(0);
 	}
-	let r = run(cur, 1000, 10)[active];
+	let r = run(cur, 0, 10, true)[active];
+	let health = { time: time(), tag: active, ok: r.ok, error: r.error, decision: '' };
+	if (!r.ok) {
+		let others = filter(clients, c => c.tag != active), res = run(others, 0, 10, true), best = null;
+		for (let c in others)
+			if (res[c.tag].ok && (best == null || res[c.tag].latency < res[best].latency)) best = c.tag;
+		health.decision = best ? `${name(best)} answers first and becomes active` : 'no other link answers; nothing changed';
+		if (best && !switch_to(best, `${name(active)} did not answer, ${name(best)} answers first`)) health.decision += ' (switching failed)';
+		log(`health check of ${name(active)} failed (${r.error}): ${health.decision}`);
+	}
 	let m = read_json(OUT, {});
-	m.health = { time: time(), tag: active, ok: r.ok, error: r.error };
+	m.health = health;
 	writefile(OUT, sprintf('%J\n', m));
-	if (r.ok || main.mode == 'manual') { unlink(LOCK); exit(0); }
-	log(`health check of ${name(active)} failed (${r.error}): measuring all links`);
+	exit(0);
 }
 
-let results = run(clients, bytes, timeout);
+let results = run(clients, bytes, timeout, false);
 let hist = read_json(HIST, {});
 for (let tag, r in results) {
 	let h = (type(hist[tag]) == 'array') ? hist[tag] : [];
@@ -116,7 +167,7 @@ for (let tag in keys(hist)) if (!length(filter(clients, c => c.tag == tag))) del
 writefile(HIST, sprintf('%J\n', hist));
 
 let decision = '', switched = '';
-if (main.mode != 'manual') {
+if (auto) {
 	let best = null;
 	for (let c in clients) {
 		let r = results[c.tag];
@@ -128,12 +179,10 @@ if (main.mode != 'manual') {
 	else if (best != active && results[best].speed > cur.speed * (100 + threshold) / 100) { decision = `${name(best)} is more than ${threshold}% faster than ${name(active)}`; switched = best; }
 	else decision = (best == active) ? `${name(active)} stays, the fastest` : `${name(active)} stays, ${name(best)} is faster by less than ${threshold}%`;
 	if (switched && switched != active) {
-		writefile(AUTO, sprintf('%J\n', { active: switched, time: time(), reason: decision }));
-		if (exec(`/usr/libexec/tunnel-client/select ${shq(switched)}`).code != 0) decision += ' (switching failed)';
+		if (!switch_to(switched, decision)) decision += ' (switching failed)';
 	}
 	else switched = '';
 }
 writefile(OUT, sprintf('%J\n', { time: time(), bytes: bytes, mode: main.mode ?? 'auto', active_before: active, active_after: switched || active,
                                  decision: decision, clients: results, health: read_json(OUT, {}).health ?? null }));
 log(`measured ${length(clients)} links: ` + join(', ', map(clients, c => `${name(c.tag)} ${results[c.tag].ok ? int(results[c.tag].speed / 1024) + ' KB/s' : 'failed'}`)) + (decision ? `; ${decision}` : ''));
-unlink(LOCK);

@@ -6,6 +6,7 @@
 'require rpc';
 'require poll';
 'require dom';
+'require tools.widgets as widgets';
 
 var CFG = 'tunnel-client';
 
@@ -118,13 +119,26 @@ return view.extend({
 		return E('span', {}, parts.join('; ') + (st.updating ? ' (' + _('updating…') + ')' : ''));
 	},
 
+	/* when the measurements run: they choose between links, so only in the automatic mode with two or more */
+	measureSchedule: function() {
+		var st = this.status, n = ((st.state || {}).clients || []).length;
+		var metered = L.toArray(uci.get(CFG, 'main', 'metered'));
+		if (st.mode == 'manual') return _('chosen by hand: measured on request only');
+		if (n < 2) return _('one link: measured on request only');
+		if (st.uplink && metered.indexOf(st.uplink) >= 0) return _('paused while the Internet goes through %s (metered)').format(st.uplink);
+		return _('every %d minutes, the active link is checked every minute').format(+(uci.get(CFG, 'main', 'test_interval') || 60));
+	},
+
 	overviewMeasure: function() {
-		var st = this.status, m = st.measure || {};
+		var st = this.status, m = st.measure || {}, h = m.health;
 		if (!st.enabled) return span(COLOR.dim, '—');
 		if (st.measuring) return span(COLOR.warn, _('Measuring…'));
-		if (!m.time) return span(COLOR.dim, _('Not measured yet'));
-		return E('span', {}, [ _('Last measurement %s').format(timeAgo(m.time)), m.decision ? ': ' + m.decision : '',
-			(m.health && m.health.time) ? '; ' + (m.health.ok ? _('health check %s: OK').format(timeAgo(m.health.time)) : _('health check %s failed: %s').format(timeAgo(m.health.time), m.health.error)) : '' ]);
+		var parts = [ m.time ? _('Last measurement %s').format(timeAgo(m.time)) + (m.decision ? ': ' + m.decision : '') : _('Not measured yet') ];
+		if (h && h.time)
+			parts.push(h.ok ? _('health check %s: OK').format(timeAgo(h.time))
+			                : _('health check %s failed: %s').format(timeAgo(h.time), h.error) + (h.decision ? '; ' + h.decision : ''));
+		parts.push(this.measureSchedule());
+		return E('span', {}, parts.join('; '));
 	},
 
 	overviewConfig: function() {
@@ -296,7 +310,7 @@ return view.extend({
 
 		/* Links */
 		s = m.section(form.NamedSection, 'main', CFG, _('Links'),
-			_('Every link of the profiles below. The speed is a download of the test payload through each link (by default from the server\'s own site through the tunnel, https://127.0.0.1/cgi-bin/speed, served by the site of luci-app-tunnel-ddns; a profile may name another URL); the latency is the time to the first byte.'));
+			_('Every link of the profiles below. The speed is a download of the test payload through each link, one link after the other (by default from the server\'s own site through the tunnel, https://127.0.0.1/cgi-bin/speed, served by the site of luci-app-tunnel-ddns; a profile may name another URL, whose download is cut off after the test size); the latency is the time to the first byte.'));
 		o = s.option(form.DummyValue, '_clients', _('Links'));
 		o.renderWidget = function() { return E('div', { 'id': 'tcl-clients' }, self.clientsTable()); };
 
@@ -318,14 +332,14 @@ return view.extend({
 		links.forEach(function(l) { if (l.enabled && !l.error) o.value(l.tag, linkLabel(l)); });
 		o.depends('mode', 'manual');
 
-		o = s.option(form.Value, 'test_interval', _('Measure every, minutes'), _('The test download through every link; in the automatic mode the fastest one becomes active. A health check of the active link runs every minute; when it fails, the measurement runs at once.'));
+		o = s.option(form.Value, 'test_interval', _('Measure every, minutes'), _('In the automatic mode with two links or more: the test download through every link, and the fastest one becomes active. The active link also gets a small request every minute (a HEAD request to its test URL, or one byte from the server\'s site); when it does not answer, the other links get the same request and the one that answers first becomes active. By hand or with one link nothing is measured on its own ("Measure now" still works).'));
 		o.datatype = 'range(1,1440)';
-		o.placeholder = '10';
+		o.placeholder = '60';
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'test_bytes', _('Test download, bytes'), _('10 000 to 20 000 000.'));
+		o = s.option(form.Value, 'test_bytes', _('Test download, bytes'), _('10 000 to 20 000 000, per link and measurement.'));
 		o.datatype = 'range(10000,20000000)';
-		o.placeholder = '5000000';
+		o.placeholder = '2000000';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'test_threshold', _('Switch when faster by, %'), _('Automatic mode: another link replaces the active one only when it is faster by at least this much; a failed active link is replaced at once.'));
@@ -335,8 +349,12 @@ return view.extend({
 
 		o = s.option(form.Value, 'test_timeout', _('Test timeout, seconds'));
 		o.datatype = 'range(5,300)';
-		o.placeholder = '30';
+		o.placeholder = '15';
 		o.rmempty = false;
+
+		o = s.option(widgets.NetworkSelect, 'metered', _('Metered uplinks'), _('While the router\'s default route goes through one of these interfaces (a mobile modem, for example), no measurement runs on its own; the minute check of the active link stays.'));
+		o.multiple = true;
+		o.nocreate = true;
 
 		o = s.option(form.Value, 'resolver', _('DNS through the tunnel'),
 			_('The resolver asked through the active link for the names that go through the tunnel. The other names are resolved through the provider\'s resolvers as before; the names of the servers themselves always are.'));
