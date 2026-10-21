@@ -79,9 +79,10 @@ only; port 80 stays) and leaves the firewall rule for the port to this package; 
 `127.0.0.1:4443`. Browsers that open the router's domain on 443 are passed through to the
 site unchanged, with its Let's Encrypt certificate. Hysteria2 on UDP 443 does not take the
 site's port. Switching the server off (or moving the VLESS transports to other ports) puts
-the web server back on 443 and its rule back. The hand-over happens inside `sync`: a running
-xray is stopped before the Dynamic DNS package is told to reload, so the port is free for
-whichever of the two has to take it, and procd starts xray again right after.
+the web server back on 443 and its rule back. The hand-over happens inside `sync`: when the
+TCP ports of the VLESS transports change, a running xray is stopped before the Dynamic DNS
+package is told to reload, so the port is free for whichever of the two has to take it, and
+xray starts again right after.
 
 ## What the package changes on the router
 
@@ -95,9 +96,18 @@ configuration is applied again right away.
   error, from incomplete settings or a missing certificate to a configuration rejected by
   xray, leaves the configuration in effect running and shows the reason in the overview.
   Only switching the server off stops it.
-- xray runs as a procd service of this package (`/etc/init.d/tunnel-server`), apart from the
-  `xray` service of the `xray-core` package, which stays disabled as installed. A change of
-  the generated file restarts it; the server off removes the file and stops it.
+- xray runs once for this package and `luci-app-tunnel-client`: `/usr/libexec/tunnel-server/xray-service`
+  (the client package ships the same script) joins the configuration files of the started
+  packages into `/tmp/tunnel-xray/config.json` (inbounds and routing rules added up, every rule
+  bound to the inbounds of its package; xray's own merging of several `-config` files is not
+  used, it replaces the routing rules of the first file) and runs xray with it as the procd
+  service `tunnel-xray`, apart from the `xray` service of the `xray-core` package, which stays
+  disabled as installed. The joined file replaces the one in effect only after `xray run -test`
+  accepts it. One process instead of two saves about 10 MB of memory (measured on the router:
+  15.5 MB of its own memory for both against 11.1 + 15.2 MB). A change of either file restarts
+  it, so a change of the client's settings or its daily list update also restarts the server's
+  transports for a moment (clients reconnect); the server off removes its file, and xray goes
+  on with the client's alone or stops.
 - `/etc/config/firewall`: the rules `tunnel_server_vision`, `tunnel_server_xhttp` (TCP) and
   `tunnel_server_hysteria2` (UDP) from WAN to the transport ports while the server runs.
 

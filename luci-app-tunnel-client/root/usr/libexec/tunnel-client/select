@@ -1,15 +1,21 @@
 #!/bin/sh
 # select [TAG]: makes TAG the active link of the running xray (balancer "active", through its API,
-# without a restart). Without an argument: the choice sync made for the configuration in effect
-# (the configured link by hand, the last automatic choice, or the first link). Only a link of the
-# configuration in effect is selected: xray accepts an override to any tag, also a removed one.
-# Waits up to 30 s for the API after a start. Prints nothing; logs a switch.
+# without a restart). Without an argument: the configured link by hand, else the last automatic
+# choice (also one made by measure after the last sync) while it is a link of the configuration in
+# effect, else the choice sync made (the first link). Only a link of the configuration in effect is
+# selected: xray accepts an override to any tag, also a removed one. Waits up to 30 s for the API
+# after a start. Prints nothing; logs a switch.
 API=127.0.0.1:61085
 STATE=/tmp/tunnel-client/state.json
+AUTO=/etc/tunnel-client/auto.json
+known() { [ -n "$1" ] && [ -n "$(jsonfilter -i $STATE -e "@.clients[@.tag='$1'].tag" 2>/dev/null)" ]; }
 TAG="$1"
-[ -n "$TAG" ] || TAG="$(jsonfilter -i $STATE -e '@.active' 2>/dev/null)"
+if [ -z "$TAG" ]; then
+	[ "$(uci -q get tunnel-client.main.mode)" != manual ] && TAG="$(jsonfilter -i $AUTO -e '@.active' 2>/dev/null)"
+	known "$TAG" || TAG="$(jsonfilter -i $STATE -e '@.active' 2>/dev/null)"
+fi
 [ -n "$TAG" ] || exit 0
-if [ -z "$(jsonfilter -i $STATE -e "@.clients[@.tag='$TAG'].tag" 2>/dev/null)" ]; then
+if ! known "$TAG"; then
 	logger -t tunnel-client "not selected: $TAG is not a link of the configuration in effect"
 	exit 1
 fi

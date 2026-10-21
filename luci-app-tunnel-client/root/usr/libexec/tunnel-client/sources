@@ -110,7 +110,9 @@ if (s && time() - s.mtime < 900) exit(0);
 writefile(LOCK, `${time()}\n`);
 let st = null;
 try { st = json(readfile(STATE) ?? ''); } catch (e) { st = null; }
-let taps = (type(st?.src_taps) == 'object' && exec("pidof xray >/dev/null").code == 0) ? st.src_taps : {};
+// the taps exist while the shared xray runs with the client's file (xray-service)
+let joined = index(split(readfile('/tmp/tunnel-xray/parts') ?? '', '\n'), '/etc/tunnel-client/config.json') >= 0;
+let taps = (type(st?.src_taps) == 'object' && joined && exec("pidof xray >/dev/null").code == 0) ? st.src_taps : {};
 let uci = cursor();
 uci.load(CFG);
 let changed = false, report = [];

@@ -14,7 +14,8 @@ another router shows them:
 Links of the same kinds from any other Xray or Hysteria2 server (a VPS, another router) work
 too. Every link is a client; one of them is active, chosen by hand or automatically by the
 measured speed. The traffic of the LAN is split by a list of domains and subnets, and nothing
-of it bypasses the clients (kill switch). All clients run in one xray process.
+of it bypasses the clients (kill switch). All clients run in one xray process, the same one as
+the server of `luci-app-tunnel-server` when that package is installed.
 
 Installing the package is described in the [main README](../README.md). Log in to LuCI again
 after installing.
@@ -81,8 +82,12 @@ Everything only on **Save & Apply**, nothing at install time. While the client i
 
 - `/etc/tunnel-client/config.json` (mode 600): the xray configuration generated from
   `/etc/config/tunnel-client`, checked with `xray run -test` before it replaces the file in
-  effect; xray runs as a procd service of this package and restarts only when the file
-  changed. The active link is a balancer target switched through xray's API on
+  effect. xray runs once for this package and `luci-app-tunnel-server`:
+  `/usr/libexec/tunnel-client/xray-service` (the server package ships the same script) joins
+  the configuration files of the started packages into `/tmp/tunnel-xray/config.json` (checked
+  with `xray run -test` too) and runs xray with it as the procd service `tunnel-xray`; xray
+  restarts only when the joined file changed, and the active link is then applied again. The
+  active link is a balancer target switched through xray's API on
   `127.0.0.1:61085`; the automatic choice is kept in `/etc/tunnel-client/auto.json`. Local
   ports 61001 (interception), 61053 (DNS), 61101… (one per link, for the speed test) and
   61201… (one per list host) belong to it; direct connections from the LAN to them are refused.

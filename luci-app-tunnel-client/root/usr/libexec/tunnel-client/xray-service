@@ -1,0 +1,142 @@
+#!/usr/bin/env ucode
+// xray-service start|stop CONFIG: the one xray process of the tunnel packages. luci-app-tunnel-server
+// and luci-app-tunnel-client each generate their own xray configuration file and run this script
+// from their init script: "start" after their sync, "stop" when they stop. The files of the started
+// packages are joined into /tmp/tunnel-xray/config.json (inbounds and routing rules added up, every
+// rule bound to the inbounds of its package; outbounds and balancers by tag, "direct" first; the
+// other sections from the file that has them; xray's own merging of several -config files replaces
+// the routing rules of the first file, so it is not used) and xray runs with it as the procd service
+// "tunnel-xray": started, restarted when the joined file changed, removed when no file is left. A
+// joined file of two files replaces the one in effect only after "xray run -test" accepts it (a
+// single file was tested by its package's sync). Both packages ship this same script; a package's
+// file counts while that package ships it too. After xray started with the client's file, the
+// client's active link is applied again through xray's API (select).
+
+'use strict';
+
+import { access, readfile, writefile, mkdir, rename, unlink, chmod, popen, open } from 'fs';
+import { connect } from 'ubus';
+
+const SERVICE = 'tunnel-xray';
+const XRAY    = '/usr/bin/xray';
+const DIR     = '/tmp/tunnel-xray';
+const CONF    = `${DIR}/config.json`;
+const ERROR   = `${DIR}/error`;
+const STARTED = `${DIR}/started`;    // the files of the started packages
+const LIST    = `${DIR}/parts`;      // the files in the joined file in effect, for the status pages
+const LOCK    = '/var/lock/tunnel-xray';
+const PARTS   = [
+	{ conf: '/etc/tunnel-server/config.json', script: '/usr/libexec/tunnel-server/xray-service' },
+	{ conf: '/etc/tunnel-client/config.json', script: '/usr/libexec/tunnel-client/xray-service',
+	  after: '/usr/libexec/tunnel-client/select' }
+];
+
+function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
+function log(msg) { system(`logger -t tunnel-xray ${shq(msg)}`); }
+
+// the configurations joined, or { error }
+function join_configs(configs) {
+	let out = { inbounds: [], outbounds: [], routing: { domainStrategy: 'AsIs', rules: [], balancers: [] } };
+	let seen_in = {}, seen_out = {}, seen_bal = {};
+	for (let c in configs) {
+		for (let k, v in c)
+			if (!(k in [ 'inbounds', 'outbounds', 'routing' ]) && !exists(out, k)) out[k] = v;
+		for (let ib in c.inbounds ?? []) {
+			if (ib.tag && seen_in[ib.tag]) return { error: `the inbound tag "${ib.tag}" is used by two packages` };
+			seen_in[ib.tag] = true;
+			push(out.inbounds, ib);
+		}
+		for (let ob in c.outbounds ?? [])
+			if (!seen_out[ob.tag]) { seen_out[ob.tag] = true; push(out.outbounds, ob); }
+		for (let r in c.routing?.rules ?? []) push(out.routing.rules, r);
+		for (let b in c.routing?.balancers ?? [])
+			if (!seen_bal[b.tag]) { seen_bal[b.tag] = true; push(out.routing.balancers, b); }
+	}
+	// the outbound for anything no rule takes: "direct", as in each package's own file
+	out.outbounds = [ ...filter(out.outbounds, o => o.tag == 'direct'), ...filter(out.outbounds, o => o.tag != 'direct') ];
+	return { config: out };
+}
+
+let op = ARGV[0], arg = ARGV[1];
+if (!(op in [ 'start', 'stop' ]) || !length(filter(PARTS, p => p.conf == arg))) {
+	warn('usage: xray-service start|stop CONFIG\n');
+	exit(2);
+}
+mkdir(DIR, 0o700);
+let lock = open(LOCK, 'w');
+lock?.lock('x');
+
+let started = filter(split(readfile(STARTED) ?? '', '\n'), c => length(filter(PARTS, p => p.conf == c)));
+if (op == 'start' && !(arg in started)) push(started, arg);
+if (op == 'stop') started = filter(started, c => c != arg);
+writefile(STARTED, length(started) ? join('\n', started) + '\n' : '');
+
+let configs = [], used = [];
+for (let p in PARTS) {
+	if (!(p.conf in started) || !access(p.script, 'x')) continue;
+	let c = null;
+	try { c = json(readfile(p.conf) ?? ''); } catch (e) { c = null; }
+	if (type(c) == 'object') { push(configs, c); push(used, p); }
+}
+let ubus = connect();
+let before = ubus.call('service', 'list', { name: SERVICE })?.[SERVICE]?.instances?.xray;
+let command = [ XRAY, 'run', '-config', CONF ];
+
+if (!length(configs) || !access(XRAY, 'x')) {
+	if (before) ubus.call('service', 'delete', { name: SERVICE });
+	unlink(CONF);
+	unlink(ERROR);
+	unlink(LIST);
+	exit(0);
+}
+let j = join_configs(configs);
+let text = j.config ? sprintf('%J\n', j.config) : null, replaced = false;
+if (j.error) {
+	writefile(ERROR, `${j.error}\n`);
+	log(`not applied: ${j.error}`);
+}
+else if (readfile(CONF) != text) {
+	writefile(`${CONF}.new`, text);
+	chmod(`${CONF}.new`, 0o600);
+	let test = (length(configs) > 1);
+	let p = test ? popen(`${XRAY} run -test -format json -c ${shq(`${CONF}.new`)} 2>&1`, 'r') : null;
+	let out = p?.read('all') ?? '';
+	if (!test || p?.close() == 0) {
+		rename(`${CONF}.new`, CONF);
+		replaced = true;
+	}
+	else {
+		unlink(`${CONF}.new`);
+		let lines = split(rtrim(out, '\n'), '\n'), last = split(lines[length(lines) - 1] ?? '', ' > ');
+		j.error = `xray rejected the joined configuration: ${trim(last[length(last) - 1])}`;
+		writefile(ERROR, `${j.error}\n`);
+		log(`not applied: ${j.error}`);
+	}
+}
+if (!j.error) {
+	writefile(LIST, join('\n', map(used, p => p.conf)) + '\n');
+	unlink(ERROR);
+}
+if (!access(CONF)) exit(1);
+
+ubus.call('service', 'set', {
+	name: SERVICE,
+	instances: {
+		xray: {
+			command: command,
+			env: { XRAY_LOCATION_ASSET: '/etc/tunnel-client/sources' },
+			file: [ CONF ],
+			respawn: [ '3600', '5', '5' ],
+			limits: { nofile: '16384 16384' },
+			stderr: true
+		}
+	}
+});
+// procd starts the new process once the old one has exited: the command after a start waits for
+// a new pid (at most 10 seconds) in the background
+if (replaced || !before?.running || join(' ', before?.command ?? []) != join(' ', command)) {
+	let old = before?.running ? before.pid : 0;
+	for (let p in used)
+		if (p.after && access(p.after, 'x'))
+			system(`(i=0; while [ $i -lt 10 ] && [ "$(ubus call service list '{"name":"${SERVICE}"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')" = "${old}" ]; do sleep 1; i=$((i+1)); done; ${p.after}) >/dev/null 2>&1 &`);
+}

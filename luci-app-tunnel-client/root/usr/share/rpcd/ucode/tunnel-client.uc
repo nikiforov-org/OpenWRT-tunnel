@@ -26,8 +26,12 @@ function read_json(path, dflt) {
 	return (type(v) == type(dflt)) ? v : dflt;
 }
 
+// xray runs once for the tunnel packages (procd service "tunnel-xray", see xray-service); it is
+// this client's while its joined configuration holds the client's file
 function instance() {
-	try { return json(exec(`ubus call service list '{"name":"${CFG}"}'`).out)?.[CFG]?.instances?.xray ?? null; } catch (e) { return null; }
+	let inst = null;
+	try { inst = json(exec(`ubus call service list '{"name":"tunnel-xray"}'`).out)?.['tunnel-xray']?.instances?.xray; } catch (e) { inst = null; }
+	return (index(split(readfile('/tmp/tunnel-xray/parts') ?? '', '\n'), '/etc/tunnel-client/config.json') >= 0) ? inst : null;
 }
 
 function current_active() {
@@ -76,7 +80,7 @@ methods.status = {
 			measure: { time: measure.time ?? 0, decision: measure.decision ?? '', bytes: measure.bytes ?? 0, health: measure.health ?? null },
 			measuring: (stat(`${RUN}/measure.lock`) != null),
 			updating: (stat(`${RUN}/sources.lock`) != null),
-			error: trim(readfile(ERROR) ?? ''),
+			error: trim(readfile(ERROR) ?? '') || trim(readfile('/tmp/tunnel-xray/error') ?? ''),
 			log_last: (main.enabled == '1' && !running) ? tail(exec(`logread 2>/dev/null | grep -E '${CFG}|xray\\['`).out, 3) : ''
 		};
 	}

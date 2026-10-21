@@ -2,6 +2,8 @@
 
 import { access, popen, readfile, stat } from 'fs';
 import { cursor } from 'uci';
+import { connect } from 'ubus';
+import { info } from 'tunnel-server.x509';
 
 const CFG   = 'tunnel-server';
 const CONF  = '/etc/tunnel-server/config.json';
@@ -60,25 +62,34 @@ function parse_keys(out) {
 	return { private_key: priv ? priv[1] : '', public_key: pub ? pub[3] : '' };
 }
 
+// rpcd keeps this plugin loaded: what only changes with its input is worked out once
+let cache = { keys: {}, certs: {} };
+
 function public_key(priv) {
 	if (!valid_key(priv) || access(XRAY, 'x') != true)
 		return '';
-	return parse_keys(exec(`${XRAY} x25519 -i ${shq(priv)} 2>/dev/null`).out).public_key;
+	cache.keys[priv] ??= parse_keys(exec(`${XRAY} x25519 -i ${shq(priv)} 2>/dev/null`).out).public_key;
+	return cache.keys[priv];
 }
 
 function xray_version() {
-	if (access(XRAY, 'x') != true)
-		return '';
-	let m = match(exec(`${XRAY} version 2>/dev/null`).out, /Xray ([0-9][^ \n]*)/);
-	return m ? m[1] : '';
+	let st = stat(XRAY);
+	if (!st) return '';
+	if (cache.version?.mtime != st.mtime) {
+		let m = match(exec(`${XRAY} version 2>/dev/null`).out, /Xray ([0-9][^ \n]*)/);
+		cache.version = { mtime: st.mtime, text: m ? m[1] : '' };
+	}
+	return cache.version.text;
 }
 
+// xray runs once for the tunnel packages (procd service "tunnel-xray", see xray-service); it
+// serves this server while its joined configuration holds this server's file
+let ubus = null;
 function service() {
-	let r = exec(`ubus call service list ${shq('{"name":"' + CFG + '"}')} 2>/dev/null`);
-	let j;
-	try { j = json(r.out); } catch (e) { return { running: false }; }
-	let inst = j?.[CFG]?.instances?.xray;
-	return { running: (inst?.running == true), pid: inst?.pid };
+	ubus ??= connect();
+	let inst = ubus?.call('service', 'list', { name: 'tunnel-xray' })?.['tunnel-xray']?.instances?.xray;
+	let ours = (index(split(readfile('/tmp/tunnel-xray/parts') ?? '', '\n'), CONF) >= 0);
+	return { running: (ours && inst?.running == true), pid: ours ? inst?.pid : null };
 }
 
 function xray_log() {
@@ -95,16 +106,18 @@ function ddns_site(uci) {
 	return { enabled: (m.site_enabled == '1'), port: m.site_port ?? '443', hostname: host ?? '' };
 }
 
+// a certificate file: read once per change of the file
 function cert_info(path) {
-	if (!path || access(path) != true)
+	let st = path ? stat(path) : null;
+	if (!st)
 		return null;
-	let r = exec(`openssl x509 -noout -subject -enddate -in ${shq(path)} 2>/dev/null`);
-	if (r.code != 0)
+	let key = `${st.mtime}/${st.size}`, c = cache.certs[path];
+	if (c?.key != key)
+		c = cache.certs[path] = { key: key, info: info(readfile(path)) };
+	let i = c.info;
+	if (!i || !i.not_after)
 		return { error: 'cannot read the certificate' };
-	let cn = match(r.out, /CN[ \t]*=[ \t]*([^,\n]+)/);
-	let na = match(r.out, /notAfter=(.+)/);
-	let valid = exec(`openssl x509 -checkend 0 -noout -in ${shq(path)} 2>/dev/null`).code == 0;
-	return { cn: cn ? trim(cn[1]) : '', not_after: na ? trim(na[1]) : '', valid: valid, path: path };
+	return { cn: i.subject_cn ?? '', expires: i.not_after, valid: time() < i.not_after, path: path };
 }
 
 // the domains of the Dynamic DNS package and whether each has a certificate
@@ -116,7 +129,7 @@ function ddns_domains(uci) {
 		let host = s.hostname ?? '';
 		if (!host) return;
 		let c = cert_info(`${DDNS_CERTS}/${host}/fullchain.pem`);
-		push(out, { id: s['.name'], hostname: host, has_cert: (c != null && !c.error), not_after: c?.not_after ?? '', valid: c?.valid ?? false });
+		push(out, { id: s['.name'], hostname: host, has_cert: (c != null && !c.error), expires: c?.expires ?? null, valid: c?.valid ?? false });
 	});
 	return out;
 }
@@ -168,7 +181,7 @@ methods.status = {
 			pid: svc.pid,
 			public_key: public_key(main.private_key),
 			config_time: st ? st.mtime : null,
-			error: trim(readfile(ERROR) ?? ''),
+			error: trim(readfile(ERROR) ?? '') || trim(readfile('/tmp/tunnel-xray/error') ?? ''),
 			firewall: fw,
 			cert: cert,
 			domains: ddns_domains(uci),

@@ -10,7 +10,7 @@
 
 'use strict';
 
-import { access, popen, readfile, writefile, mkdir, unlink, chmod, rename } from 'fs';
+import { access, popen, readfile, writefile, mkdir, unlink, chmod, rename, open } from 'fs';
 import { cursor } from 'uci';
 
 const CFG   = 'tunnel-server';
@@ -213,10 +213,12 @@ function build(main, profiles, uci) {
 			sniffing: sniffing
 		});
 	}
-	let rules = [];
+	// the rules are bound to this server's inbounds: xray may run with the client's configuration too
+	let tags = map(inbounds, ib => ib.tag), rules = [];
 	if (!flag(main.local_access, true))
-		push(rules, { type: 'field', ip: PRIVATE, outboundTag: 'block' });
-	push(rules, { type: 'field', protocol: [ 'bittorrent' ], outboundTag: 'block' });
+		push(rules, { type: 'field', inboundTag: tags, ip: PRIVATE, outboundTag: 'block' });
+	push(rules, { type: 'field', inboundTag: tags, protocol: [ 'bittorrent' ], outboundTag: 'block' });
+	push(rules, { type: 'field', inboundTag: tags, outboundTag: 'direct' });
 	return {
 		config: {
 			log: { loglevel: 'warning', access: 'none' },
@@ -303,13 +305,20 @@ function write_config(config) {
 	return 'written';
 }
 
-// The site package decides from the configuration file in effect whether this server holds the
-// TCP port its web server would use; it moves uhttpd behind the server or back. Procd restarts
-// xray only after this script returns, so a running instance is stopped first when the file
-// changed: the port is then free for whichever of the two has to take it.
-function hand_over(changed) {
-	if (!changed) return;
-	system(`ubus call service delete '{"name":"tunnel-server","instance":"xray"}' >/dev/null 2>&1`);
+// The site package decides from the TCP ports of the VLESS inbounds of the configuration file in
+// effect whether this server holds the port its web server would use; it moves uhttpd behind the
+// server or back. When those ports changed, the running xray is stopped first and started again
+// only after this script (xray-service from the init script, which waits for the lock this script
+// holds), so the port is free for whichever of the two has to take it.
+function vless_ports() {
+	let cfg;
+	try { cfg = json(readfile(CONF) ?? ''); } catch (e) { cfg = null; }
+	return join(' ', sort(map(filter(cfg?.inbounds ?? [], ib => ib.protocol == 'vless'), ib => `${ib.port}`)));
+}
+
+function hand_over(before) {
+	if (vless_ports() == before) return;
+	system(`ubus call service delete '{"name":"tunnel-xray"}' >/dev/null 2>&1`);
 	if (access(DDNS_INIT, 'x') == true)
 		system(`${DDNS_INIT} reload >/dev/null 2>&1`);
 }
@@ -336,6 +345,10 @@ uci.foreach(CFG, 'profile', function(s) {
 });
 chmod(`/etc/config/${CFG}`, 0o600);
 unlink(ERROR);
+// the lock of xray-service: the joined process is not rebuilt while the file and the port change
+let lock = open('/var/lock/tunnel-xray', 'w');
+lock?.lock('x');
+let vless_before = vless_ports();
 
 let ports = { vision: 0, xhttp: 0, hysteria2: 0 }, changed = false;
 if (mode == 'apply' && flag(main.enabled, false)) {
@@ -358,5 +371,5 @@ if (mode == 'apply' && flag(main.enabled, false)) {
 else {
 	changed = remove_config();
 }
-hand_over(changed);
+hand_over(vless_before);
 sync_firewall(ports);

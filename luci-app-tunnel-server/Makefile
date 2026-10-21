@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=Tunnel > Server: one xray process with VLESS + REALITY (TCP + XTLS-Vision, XHTTP) and Hysteria2
-LUCI_DEPENDS:=+xray-core +openssl-util +luci-lib-uqr +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci
+LUCI_DEPENDS:=+xray-core +luci-lib-uqr +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus
 LUCI_PKGARCH:=all
 LUCI_MAINTAINER:=Evgenii Nikiforov
 LUCI_URL:=https://github.com/nikiforov-org/OpenWRT-tunnel
@@ -25,7 +25,10 @@ endef
 
 define Package/luci-app-tunnel-server/prerm
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /usr/libexec/tunnel-server/sync revert >/dev/null 2>&1
+[ -n "$${IPKG_INSTROOT}" ] || {
+	/usr/libexec/tunnel-server/sync revert >/dev/null 2>&1
+	/usr/libexec/tunnel-server/xray-service stop /etc/tunnel-server/config.json >/dev/null 2>&1
+}
 exit 0
 endef
 

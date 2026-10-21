@@ -38,9 +38,8 @@ function timeAgo(ts) {
 	return _('%d days ago').format(Math.round(s / 86400));
 }
 
-function daysLeft(notAfter) {
-	var t = Date.parse(notAfter);
-	return isNaN(t) ? null : Math.floor((t - Date.now()) / 86400000);
+function daysLeft(expires) {
+	return expires ? Math.floor((expires * 1000 - Date.now()) / 86400000) : null;
 }
 
 function hex(bytes) {
@@ -134,11 +133,11 @@ return view.extend({
 			return span(COLOR.dim, _('Only the Hysteria2 transport uses a certificate; it is off'));
 		if (c.error)
 			return span(COLOR.warn, c.error);
-		var n = daysLeft(c.not_after);
+		var n = daysLeft(c.expires);
 		var col = (c.valid && n != null && n > 14) ? COLOR.ok : COLOR.bad;
 		if (n != null && n <= 30 && n > 14) col = COLOR.warn;
 		return E('span', {}, [
-			span(col, n != null ? _('%s: valid, %d days left').format(c.cn || c.server_name, n) : _('%s: valid until %s').format(c.cn || c.server_name, c.not_after)),
+			span(col, (n != null && n >= 0) ? _('%s: valid, %d days left').format(c.cn || c.server_name, n) : _('%s: expired').format(c.cn || c.server_name)),
 			E('span', { 'style': 'color:' + COLOR.dim }, c.source == 'ddns' ? ' ' + _('(from the Dynamic DNS page)') : ' ' + c.path)
 		]);
 	},
@@ -517,7 +516,7 @@ return view.extend({
 		if (!domains.length)
 			o.value('', _('(no domain on the Dynamic DNS page yet)'));
 		domains.forEach(function(d) {
-			var n = daysLeft(d.not_after);
+			var n = daysLeft(d.expires);
 			o.value(d.id, d.hostname + (d.has_cert ? (n != null ? ' (' + _('certificate: %d days left').format(n) + ')' : '') : ' (' + _('no certificate yet') + ')'));
 		});
 		o.depends({ hysteria2_enabled: '1', cert_source: 'ddns' });
