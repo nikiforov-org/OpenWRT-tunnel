@@ -6,11 +6,16 @@
 #     the session is ended here and the browser is sent to the site's front page;
 #   - a JSON-RPC request from LuCI's own pages (Referer inside /cgi-bin/luci) without a
 #     session gets "login required", on which LuCI shows its "session expired" notice;
+#   - JSON-RPC calls go to luci-rpc (same rules, without the dispatcher);
 #   - any other request without a session gets the site's 404 page (see not-found): the
 #     administration is entered only through the site's login page and nothing tells what is
 #     behind the address.
 LUCI=/www/cgi-bin/luci
 NOT_FOUND=/usr/libexec/tunnel-ddns/not-found
+
+# LuCI's JSON-RPC calls (the pages poll through them) are answered by luci-rpc, which checks the
+# session the same way without starting the whole dispatcher for each call
+[ "$REQUEST_METHOD" = POST ] && case "$PATH_INFO" in /admin/ubus|/admin/ubus/*) exec /usr/libexec/tunnel-ddns/luci-rpc ;; esac
 
 # the session id: the first cookie of that name, exactly as the LuCI dispatcher reads it
 cookie=sysauth_http

@@ -1,0 +1,99 @@
+#!/usr/bin/env ucode
+// tunnel-ddns luci-rpc: LuCI's JSON-RPC endpoint (POST cgi-bin/luci/admin/ubus) while a site with
+// its own login page is served, run by luci-gate instead of the full LuCI dispatcher. It does what
+// LuCI's action_ubus does on that route (one request or a batch; "call" with the session given in
+// its parameters, checked with session access for the ubus scope; "list"), but only for a request
+// with a logged-in session cookie: without one, LuCI's own pages get "login required" (403, LuCI
+// then shows its session notice) and every other request the site's 404 page, as from luci-gate.
+
+'use strict';
+
+import { stdin, readfile } from 'fs';
+import { connect } from 'ubus';
+
+const TYPES = [ null, 'array', 'object', 'string', null, 'number', null, 'boolean', 'double' ];
+
+let ubus = connect();
+
+function reply(id, data, code, errmsg) {
+	let r = { jsonrpc: '2.0', id: id };
+	if (errmsg) r.error = { code: code, message: errmsg };
+	else if (type(code) == 'object') r.result = code;
+	else if (data != null) r.result = [ code, data ];
+	else r.result = [ code ];
+	return r;
+}
+
+function access(sid, obj, fun) {
+	return ubus.call('session', 'access', { ubus_rpc_session: sid, scope: 'ubus', object: obj, function: fun })?.access == true;
+}
+
+function handle(req) {
+	if (type(req?.method) != 'string' || req?.jsonrpc != '2.0' || req?.id == null)
+		return reply(null, null, -32600, 'Invalid request');
+	if (req.method == 'call') {
+		if (type(req.params) != 'array' || length(req.params) < 3)
+			return reply(null, null, -32600, 'Invalid parameters');
+		let sid = req.params[0], obj = req.params[1], fun = req.params[2], arg = req.params[3] ?? {};
+		if (type(arg) != 'object' || exists(arg, 'ubus_rpc_session'))
+			return reply(req.id, null, -32602, 'Invalid parameters');
+		if (!access(sid, obj, fun))
+			return reply(req.id, null, -32002, 'Access denied');
+		arg.ubus_rpc_session = sid;
+		ubus.error();
+		let res = ubus.call(obj, fun, arg);
+		return reply(req.id, res, ubus.error(true) ?? 0);
+	}
+	if (req.method == 'list') {
+		if (req.params == null || (type(req.params) == 'array' && !length(req.params)))
+			return reply(req.id, null, ubus.list());
+		if (type(req.params) != 'array')
+			return reply(req.id, null, -32602, 'Invalid parameters');
+		let rv = {};
+		for (let param in req.params) {
+			if (type(param) != 'string')
+				return reply(req.id, null, -32602, 'Invalid parameters');
+			for (let m, p in ubus.list(param)?.[0])
+				for (let pn, pt in p) {
+					rv[param] ??= {};
+					rv[param][m] ??= {};
+					rv[param][m][pn] = TYPES[pt] ?? 'unknown';
+				}
+		}
+		return reply(req.id, null, rv);
+	}
+	return reply(req.id, null, -32601, 'Method not found');
+}
+
+// the request body arrives in pieces through the pipe: read until CONTENT_LENGTH or its end
+let len = int(getenv('CONTENT_LENGTH') ?? '0'), body = '';
+while (length(body) < len) {
+	let part = stdin.read(len - length(body));
+	if (!length(part)) break;
+	body += part;
+}
+
+// the session id: the first cookie of that name, as the LuCI dispatcher reads it
+let name = (getenv('HTTPS') == 'on') ? 'sysauth_https' : 'sysauth_http';
+let m = match(getenv('HTTP_COOKIE') ?? '', regexp(`(^|;[ ]*)${name}=([0-9a-f]{32})(;|$)`));
+let session = m ? m[2] : null;
+let logged_in = session && exists(ubus.call('session', 'get', { ubus_rpc_session: session })?.values ?? {}, 'username');
+
+if (!logged_in) {
+	if (index(getenv('HTTP_REFERER') ?? '', `//${getenv('HTTP_HOST') ?? ''}/cgi-bin/luci`) >= 0) {
+		print('Status: 403 Forbidden\r\nX-LuCI-Login-Required: yes\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n\r\nLogin required\n');
+		exit(0);
+	}
+	print('Status: 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\r\n');
+	print(readfile(`${getenv('DOCUMENT_ROOT') ?? ''}/404.html`) ?? '<h1>Not Found</h1>\n');
+	exit(0);
+}
+
+let request = null;
+try { request = json(body); } catch (e) { request = null; }
+let out;
+if (type(request) == 'object') out = handle(request);
+else if (type(request) == 'array') out = map(request, handle);
+else out = reply(null, null, -32700, 'Parse error');
+print('Status: 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\nCache-Control: no-store\r\n\r\n');
+printf('%J', out);

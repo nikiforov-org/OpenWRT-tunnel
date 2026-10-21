@@ -186,9 +186,17 @@ function blank_picture() {
 	return rows;
 }
 
-// a glyph of the font as rows of booleans
-function glyph_bits(glyph) {
-	return map(glyph, row => map(split(row, ''), ch => ch == '#'));
+// a glyph of the font as rows of booleans: { w, bits } holds the rows one after the other, each
+// as ceil(w / 4) hex digits with the leftmost pixel in the highest bit
+function glyph_bits(glyph, height) {
+	let digits = int((glyph.w + 3) / 4), rows = [];
+	for (let y = 0; y < height; y++) {
+		let v = int(substr(glyph.bits, y * digits, digits), 16), row = [];
+		for (let x = 0; x < glyph.w; x++)
+			push(row, ((v >> (digits * 4 - 1 - x)) & 1) == 1);
+		push(rows, row);
+	}
+	return rows;
 }
 
 // the vertical bend: how far down every column is shifted, along a sine wave
@@ -268,7 +276,7 @@ function picture(answer, font) {
 		splice(unused_colours, pick, 1);
 		let cx = margin + step * i + step / 2 + random(7) - 3;
 		let cy = HEIGHT / 2 + random(9) - 4;
-		draw_glyph(rows, glyph_bits(font.glyphs[chars[i]]), cx, cy,
+		draw_glyph(rows, glyph_bits(font.glyphs[chars[i]], font.height), cx, cy,
 			random_between(0.9, 1.2), random_between(-0.35, 0.35), bend, length(palette) - 1);
 	}
 	for (let i = 0; i < 4; i++)

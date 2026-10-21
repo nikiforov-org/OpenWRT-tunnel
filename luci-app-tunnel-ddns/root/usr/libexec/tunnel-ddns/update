@@ -1,0 +1,121 @@
+#!/usr/bin/env ucode
+// tunnel-ddns update [SECTION [force]]: points the enabled domains at the router's public IPv4
+// address. Runs from cron every 10 minutes while a domain is on, when an interface of the wan zone
+// comes up (hotplug), after Save & Apply and from "Update address" (force). For each domain the
+// address in its DNS record (a lookup through the router's resolver) and the address sent last are
+// compared with the public address (ip_url); the provider's API is called only when they differ,
+// and once 72 hours after the last update. Nothing stays running between the runs.
+// State: /tmp/tunnel-ddns/ddns-SECTION.json, log: ddns-SECTION.log, the public address for the
+// status page: public_ip.
+
+'use strict';
+
+import { readfile, writefile, mkdir, unlink, stat, popen } from 'fs';
+import { cursor } from 'uci';
+import { request } from 'tunnel-ddns.http';
+import { provider } from 'tunnel-ddns.providers';
+
+const CFG     = 'tunnel-ddns';
+const RUN     = '/tmp/tunnel-ddns';
+const LOCK    = `${RUN}/update.lock`;
+const REFRESH = 72 * 3600;      // an update even without a change, like ddns-scripts' force_interval
+const SETTLE  = 15 * 60;        // after an update the resolver may still answer the old address
+const LOG_MAX = 200;
+
+function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
+
+function exec(cmd) {
+	let p = popen(cmd, 'r');
+	if (!p) return '';
+	let out = p.read('all') ?? '';
+	p.close();
+	return out;
+}
+
+function stamp() { return trim(exec('date "+%Y-%m-%d %H:%M:%S"')); }
+
+function log(sid, msg, syslog) {
+	let path = `${RUN}/ddns-${sid}.log`;
+	let lines = split(rtrim(readfile(path) ?? '', '\n'), '\n');
+	if (lines[0] == '') lines = [];
+	push(lines, `${stamp()} ${msg}`);
+	if (length(lines) > LOG_MAX) lines = slice(lines, length(lines) - LOG_MAX);
+	writefile(path, join('\n', lines) + '\n');
+	if (syslog) system(`logger -t tunnel-ddns ${shq(msg)}`);
+}
+
+function load_state(sid) {
+	let s = null;
+	try { s = json(readfile(`${RUN}/ddns-${sid}.json`) ?? ''); } catch (e) { s = null; }
+	return (type(s) == 'object') ? s : {};
+}
+
+function save_state(sid, s) { writefile(`${RUN}/ddns-${sid}.json`, sprintf('%J\n', s)); }
+
+// the IPv4 addresses the name resolves to through the router's resolver
+function resolve(host) {
+	let out = [], seen = false;
+	for (let l in split(exec(`nslookup ${shq(host)} 2>/dev/null`), '\n')) {
+		if (index(l, 'Name:') >= 0) { seen = true; continue; }
+		let m = seen ? match(l, /Address[^:]*:[ \t]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/) : null;
+		if (m) push(out, m[1]);
+	}
+	return out;
+}
+
+let args = ARGV, only = args[0] ?? '', force = (args[1] == 'force');
+let uci = cursor();
+uci.load(CFG);
+let domains = [];
+uci.foreach(CFG, 'domain', function(s) {
+	if (only && s['.name'] != only) return;
+	if (s.enabled == '1' && length(s.hostname) && provider(s)) push(domains, s);
+});
+if (!length(domains)) exit(0);
+
+mkdir(RUN, 0o755);
+let l = stat(LOCK);
+if (l && time() - l.mtime < 120 && !force) exit(0);
+writefile(LOCK, `${time()}\n`);
+
+let url = uci.get(CFG, 'main', 'ip_url') || 'https://ipv4-internet.yandex.net/api/v0/ip';
+let r = request('GET', url, { ipv4: true, timeout: 15 });
+let m = r.ok ? match(r.body, /([0-9]{1,3}(\.[0-9]{1,3}){3})/) : null;
+let ip = m ? m[1] : '';
+if (ip) writefile(`${RUN}/public_ip`, ip);
+
+let now = time();
+for (let s in domains) {
+	let sid = s['.name'], host = lc(s.hostname), st = load_state(sid);
+	st.checked = now;
+	if (!ip) {
+		st.error = `the public address is unknown (${url}: ${r.error || 'no address in the answer'})`;
+		log(sid, st.error);
+		save_state(sid, st);
+		continue;
+	}
+	if (!force) {
+		let registered = resolve(host);
+		if (index(registered, ip) >= 0) {
+			// the record points here already; after a restart the time of the last update is unknown
+			st.ip = ip;
+			st.sent ??= now;
+			if (now - st.sent < REFRESH) { st.error = ''; save_state(sid, st); continue; }
+		}
+		else if (st.ip == ip && now - (st.sent ?? 0) < SETTLE) {
+			save_state(sid, st);
+			continue;
+		}
+	}
+	let u = provider(s).update(host, ip);
+	if (u.ok) {
+		st.ip = ip; st.sent = now; st.error = '';
+		log(sid, `${host} → ${ip}: ${u.message}`, true);
+	}
+	else {
+		st.error = u.message;
+		log(sid, `${host} → ${ip} failed: ${u.message}`, true);
+	}
+	save_state(sid, st);
+}
+unlink(LOCK);

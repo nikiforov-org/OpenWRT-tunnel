@@ -2,7 +2,8 @@
 """Makes root/usr/share/tunnel-ddns/captcha-font.json for the captcha module: the alphabet of
 every supported language and a 1-bit bitmap of each character, rendered from a TrueType font.
 Every glyph has the same height (the line box of the font, so baselines match) and its own
-width (blank columns trimmed). Rows are strings of '.' and '#', readable as a picture.
+width (blank columns trimmed). A glyph is {"w": width, "bits": hex}: its rows one after the other,
+each as ceil(w / 4) hex digits, the leftmost pixel in the highest bit.
 
 Needs Pillow. Any font that has the glyphs works; PT Sans Bold (SIL Open Font License) is used
 here. Run from the repository root:
@@ -44,11 +45,20 @@ top = min(next(i for i, row in enumerate(rows) if '#' in row) for rows in glyphs
 bottom = max(max(i for i, row in enumerate(rows) if '#' in row) for rows in glyphs.values())
 glyphs = {ch: rows[top:bottom + 1] for ch, rows in glyphs.items()}
 
+
+def pack(rows):
+    width = len(rows[0])
+    digits = (width + 3) // 4
+    bits = ''.join('%0*x' % (digits, int(row.replace('.', '0').replace('#', '1').ljust(digits * 4, '0'), 2)) for row in rows)
+    return {'w': width, 'bits': bits}
+
+
 with open(OUT, 'w', encoding='utf-8') as f:
     json.dump({
         'source': '%s %s %dpx' % (font.getname() + (FONT_SIZE,)),
         'height': bottom - top + 1,
         'alphabets': ALPHABETS,
-        'glyphs': glyphs,
-    }, f, ensure_ascii=False, indent=1)
+        'glyphs': {ch: pack(rows) for ch, rows in glyphs.items()},
+    }, f, ensure_ascii=False, separators=(',', ':'))
+    f.write('\n')
 print('wrote %s: %d glyphs, %d px high' % (os.path.normpath(OUT), len(glyphs), bottom - top + 1))

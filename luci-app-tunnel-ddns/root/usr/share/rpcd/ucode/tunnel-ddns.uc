@@ -4,29 +4,28 @@
 
 import { access, popen, readfile, writefile, lsdir, stat, mkdir, unlink, readlink } from 'fs';
 import { cursor } from 'uci';
+import { connect } from 'ubus';
+import { info } from 'tunnel-ddns.x509';
+import { request } from 'tunnel-ddns.http';
 
 const CFG       = 'tunnel-ddns';
 const SITES     = '/usr/share/www';            // document roots, one directory per site
 const BACKENDS  = '/etc/tunnel-ddns/sites';    // the sites' build scripts (the archive's .tunnel-ddns/)
 const CERTS     = '/etc/ssl/tunnel-ddns';
-const ACME_HOME = '/etc/acme';
 const RUN       = '/tmp/tunnel-ddns';
 const STATE     = '/etc/tunnel-ddns/state';     // result of the last site build, kept across reboots
 const UPLOAD    = '/tmp/tunnel-ddns-upload.tar.gz';
-const DDNS_RUN  = '/var/run/ddns';
-const DDNS_LOG  = '/var/log/ddns';
 const LUCI_GATE = '/usr/libexec/tunnel-ddns/luci-gate';
 const SYNC      = '/usr/libexec/tunnel-ddns/sync';
 const CERT      = '/usr/libexec/tunnel-ddns/cert';
 const SITEBUILD = '/usr/libexec/tunnel-ddns/sitebuild';
+const UPDATE    = '/usr/libexec/tunnel-ddns/update';
 
 function exec(command) {
 	let p = popen(command, 'r');
 	if (p == null)
 		return { code: -1, out: '' };
-	let out = '';
-	for (let l = p.read('line'); length(l); l = p.read('line'))
-		out += l;
+	let out = p.read('all') ?? '';
 	return { code: p.close(), out: out };
 }
 
@@ -61,11 +60,12 @@ function cached(name, ttl, fn) {
 	return value;
 }
 
+// the public address: written by update at each of its runs, looked up here when older than 2 minutes
 function public_ip(url) {
 	if (!url) return '';
 	return cached('public_ip', 120, function() {
-		let r = exec(`wget -q -T 5 -O - ${shq(url)} 2>/dev/null`);
-		let m = match(r.out, /([0-9]{1,3}(\.[0-9]{1,3}){3})/);
+		let r = request('GET', url, { ipv4: true, timeout: 5 });
+		let m = r.ok ? match(r.body, /([0-9]{1,3}(\.[0-9]{1,3}){3})/) : null;
 		return m ? m[1] : '';
 	});
 }
@@ -85,27 +85,26 @@ function resolve(host) {
 	});
 }
 
-function uptime() {
-	let m = match(readfile('/proc/uptime') ?? '', /^([0-9]+)/);
-	return m ? int(m[1]) : 0;
-}
-
+// the installed certificate: read once per change of the file (rpcd keeps this plugin loaded)
+let cert_cache = {};
 function cert_info(host) {
 	let crt = `${CERTS}/${host}/fullchain.pem`;
-	if (!host || access(crt) != true)
+	let st = host ? stat(crt) : null;
+	if (!st)
 		return null;
-	let r = exec(`openssl x509 -noout -subject -enddate -in ${shq(crt)} 2>/dev/null`);
-	if (r.code != 0)
+	let key = `${st.mtime}/${st.size}`, c = cert_cache[host];
+	if (c?.key != key) {
+		let i = info(readfile(crt));
+		c = cert_cache[host] = { key: key, info: i };
+	}
+	let i = c.info;
+	if (!i || !i.not_after)
 		return { error: 'cannot read certificate' };
-	let cn = match(r.out, /CN[ \t]*=[ \t]*([^,\n]+)/);
-	let na = match(r.out, /notAfter=(.+)/);
-	let valid = exec(`openssl x509 -checkend 0 -noout -in ${shq(crt)} 2>/dev/null`).code == 0;
-	let conf = readfile(`${ACME_HOME}/${host}_ecc/${host}.conf`) ?? '';
 	return {
-		cn: cn ? trim(cn[1]) : host,
-		not_after: na ? trim(na[1]) : '',
-		valid: valid,
-		staging: index(conf, 'acme-staging') >= 0,
+		cn: i.subject_cn ?? host,
+		expires: i.not_after,
+		valid: time() < i.not_after,
+		staging: index(i.issuer_cn ?? '', 'STAGING') >= 0,
 		path: crt
 	};
 }
@@ -128,12 +127,11 @@ function parse_state(path, timeout) {
 function job_state(sid) { return parse_state(`${RUN}/cert-${sid}.state`, 120); }
 function site_job_state(name) { return parse_state(`${STATE}/site-${name}.state`, 120); }
 
+let ubus = null;
 function svc_running(name) {
-	let r = exec(`ubus call service list ${shq('{"name":"' + name + '"}')} 2>/dev/null`);
-	let j; try { j = json(r.out); } catch (e) { return false; }
-	let inst = (j && j[name]) ? j[name].instances : null;
-	if (!inst) return false;
-	for (let k in inst) if (inst[k].running) return true;
+	ubus ??= connect();
+	let inst = ubus?.call('service', 'list', { name: name })?.[name]?.instances;
+	for (let k, v in inst ?? {}) if (v.running) return true;
 	return false;
 }
 
@@ -145,7 +143,7 @@ function site_has_login(name) { return access(`${SITES}/${name}/cgi-bin/login`) 
 function site_list() {
 	let out = [];
 	let sizes = {};
-	let r = exec(`du -sk ${SITES}/* 2>/dev/null`);
+	let r = { out: cached('sizes', 60, () => exec(`du -sk ${SITES}/* 2>/dev/null`).out) };
 	for (let l in split(r.out, '\n')) {
 		let m = match(l, /^([0-9]+)[ \t]+(.+)$/);
 		if (m) sizes[rtrim(m[2], '/')] = int(m[1]);
@@ -173,23 +171,18 @@ function start_build(name) {
 	exec(`setsid ${SITEBUILD} ${shq(name)} >/dev/null 2>&1 </dev/null &`);
 }
 
-function overlay_free_kb() {
-	let r = exec('df -k /overlay 2>/dev/null');
+function overlay_free_kb(fresh) {
+	let r = { out: fresh ? exec('df -k /overlay 2>/dev/null').out : cached('df', 60, () => exec('df -k /overlay 2>/dev/null').out) };
 	let lines = split(rtrim(r.out, '\n'), '\n');
 	let m = match(lines[length(lines) - 1] ?? '', /\s([0-9]+)\s+[0-9]+%/);
 	return m ? int(m[1]) : null;
 }
 
+// the address updates of a domain: update keeps their state (see there)
 function ddns_status(sid) {
-	let sec = `tunnel_ddns_${sid}`;
-	let pid = trim(readfile(`${DDNS_RUN}/${sec}.pid`) ?? '');
-	let running = pid != '' && access(`/proc/${pid}`) == true;
-	let upd = trim(readfile(`${DDNS_RUN}/${sec}.update`) ?? '');
-	let last_update = null;
-	if (upd != '' && match(upd, /^[0-9]+$/))
-		last_update = time() - (uptime() - int(upd));
-	let log = tail(readfile(`${DDNS_LOG}/${sec}.log`) ?? '', 3);
-	return { section: sec, running: running, pid: pid, last_update: last_update, log_last: log };
+	let s = null;
+	try { s = json(readfile(`${RUN}/ddns-${sid}.json`) ?? ''); } catch (e) { s = null; }
+	return { last_update: s?.sent ?? null, last_check: s?.checked ?? null, ip: s?.ip ?? '', error: s?.error ?? '' };
 }
 
 const methods = {};
@@ -257,11 +250,11 @@ methods.ddns_update = {
 		let sid = req.args.section;
 		if (!valid_sid(sid)) return { error: 'Invalid section.' };
 		let uci = cursor();
-		uci.load('ddns');
-		if (uci.get('ddns', `tunnel_ddns_${sid}`) != 'service')
+		uci.load(CFG);
+		if (uci.get(CFG, sid, 'enabled') != '1' || !uci.get(CFG, sid, 'hostname') || !uci.get(CFG, sid, 'provider'))
 			return { error: 'This domain is not active. Enable it and click Save & Apply first.' };
-		let r = exec('/etc/init.d/ddns restart 2>&1');
-		return { ok: (r.code == 0), log: r.out };
+		exec(`setsid ${UPDATE} ${shq(sid)} force >/dev/null 2>&1 </dev/null &`);
+		return { ok: true };
 	}
 };
 
@@ -270,7 +263,7 @@ methods.ddns_log = {
 	call: function(req) {
 		let sid = req.args.section;
 		if (!valid_sid(sid)) return { error: 'Invalid section.' };
-		return { log: tail(readfile(`${DDNS_LOG}/tunnel_ddns_${sid}.log`) ?? '', 200) };
+		return { log: tail(readfile(`${RUN}/ddns-${sid}.log`) ?? '', 200) };
 	}
 };
 
@@ -309,7 +302,7 @@ methods.site_install = {
 		if (name == 'default') return { error: 'The name "default" is reserved for the built-in site.' };
 		if (access(UPLOAD) != true) return { error: 'No archive has been uploaded.' };
 		let st = stat(UPLOAD);
-		let free = overlay_free_kb();
+		let free = overlay_free_kb(true);
 		if (free != null && free * 1024 < st.size * 3) {
 			unlink(UPLOAD);
 			return { error: `Not enough free space on the router (${free} KB free).` };
@@ -379,6 +372,7 @@ methods.site_install = {
 		exec(`chown -R 0:0 ${shq(root)} ${shq(backend)} 2>/dev/null; chmod -R u=rwX,go=rX ${shq(root)} ${shq(backend)} 2>/dev/null`);
 		exec(`chmod 755 ${shq(backend + '/build')} ${shq(root)}/cgi-bin/* 2>/dev/null`);
 
+		unlink(`${RUN}/sizes`);
 		// if this site is the one being served, its LuCI links are refreshed right away
 		exec(`${SYNC} 2>&1`);
 		if (site_has_build(name))
@@ -404,6 +398,7 @@ methods.site_delete = {
 		}
 		exec(`rm -rf ${shq(SITES + '/' + name)} ${shq(BACKENDS + '/' + name)}`);
 		unlink(`${STATE}/site-${name}.state`);
+		unlink(`${RUN}/sizes`);
 		if (was_active)
 			exec(`${SYNC} 2>&1`);
 		return { ok: true, switched_to_default: was_active };

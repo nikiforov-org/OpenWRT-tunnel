@@ -1,0 +1,14 @@
+#!/bin/sh
+# An interface of the firewall zone "wan" came up or changed its addresses: the public address may
+# be a new one, so the domains are checked at once instead of at the next run from cron.
+case "$ACTION" in ifup|ifupdate) ;; *) exit 0 ;; esac
+grep -q "# tunnel-ddns-update" /etc/crontabs/root 2>/dev/null || exit 0
+for z in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+	[ "$(uci -q get firewall.$z.name)" = wan ] || continue
+	for n in $(uci -q get firewall.$z.network); do
+		[ "$n" = "$INTERFACE" ] || continue
+		( sleep 5; /usr/libexec/tunnel-ddns/update ) >/dev/null 2>&1 &
+		exit 0
+	done
+done
+exit 0

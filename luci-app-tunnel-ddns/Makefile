@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=Domains (DDNS), Let's Encrypt certificates and a web site served by the router
-LUCI_DEPENDS:=+uhttpd +ddns-scripts +ddns-scripts-services +ddns-scripts-beget +ddns-scripts-cloudflare +acme-acmesh +acme-acmesh-dnsapi +openssl-util +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-math +ucode-mod-log
+LUCI_DEPENDS:=+uhttpd +uacme +uclient-fetch +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-math +ucode-mod-log
 LUCI_PKGARCH:=all
 LUCI_MAINTAINER:=Evgenii Nikiforov
 LUCI_URL:=https://github.com/nikiforov-org/OpenWRT-tunnel

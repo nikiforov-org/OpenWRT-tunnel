@@ -15,12 +15,13 @@
 //
 // Failures are remembered per client address in /tmp/tunnel-ddns/login/<address>: after
 // FREE_ATTEMPTS failures in a row the client has to wait FIRST_DELAY seconds, doubling with
-// every further failure up to MAX_DELAY. A successful login clears the record. All clients
+// every further failure up to MAX_DELAY. A successful login clears the record, a day without a
+// failure forgets it, and at most MAX_RECORDS clients are kept (the oldest go first). All clients
 // together may fail at most GLOBAL_LIMIT times per minute (file "_all").
 
 'use strict';
 
-import { open, readfile, writefile, unlink, mkdir } from 'fs';
+import { open, readfile, writefile, unlink, mkdir, lsdir, stat } from 'fs';
 import { connect } from 'ubus';
 import { cursor } from 'uci';
 import { openlog, syslog, LOG_PID, LOG_USER, LOG_INFO, LOG_WARNING } from 'log';
@@ -30,6 +31,8 @@ const FREE_ATTEMPTS = 3;
 const FIRST_DELAY   = 30;
 const MAX_DELAY     = 900;
 const GLOBAL_LIMIT  = 20;
+const MAX_RECORDS   = 500;    // clients remembered at most (a file each in /tmp, that is in memory)
+const KEEP          = 86400;  // a client's failures are remembered for a day after its last one
 const COOKIE_PATH   = '/cgi-bin/luci/';   // the path LuCI itself uses, so the two never coexist
 
 function record_path(client) {
@@ -57,8 +60,24 @@ function wait_time(client) {
 	return 0;
 }
 
+// forgets clients without a failure for KEEP seconds, and the oldest ones beyond MAX_RECORDS
+function tidy(now) {
+	let files = [];
+	for (let name in lsdir(DIR) ?? []) {
+		if (name == '_all') continue;
+		let st = stat(`${DIR}/${name}`);
+		if (!st) continue;
+		if (now - st.mtime > KEEP) unlink(`${DIR}/${name}`);
+		else push(files, { name: name, mtime: st.mtime });
+	}
+	if (length(files) <= MAX_RECORDS) return;
+	files = sort(files, (a, b) => a.mtime - b.mtime);
+	for (let i = 0; i < length(files) - MAX_RECORDS; i++) unlink(`${DIR}/${files[i].name}`);
+}
+
 function note_failure(client) {
 	let now = time();
+	tidy(now);
 	let path = record_path(client);
 	let record = read_record(path);
 	record.failures = (record.failures ?? 0) + 1;

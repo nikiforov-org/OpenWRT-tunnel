@@ -10,12 +10,22 @@ after installing; the entry appears in the **Tunnel** section.
 ## What it does
 
 - **Domains.** Any number of domains at different providers at the same time. Every domain
-  has its own credentials and its own certificate. The address is updated through
-  ddns-scripts: checked every 10 minutes, sent anyway every 72 hours.
-- **Certificates.** Let's Encrypt through acme.sh with DNS-01 validation (the provider
-  creates the TXT record), no e-mail needed, no port has to be open for issuing. Renewal is
-  automatic: a nightly cron job renews 30 days before expiry and the web server reloads the
-  certificate by itself.
+  has its own credentials and its own certificate. Every 10 minutes from cron, when an uplink
+  comes up and after Save & Apply, `/usr/libexec/tunnel-ddns/update` compares the router's
+  public IPv4 address (the address service, `ip_url`) with the domain's DNS record and with the
+  address it sent last; the provider's API is called only when they differ, and every 72 hours
+  anyway. The check runs and exits: nothing stays in memory between the runs. Providers:
+  DuckDNS, dynv6, IPv64, DNSExit, MyDNS.JP, Beget, Cloudflare (an existing A record of the name;
+  the zone from its ID or found from the name's parents).
+- **Certificates.** Let's Encrypt through uacme with DNS-01 validation (the provider creates
+  the TXT record `_acme-challenge.<domain>`), an account without e-mail, no port has to be
+  open for issuing. Before Let's Encrypt is asked to look, the router waits until every
+  authoritative name server of the zone answers with the record (at most 7 minutes; when they
+  do not answer queries from the router, a fixed minute). Renewal is automatic: a nightly cron
+  job runs uacme, which renews when the certificate is due (Let's Encrypt's renewal window or
+  30 days before expiry), and the web server reloads it. The HTTP requests go through
+  `uclient-fetch` of the stock image; the package needs neither curl, wget, openssl nor
+  acme.sh.
 - **Web site.** Upload a `.tar.gz` archive, pick a domain, tick a box. The router serves the
   site on its HTTPS port and opens that port from WAN. The LuCI administration stays at
   `/cgi-bin/luci/`.
@@ -89,8 +99,8 @@ everything off).
   (`/etc/tunnel-server/config.json`) on every `sync`, which the server package runs after
   each change of its own.
 
-- `/etc/config/ddns`: sections `tunnel_ddns_<id>` for every enabled domain; the file gets
-  mode 600 (it holds passwords). `ddns` is restarted.
+- `/etc/config/ddns`: the sections `tunnel_ddns_<id>` an earlier version kept for
+  ddns-scripts are removed (`ddns` is restarted then).
 - `/etc/config/firewall`: the rule `tunnel_ddns_https` (TCP to the chosen port from WAN)
   while the site is on.
 - `/etc/config/uhttpd`: `home`, `cert`, `key`, `listen_https` (the port), `no_dirlists` and,
@@ -105,19 +115,24 @@ everything off).
   left alone. The same random-named link is placed under `/www` while a site is served (two
   LuCI pages look their parts up on disk at `/www` + the resource URL); nothing else under
   `/www` is touched.
-- `/etc/crontabs/root`: the certificate renewal line (as long as there is at least one
-  certificate) and, for a site with a build script, the rebuild line on the schedule from the
-  administration.
+- `/etc/crontabs/root`: the address check every 10 minutes (while a domain is on), the
+  certificate renewal line (as long as there is at least one certificate) and, for a site with
+  a build script, the rebuild line on the schedule from the administration.
+- `/etc/hotplug.d/iface/90-tunnel-ddns`: the address check 5 seconds after an interface of the
+  wan zone comes up or changes its addresses.
 - Uploaded sites: the public files in `/usr/share/www/<name>/`, the archive's `.tunnel-ddns/`
   directory (the build script and everything for it) in `/etc/tunnel-ddns/sites/<name>/`.
   The result of a site's last build is kept in `/etc/tunnel-ddns/state/`.
-- Certificates: acme.sh's working files in `/etc/acme/<domain>_ecc/`, copies for the web
-  server in `/etc/ssl/tunnel-ddns/<domain>/fullchain.pem` and `key.pem`.
-- The `dns_begetdns` hook in `/usr/lib/acme/client/dnsapi/`: it only uses
-  `dns/changeRecords`, so the Beget API password may be restricted to the "DNS" group.
+- Certificates: uacme's account and its copy of every certificate in `/etc/tunnel-ddns/acme/`
+  (staging: `acme-staging/`), the copies for the web server and the server package in
+  `/etc/ssl/tunnel-ddns/<domain>/fullchain.pem` and `key.pem`. A certificate already installed
+  there (from an earlier version with acme.sh, or restored from a backup) is taken into uacme's
+  directory before the first renewal, so it is renewed only when due. Beget is used only through
+  `dns/changeRecords`, so its API password may be restricted to the "DNS" group.
 
-Logs: `/var/log/ddns/tunnel_ddns_<id>.log` (address), `/tmp/tunnel-ddns/cert-<id>.log`
-(certificate), `logread | grep tunnel-ddns` (applying the settings).
+Logs: `/tmp/tunnel-ddns/ddns-<id>.log` (address), `/tmp/tunnel-ddns/cert-<id>.log` (certificate),
+`/tmp/tunnel-ddns/renew.log` (nightly renewals), `logread | grep tunnel-ddns` (applying the
+settings, updates, issued certificates).
 
 ## Bandwidth test endpoint
 
@@ -131,8 +146,8 @@ cap; a site of your own offers it by shipping the same file in its `cgi-bin/`.
 ## Removal
 
 `apk del luci-app-tunnel-ddns` first does "Switch everything off", then removes the files. The
-uploaded sites in `/usr/share/www/` and `/etc/tunnel-ddns/sites/`, `/etc/acme/` and
-`/etc/ssl/tunnel-ddns/` remain.
+uploaded sites in `/usr/share/www/` and `/etc/tunnel-ddns/sites/`, uacme's directories in
+`/etc/tunnel-ddns/` and `/etc/ssl/tunnel-ddns/` remain.
 
 ## HTTPS port
 
@@ -168,11 +183,14 @@ through that page: a request to `/cgi-bin/luci/…` without a session gets the s
 page like any other missing address (only a JSON-RPC request from LuCI's own pages gets
 the "login required" answer LuCI expects), the standard LuCI form is never shown, and the
 direct JSON-RPC endpoint `/ubus` is switched off (LuCI falls back to its own RPC path
-through `/cgi-bin/luci`, which sits behind the same check). After a login `/cgi-bin/luci/` opens; after a logout from LuCI
-the site root. Switching the site off puts
-everything back. The LuCI dispatcher in `/www/cgi-bin/luci` is not modified: a link to the
-package's `luci-gate` is placed into the site's document root, and it lets a request through
-to LuCI only with a valid session.
+through `/cgi-bin/luci`, which sits behind the same check). After a login `/cgi-bin/luci/`
+opens; after a logout from LuCI the site root. Switching the site off puts everything back.
+The LuCI dispatcher in `/www/cgi-bin/luci` is not modified: a link to the package's
+`luci-gate` is placed into the site's document root, and it lets a request through to LuCI
+only with a valid session. LuCI's JSON-RPC calls on that path (the pages poll the router
+through them) are answered by the package's `luci-rpc` with the same checks as LuCI's own
+handler (the session given in each call, access per object and method), without starting the
+whole dispatcher for each call (about 12 ms per call instead of 47, measured on the router).
 
 The page itself gets two ucode modules from the package:
 

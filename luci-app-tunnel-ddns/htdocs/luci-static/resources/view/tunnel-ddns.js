@@ -46,9 +46,8 @@ function timeAgo(ts) {
 	return _('%d days ago').format(Math.round(s / 86400));
 }
 
-function daysLeft(notAfter) {
-	var t = Date.parse(notAfter);
-	return isNaN(t) ? null : Math.floor((t - Date.now()) / 86400000);
+function daysLeft(expires) {
+	return expires ? Math.floor((expires * 1000 - Date.now()) / 86400000) : null;
 }
 
 function siteName(fileName) {
@@ -82,10 +81,15 @@ return view.extend({
 			lines.push(span(COLOR.warn, _('Points to %s').format(resolved.join(', '))));
 		else
 			lines.push(span(COLOR.warn, _('Name does not resolve yet')));
-		if (d.ddns.last_update)
-			lines.push(E('div', { 'style': 'color:' + COLOR.dim }, _('Updated %s').format(timeAgo(d.ddns.last_update))));
+		var u = d.ddns || {};
+		if (u.error)
+			lines.push(E('div', { 'style': 'color:' + COLOR.bad }, _('Last attempt failed: %s').format(u.error)));
+		else if (u.last_update)
+			lines.push(E('div', { 'style': 'color:' + COLOR.dim }, _('Updated %s').format(timeAgo(u.last_update))));
+		else if (u.last_check)
+			lines.push(E('div', { 'style': 'color:' + COLOR.dim }, _('Checked %s, nothing to update').format(timeAgo(u.last_check))));
 		else
-			lines.push(E('div', { 'style': 'color:' + COLOR.dim }, d.ddns.running ? _('Updater running, no update sent yet') : _('Updater not running')));
+			lines.push(E('div', { 'style': 'color:' + COLOR.dim }, _('Not checked yet; the router checks every 10 minutes')));
 		return E('div', {}, lines);
 	},
 
@@ -97,10 +101,10 @@ return view.extend({
 		if (job && job.state == 'running')
 			return span(COLOR.warn, _('Issuing… (%s)').format(timeAgo(job.ts) || ''));
 		if (d.cert && !d.cert.error) {
-			var n = daysLeft(d.cert.not_after);
+			var n = daysLeft(d.cert.expires);
 			var col = (d.cert.valid && n != null && n > 14) ? COLOR.ok : COLOR.bad;
 			if (n != null && n <= 30 && n > 14) col = COLOR.warn;
-			lines.push(span(col, n != null ? _('Valid, %d days left').format(n) : _('Valid until %s').format(d.cert.not_after)));
+			lines.push(span(col, (n != null && n >= 0) ? _('Valid, %d days left').format(n) : _('Expired')));
 			if (d.cert.staging)
 				lines.push(E('div', { 'style': 'color:' + COLOR.warn }, _('Test certificate (not trusted by browsers)')));
 		}
