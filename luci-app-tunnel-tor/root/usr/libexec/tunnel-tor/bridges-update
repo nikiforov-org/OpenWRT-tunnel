@@ -4,7 +4,8 @@
 // through the router's own tor while it runs, else directly. New lines go first, lines are kept
 // unique by transport + address + fingerprint, at most MAX per transport; lines of transports without
 // a client plugin on the router are dropped. The result is written to bridges.state for the status
-// page; sync runs (tor restarts) only when the list in effect changed.
+// page; sync runs (tor restarts) only when the list in effect changed. A changed list also ends the
+// snowflake fallback, so that the new bridges are tried alone.
 
 'use strict';
 
@@ -19,6 +20,7 @@ const STATE   = `${DIR}/bridges.state`;
 const RUN     = '/tmp/tunnel-tor';
 const RUNNING = `${RUN}/bridges.running`;
 const SYNC    = '/usr/libexec/tunnel-tor/sync';
+const FALLBACK = `${DIR}/snowflake.on`;             // the snowflake lines are added (see watch)
 const API     = 'https://bridges.torproject.org/moat/circumvention/settings';
 const MAX     = 12;
 const PLUGINS = { obfs4: '/usr/bin/obfs4proxy', meek_lite: '/usr/bin/obfs4proxy', snowflake: '/usr/bin/snowflake-client' };
@@ -175,6 +177,12 @@ mkdir(DIR, 0o755);
 writefile(`${LIST}.new`, text);
 rename(`${LIST}.new`, LIST);
 st.applied = st.changed && (answer.via != 'tor');
+// a changed list brings other bridges: they are tried alone again, snowflake stays the fallback
+if (st.changed && access(FALLBACK) == true) {
+	unlink(FALLBACK);
+	st.applied = true;
+	log('bridges: new list, trying it without the snowflake fallback again');
+}
 log(`bridges: ${length(fresh)} lines from bridges.torproject.org (${answer.via}, ${country}), list now ${length(merged)} lines, ` +
     (st.changed ? (st.applied ? 'changed, applied now' : 'changed, used at the next start of tor') : 'unchanged'));
 if (st.applied) {

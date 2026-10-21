@@ -115,8 +115,9 @@ return view.extend({
 		var st = this.status, b = st.bridges_info || {}, self = this;
 		if (b.mode == 'none')
 			return span(COLOR.dim, _('No bridges: tor connects directly'));
+		var sf = this.snowflakeState();
 		if (b.mode == 'custom')
-			return span(null, _('The bridge lines entered below'));
+			return E('span', {}, [ span(null, _('The bridge lines entered below')), sf ? E('div', { 'style': 'margin-top:.3em' }, sf) : '' ]);
 		var by = b.by || {}, parts = [];
 		Object.keys(by).forEach(function(t) { parts.push(by[t] + ' ' + (t == 'vanilla' ? _('plain') : t)); });
 		var text = _('%d lines').format(b.lines || 0) + (parts.length ? ' (' + parts.join(', ') + ')' : '');
@@ -135,7 +136,32 @@ return view.extend({
 			nodes.push(E('div', { 'style': 'color:' + COLOR.dim + '; margin-top:.3em' }, _('Set the country below and the list is refreshed daily from bridges.torproject.org.')));
 		if (s && s.error)
 			nodes.push(E('div', { 'style': 'color:' + COLOR.bad + '; margin-top:.3em' }, _('Last update %s: %s').format(timeAgo(s.time), s.error)));
+		if (sf) nodes.push(E('div', { 'style': 'margin-top:.3em' }, sf));
 		return E('span', {}, nodes);
+	},
+
+	snowflakeState: function() {
+		var sf = this.status.snowflake || {}, w = sf.watch || {}, t = w.tor || null, text;
+		if (!sf.listed) return null;
+		if (sf.mode == 'never') return span(COLOR.dim, _('Snowflake: not used'));
+		if (!sf.others) return span(null, _('Snowflake: in use, the list has no other bridges'));
+		if (sf.mode == 'always') return span(null, _('Snowflake: always in use'));
+		if (sf.in_use && sf.fallback_since)
+			text = span(COLOR.warn, _('Snowflake: added %s, after no working circuit through the other bridges').format(timeAgo(sf.fallback_since)));
+		else if (sf.in_use)
+			text = span(null, _('Snowflake: in use'));
+		else
+			text = span(COLOR.ok, _('Snowflake: held back while the other bridges work'));
+		var check = '';
+		if (w.time) {
+			if (!t) check = _('checked %s: tor\'s control port did not answer');
+			else if (t.established) check = _('checked %s: working circuit');
+			else if (w.down_since) check = _('checked %s: no working circuit for %d min').format('%s', Math.round((w.time - w.down_since) / 60));
+			else if (w.uplink === false) check = _('checked %s: no default route on the router');
+			else check = _('checked %s: no working circuit');
+			check = ' (' + check.format(timeAgo(w.time)) + ')';
+		}
+		return E('span', {}, [ text, span(COLOR.dim, check) ]);
 	},
 
 	overviewConfig: function() {
@@ -355,6 +381,25 @@ return view.extend({
 		o.value('custom', _('Bridges entered below'));
 		o.value('none', _('No bridges: connect directly'));
 		o.default = 'builtin';
+
+		o = s.option(form.ListValue, 'snowflake', _('Snowflake bridges'),
+			_('Snowflake reaches the Tor network through volunteer proxies found by a broker and keeps trying new proxies, which costs traffic. As the fallback the snowflake lines are added only when tor had no working circuit through the other bridges for 6 minutes while the router has a default route, and held back again after 30 minutes of circuits through the other bridges, 24 hours after they were added, or when the daily bridge update brings a changed list. Checked every 2 minutes through tor\'s control port on 127.0.0.1; every change restarts tor.'));
+		o.value('fallback', _('Only when no other bridge works (saves traffic)'));
+		o.value('always', _('Always, together with the other bridges'));
+		o.value('never', _('Never'));
+		o.default = 'fallback';
+		o.depends('bridges', 'builtin');
+		o.depends('bridges', 'custom');
+
+		o = s.option(form.Flag, 'persistent_cache', _('Keep tor\'s cache on the router\'s storage'),
+			_('tor\'s data directory (about 33 MB, mostly the relay descriptors) in /etc/tor/tunnel-tor-data instead of /var/lib/tor in the memory, so that tor does not download the directory again after a restart of the router (about 17 MB each time). Needs that much free space on the router\'s storage; tor rewrites the consensus there every few hours (about 3 MB). The cache moves along when the option is switched on or off, and only one copy is kept.'));
+		o.rmempty = false;
+		o.default = '0';
+
+		o = s.option(form.Flag, 'reduced_padding', _('Less padding traffic'),
+			_('ReducedConnectionPadding and ReducedCircuitPadding: tor closes idle connections to relays sooner, sends less padding on its connections and uses only the circuit padding machines with a low overhead. The tor manual offers these options for clients on links where traffic is expensive.'));
+		o.rmempty = false;
+		o.default = '0';
 
 		o = s.option(form.Value, 'bridge_country', _('Country for bridges'),
 			_('Two-letter country code (ISO 3166-1). Once a day, and with "Update bridges" in the overview, the router asks bridges.torproject.org for the bridges Tor Browser hands out in that country, through its own Tor connection, and adds them to the built-in list (newest first, up to 12 per transport). Empty: the list shipped with the package, never refreshed.'));

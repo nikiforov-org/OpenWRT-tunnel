@@ -25,9 +25,28 @@ after installing; the entry appears in the **Tunnel** section.
   assist uses) for the bridges handed out in that country, through its own Tor connection
   (directly if tor is not connected), and merges them into the list, newest first, up to 12
   per transport. tor restarts with the new list only when the answer did not come through tor
-itself: a tor that carried the request works and keeps its bridges until its next start. **Bridges entered below** takes the
-  lines from bridges.torproject.org or the Telegram bot @GetBridgesBot; **No bridges** connects
-  directly.
+  itself: a tor that carried the request works and keeps its bridges until its next start.
+  **Bridges entered below** takes the lines from bridges.torproject.org or the Telegram bot
+  @GetBridgesBot; **No bridges** connects directly.
+- **Snowflake bridges** (built-in or entered lines): **Only when no other bridge works** (the
+  default), **Always** or **Never**. Snowflake reaches the Tor network through volunteer
+  proxies found by a broker and keeps trying new proxies, which costs traffic. In the default
+  mode the configuration holds only the other bridges; every 2 minutes
+  `/usr/libexec/tunnel-tor/watch` asks tor through its control port (127.0.0.1, cookie
+  authentication) whether it has a working circuit and through which bridges its circuits go.
+  After 6 minutes without a working circuit while the router has a default route (a bootstrap
+  that advances counts as working), the snowflake lines are added and tor restarts. They are
+  held back again after 30 minutes of circuits through the other bridges, 24 hours after they
+  were added, or when the daily bridge update brings a changed list. A list of snowflake lines
+  only is used as it is.
+- **Traffic options.** **Keep tor's cache on the router's storage** moves tor's data
+  directory (about 33 MB, mostly the relay descriptors) from `/var/lib/tor` in the memory to
+  `/etc/tor/tunnel-tor-data`, so that tor does not download the directory again after a
+  restart of the router (about 17 MB each time); tor rewrites the consensus there every few
+  hours (about 3 MB). **Less padding traffic** sets tor's `ReducedConnectionPadding` and
+  `ReducedCircuitPadding`: idle connections to relays are closed sooner, less padding is sent
+  on the connections and only the circuit padding machines with a low overhead are used (the
+  tor manual offers these options for clients on links where traffic is expensive).
 - **Profiles.** Any number of profiles, one x25519 key pair each, switchable on and off. The
   pair is generated on the router when a profile is added (or by **Generate** in the dialog);
   the router keeps the private key in `/etc/config/tunnel-tor` and installs the public
@@ -66,7 +85,9 @@ configuration is applied again right away.
 
 - `/etc/tunnel-tor/torrc` (root:tor, mode 640): the tor configuration generated from
   `/etc/config/tunnel-tor` (which gets mode 600, it holds the private keys): the bridge
-  lines, the onion service directory, its version and ports. It is added to the stock tor
+  lines, the onion service directory, its version and ports, the traffic options, and a
+  control port on 127.0.0.1 (`ControlPort auto`, the port written to `control.port` in the
+  data directory, `CookieAuthentication 1`) for the watch script. It is added to the stock tor
   configuration through `tor.conf.tail_include` in `/etc/config/tor`, the way the tor package
   provides for. The file is replaced only after `tor --verify-config` accepts it together
   with the stock `/etc/tor/torrc`; any error, from an unreadable bridge line to a
@@ -81,6 +102,16 @@ configuration is applied again right away.
   the service runs with the built-in list and a country, a line in `/etc/crontabs/root`
   (`# tunnel-tor-bridges`, once a day at a time chosen at random) runs
   `/usr/libexec/tunnel-tor/bridges-update`. The update needs `curl` (a dependency).
+- With snowflake as the fallback and a list of snowflake and other lines, a line in
+  `/etc/crontabs/root` (`# tunnel-tor-watch`, every 2 minutes) runs
+  `/usr/libexec/tunnel-tor/watch`; its last result is in `/tmp/tunnel-tor/watch.json`, and
+  `/etc/tunnel-tor/snowflake.on` (the time it was written) exists while the snowflake lines are
+  added.
+- `/etc/tor/tunnel-tor-data/` (tor:tor, mode 700) while the cache is kept on the router's
+  storage. When the option is switched on or off, the cache files (`cached-*`, `state`) are
+  copied to the other directory before tor restarts, so that tor does not download the
+  directory again; afterwards only one copy is kept (the files in `/var/lib/tor` are removed
+  while tor runs from the storage, the directory on the storage when the option is off).
 - The stock `tor` service is restarted on every change (tor re-reads `/etc/tor/torrc` on
   reload as the unprivileged tor user, which cannot read it, so a reload would stop it).
   The `tor` package enables and starts its service when it is installed; this package
@@ -96,6 +127,6 @@ progress.
 ## Removal
 
 `apk del luci-app-tunnel-tor` removes the generated configuration and its inclusion
-from `/etc/config/tor`, the cron line, and stops the stock tor service if this package had
-switched it on.
+from `/etc/config/tor`, the cron lines, the cache in `/etc/tor/tunnel-tor-data`, and stops the
+stock tor service if this package had switched it on.
 `/etc/config/tunnel-tor` and the service's keys in `/etc/tor/tunnel-tor` stay.

@@ -107,6 +107,36 @@ function bootstrap(pid) {
 	return { percent: int(m[1]), text: (m[2] == 'done') ? '' : trim(m[3]) };
 }
 
+// the snowflake bridges: the mode, how many snowflake and other lines the configured list has,
+// whether snowflake is in the configuration in effect, what the watch script last saw
+function snowflake_info(main) {
+	let lines = [];
+	if ((main.bridges ?? 'builtin') == 'builtin') {
+		let text = readfile(LIST);
+		if (text == null || !length(trim(text))) text = readfile(SHIPPED) ?? '';
+		lines = split(text, '\n');
+	}
+	else if (main.bridges == 'custom')
+		lines = (type(main.bridge) == 'array') ? main.bridge : (main.bridge ? [ main.bridge ] : []);
+	let listed = 0, others = 0;
+	for (let l in lines) {
+		l = trim(replace(trim(l), /^Bridge +/, ''));
+		if (!length(l)) continue;
+		if (index(l, 'snowflake ') == 0) listed++; else others++;
+	}
+	let w = null;
+	try { w = json(readfile(`${RUN}/watch.json`) ?? ''); } catch (e) { w = null; }
+	let since = int(trim(readfile(`${DIR}/snowflake.on`) ?? ''));
+	return {
+		mode: main.snowflake ?? 'fallback',
+		listed: listed,
+		others: others,
+		in_use: (index(readfile(CONF) ?? '', '\nBridge snowflake ') >= 0),
+		fallback_since: (since > 0) ? since : null,
+		watch: (type(w) == 'object') ? w : null
+	};
+}
+
 // the bridge list in effect for the built-in mode: where it comes from and what it holds
 function bridges_info(main) {
 	let text = readfile(LIST), source = 'updated';
@@ -162,6 +192,7 @@ methods.status = {
 			ports: (type(main.port) == 'array') ? main.port : (main.port ? [ main.port ] : []),
 			bridges: main.bridges ?? 'builtin',
 			bridges_info: bridges_info(main),
+			snowflake: snowflake_info(main),
 			profiles: profiles,
 			config_time: st ? st.mtime : null,
 			error: trim(readfile(ERROR) ?? ''),
