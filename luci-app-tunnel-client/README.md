@@ -93,7 +93,10 @@ Everything only on **Save & Apply**, nothing at install time. While the client i
   route `tunnel_client_route` (local 0.0.0.0/0 in table 2222); for the LAN `ip6assign` removed
   and `wan6` disabled.
 - `/etc/config/dhcp`: `ra`, `dhcpv6`, `ndp` of the LAN set to `disabled`; dnsmasq `noresolv 1`
-  and `server 127.0.0.1#61053` (your servers for single domains, `/domain/address`, stay).
+  and `server 127.0.0.1#61053` (your servers for single domains, `/domain/address`, stay), and
+  `localuse 0`: the router's own lookups go to the provider's resolvers directly
+  (`/tmp/resolv.conf` → `resolv.conf.auto`), so its services (dynamic DNS, updates,
+  certificates) work without the active link, as its own traffic is not intercepted either.
 - `/etc/crontabs/root`: the measurement, the health check every minute, the daily update of
   the sources (`# tunnel-client-…` lines); the file is removed when no other line is left.
 - `/etc/tunnel-client/sources/`: the fetched lists and their `.meta` (the files of a removed

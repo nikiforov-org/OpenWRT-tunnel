@@ -412,7 +412,10 @@ function sync_ipv6(dhcp, net, enabled, backup) {
 // dnsmasq asks xray only (noresolv, server 127.0.0.1#DNS_PORT); xray splits the names by the list.
 // Done in /etc/config/dhcp: a file dropped into /tmp/dnsmasq.d is not read by the dnsmasq of
 // OpenWrt 25.12 (each instance has its own conf-dir). The user's servers for single domains
-// ("/domain/address") stay; the original values are kept in the backup and restored.
+// ("/domain/address") stay; the original values are kept in the backup and restored. The router's
+// own lookups do not go through dnsmasq meanwhile (localuse 0): they ask the provider's resolvers
+// directly, so the router's services (dynamic DNS, updates, certificates) do not depend on the
+// active link, just as its own traffic is not intercepted.
 function sync_dnsmasq(dhcp, enabled, backup) {
 	let ours = `127.0.0.1#${DNS_PORT}`, changed = false;
 	if (enabled) {
@@ -420,10 +423,12 @@ function sync_dnsmasq(dhcp, enabled, backup) {
 		dhcp.foreach('dhcp', 'dnsmasq', function(s) {
 			let sec = s['.name'];
 			if (!(sec in backup.dnsmasq))
-				backup.dnsmasq[sec] = { noresolv: s.noresolv ?? null, server: (type(s.server) == 'array') ? s.server : (s.server ? [ s.server ] : null) };
+				backup.dnsmasq[sec] = { noresolv: s.noresolv ?? null, server: (type(s.server) == 'array') ? s.server : (s.server ? [ s.server ] : null),
+				                        localuse: s.localuse ?? null };
 			let keep = filter(list(backup.dnsmasq[sec].server), x => substr(x, 0, 1) == '/');
 			changed = uset(dhcp, 'dhcp', sec, 'noresolv', '1') || changed;
 			changed = uset(dhcp, 'dhcp', sec, 'server', [ ...keep, ours ]) || changed;
+			changed = uset(dhcp, 'dhcp', sec, 'localuse', '0') || changed;
 		});
 	}
 	else if (backup.dnsmasq) {
@@ -433,6 +438,8 @@ function sync_dnsmasq(dhcp, enabled, backup) {
 			else changed = uset(dhcp, 'dhcp', sec, 'noresolv', b.noresolv) || changed;
 			if (b.server == null) { if (dhcp.get('dhcp', sec, 'server') != null) { dhcp.delete('dhcp', sec, 'server'); changed = true; } }
 			else changed = uset(dhcp, 'dhcp', sec, 'server', b.server) || changed;
+			if (b.localuse == null) { if (dhcp.get('dhcp', sec, 'localuse') != null) { dhcp.delete('dhcp', sec, 'localuse'); changed = true; } }
+			else changed = uset(dhcp, 'dhcp', sec, 'localuse', b.localuse) || changed;
 		}
 		delete backup.dnsmasq;
 	}
@@ -531,8 +538,12 @@ if (v6.dhcp || dns) dhcp.commit('dhcp');
 if (v6.dhcp) system('/etc/init.d/odhcpd reload >/dev/null 2>&1');
 if (dns) {
 	system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
-	log(enabled ? `dnsmasq: upstream is xray (127.0.0.1#${DNS_PORT})` : 'dnsmasq: upstream restored');
+	log(enabled ? `dnsmasq: upstream is xray (127.0.0.1#${DNS_PORT}); the router itself asks the provider's resolvers` : 'dnsmasq: upstream restored');
 }
+// with localuse 0 the dnsmasq init leaves /tmp/resolv.conf as it was (its own "127.0.0.1" file
+// after a start with localuse 1); the router's resolver file is the list of the uplinks' resolvers
+if (enabled && trim(exec('readlink /tmp/resolv.conf').out) != '/tmp/resolv.conf.d/resolv.conf.auto')
+	system('ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf');
 sync_cron(enabled, main.test_interval);
 if (length(keys(backup))) writefile(BACKUP, sprintf('%J\n', backup)); else unlink(BACKUP);
 state.enabled = enabled;
