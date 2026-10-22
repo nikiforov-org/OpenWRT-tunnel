@@ -39,6 +39,16 @@ function xray_port(ports) {
 	return '';
 }
 
+// the names a tor client can map to the onion address (MapAddress NAME.onion ADDRESS)
+function aliases(main) {
+	let out = [];
+	for (let a in ((type(main.alias) == 'array') ? main.alias : (main.alias ? [ main.alias ] : []))) {
+		a = lc(trim(a));
+		if (match(a, /^[a-z0-9_-]{1,63}$/) && !(a in out)) push(out, a);
+	}
+	return out;
+}
+
 function onion() {
 	return trim(readfile(`${HS}/hostname`) ?? '');
 }
@@ -151,6 +161,7 @@ methods.status = {
 			bootstrap: bs ? bs.percent : (running ? 0 : null),
 			bootstrap_text: bs ? bs.text : '',
 			onion: onion(),
+			aliases: aliases(main),
 			ports: (type(main.port) == 'array') ? main.port : (main.port ? [ main.port ] : []),
 			bridges: main.bridges ?? 'builtin',
 			bridges_info: bridges_info(main),
@@ -206,6 +217,7 @@ methods.links = {
 			onion: addr,
 			auth_line: `${replace(addr, '.onion', '')}:descriptor:x25519:${p.private_key}`,
 			auth_file: `${name}.auth_private`,
+			aliases: aliases(main),
 			ports: ports,
 			xray_port: xray_port(ports)
 		};

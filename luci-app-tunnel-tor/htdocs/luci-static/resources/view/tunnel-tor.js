@@ -102,9 +102,11 @@ return view.extend({
 		var st = this.status;
 		if (!st.onion)
 			return span(COLOR.dim, st.enabled ? _('Not known yet: it appears when tor starts the service') : _('Appears once the service runs'));
+		var al = (st.aliases || []).map(function(a) { return a + '.onion'; });
 		return E('span', {}, [
 			E('code', { 'style': 'user-select:all' }, st.onion), ' ',
 			E('button', { 'class': 'btn cbi-button', 'click': function() { return copyText(st.onion); } }, _('Copy')),
+			al.length ? E('div', { 'style': 'margin-top:.3em' }, _('Names for tor clients (MapAddress): %s').format(al.join(', '))) : '',
 			E('div', { 'style': 'color:' + COLOR.dim + '; margin-top:.3em' }, st.enabled
 				? _('Reachable through Tor only by the profiles below (with their keys), a minute or two after the service is connected. Ports: %s.').format((st.ports || []).join(', ') || '—')
 				: _('The service is off; the address stays and comes back with it.'))
@@ -233,22 +235,28 @@ return view.extend({
 	},
 
 	showLink: function(r) {
-		var key = r.auth_line.split(':').pop();
-		var line = E('textarea', { 'style': 'width:100%; font-family:monospace; font-size:12px', 'rows': 2, 'readonly': 'readonly' }, r.auth_line);
+		var key = r.auth_line.split(':').pop(), dir = '/var/lib/tor/onion_auth';
+		var al = r.aliases || [], name = al.length ? al[0] + '.onion' : r.onion;
+		var torrc = [ 'ClientOnionAuthDir ' + dir ].concat(al.map(function(a) { return 'MapAddress ' + a + '.onion ' + r.onion; })).join('\n');
+		var area = function(text, rows) { return E('textarea', { 'style': 'width:100%; font-family:monospace; font-size:12px', 'rows': rows, 'readonly': 'readonly' }, text); };
+		var line = area(r.auth_line, 2), conf = area(torrc, al.length + 1);
 		ui.showModal(_('Client key') + ' — ' + r.name, [
 			E('p', _('Address of this router in the Tor network:')),
 			E('p', {}, E('code', { 'style': 'user-select:all; word-break:break-all' }, r.onion)),
 			E('p', _('Tor Browser: open the address (with the port, for example http://%s:%s/), paste the private key when it asks for one:').format(r.onion, r.ports[0] || 80)),
 			E('p', {}, E('code', { 'style': 'user-select:all; word-break:break-all' }, key)),
-			E('p', _('A tor daemon on a computer or server (Orbot, a tor client in front of an Xray or SSH client): put this line into the file "%s" in its ClientOnionAuthDir:').format(r.auth_file)),
+			E('p', _('A tor daemon on a computer or server (Orbot, a tor client in front of an Xray or SSH client): these lines in its torrc%s,').format(al.length ? ' ' + _('(MapAddress: the client opens %s instead of the address)').format(al.map(function(a) { return a + '.onion'; }).join(', ')) : '')),
+			conf,
+			E('p', _('and this line in the file "%s/%s":').format(dir, r.auth_file)),
 			line,
 			E('div', { 'style': 'margin:.5em 0' }, [
 				E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': function() { return copyText(key); } }, _('Copy the key')), ' ',
+				E('button', { 'class': 'btn cbi-button', 'click': function() { return copyText(conf.value); } }, _('Copy the torrc lines')), ' ',
 				E('button', { 'class': 'btn cbi-button', 'click': function() { return copyText(line.value); } }, _('Copy the line'))
 			]),
 			E('p', { 'style': 'color:' + COLOR.dim }, (r.xray_port
-				? _('Ports of this router through the address: %s. The Xray server answers on %s:%s too, so an Xray client can be pointed at it through a local tor.').format(r.ports.join(', '), r.onion, r.xray_port)
-				: _('Ports of this router through the address: %s.').format(r.ports.join(', ')))),
+				? _('Ports of this router through %s: %s. The Xray server answers on %s:%s too, so an Xray client can be pointed at it through a local tor.').format(name, r.ports.join(', '), name, r.xray_port)
+				: _('Ports of this router through %s: %s.').format(name, r.ports.join(', ')))),
 			qrNode(r.auth_line),
 			E('div', { 'class': 'right' }, E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close')))
 		]);
@@ -430,6 +438,16 @@ return view.extend({
 			var v = String(value || '').trim();
 			if (!v) return true;
 			return /^\d{1,5}$/.test(v) && parseInt(v, 10) >= 1 && parseInt(v, 10) <= 65535 ? true : _('Enter a port number');
+		};
+
+		o = s.option(form.DynamicList, 'alias', _('Names for clients'),
+			_('Names under which a tor client opens this router, for example "router-home": the client maps NAME.onion to the onion address with a MapAddress line in its torrc. "Key" in the profiles shows the lines. Letters, digits, dashes and underscores; the router\'s own tor does not use them.'));
+		o.rmempty = true;
+		o.placeholder = 'router-home';
+		o.validate = function(section_id, value) {
+			var v = String(value || '').trim();
+			if (!v) return true;
+			return /^[A-Za-z0-9_-]{1,63}$/.test(v) ? true : _('1 to 63 characters: letters, digits, dashes, underscores (without ".onion")');
 		};
 
 		/* Profiles */

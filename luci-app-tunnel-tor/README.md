@@ -59,8 +59,13 @@ after installing; the entry appears in the **Tunnel** section.
   pair is generated on the router when a profile is added (or by **Generate** in the dialog);
   the router keeps the private key in `/etc/config/tunnel-tor` and installs the public
   key into the service. **Key** next to a profile shows what the client needs: the onion
-  address, the private key for Tor Browser's prompt and the one-line `.auth_private` file for a
-  tor daemon (Orbot, or a tor in front of an SSH or Xray client), plus a QR code of that line.
+  address, the private key for Tor Browser's prompt, and for a tor daemon (Orbot, or a tor in
+  front of an SSH or Xray client) its torrc lines and the one-line `.auth_private` file, plus a
+  QR code of that line.
+- **Names for clients.** Names such as `router-home` under which a tor daemon opens the router:
+  the torrc lines of **Key** then include `MapAddress router-home.onion <address>.onion`, and
+  the client connects to `router-home.onion` instead of the 56-character address. The names
+  are used by the clients only; the router's own tor does not change with them.
 - **No firewall changes.** The router makes the connections itself; nothing is opened from
   WAN. The onion address works behind any NAT.
 
@@ -77,10 +82,11 @@ after installing; the entry appears in the **Tunnel** section.
 4. **Key** next to a profile:
    - **Tor Browser**: open `http://<address>.onion/` (or `https://<address>.onion/` for
      443); when it asks for the key of the onion service, paste the private key.
-   - **A tor daemon** (a computer, a server, Orbot): put the line shown into the file
-     `<name>.auth_private` in the daemon's `ClientOnionAuthDir`, restart it, and connect
-     through its SOCKS port: `ssh -o ProxyCommand='nc -x 127.0.0.1:9050 %h %p' root@<address>.onion`,
-     or point an Xray client at `<address>.onion:443` through that proxy.
+   - **A tor daemon** (a computer, a server, Orbot): add the torrc lines shown
+     (`ClientOnionAuthDir`, and `MapAddress` for each of the **Names for clients**), put the
+     line shown into the file `<name>.auth_private` in that directory, restart it, and connect
+     through its SOCKS port: `ssh -o ProxyCommand='nc -x 127.0.0.1:9050 %h %p' root@<name or address>.onion`,
+     or point an Xray client at `<name or address>.onion:443` through that proxy.
 
 Switching a profile off (or deleting it) locks its key out at the next apply; the address
 stays the same. A new key pair for a profile means the client has to get the new key.
