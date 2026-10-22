@@ -1,0 +1,151 @@
+#!/bin/sh
+# stage: OpenWrt test routers in Docker (the official image openwrt/rootfs:x86-64-RELEASE booted with
+# procd, so that init scripts, reload triggers and "service list" behave as on a router). Every
+# stage publishes its web interface on 127.0.0.1 of this computer, HTTP (port 80) and HTTPS (443),
+# on free ports unless given with -p, so that it can be opened in a browser here.
+#   stage create NAME [wan|lan] [-p HOST:PORT[/udp] ...]   a fresh router; the Docker network on eth0
+#                                                          as the wan (default) or the lan interface
+#   stage install NAME [PACKAGE ...]                       luci-app-tunnel-PACKAGE from dist/ (all without PACKAGE)
+#   stage up PROFILE [NAME]                                a router as in profiles/PROFILE.sh
+#   stage url NAME                                         the addresses of its web interface here
+#   stage browser NAME                                     a Chrome window for it: the domains of its
+#                                                          luci-app-tunnel-ddns resolve to 127.0.0.1
+#                                                          and their certificates are accepted
+#   stage sh NAME [COMMAND]                                a shell or a command on it
+#   stage ip NAME                                          its address on the Docker network
+#   stage rm NAME | stage list
+# RELEASE: environment, default 25.12.6. Files go in with "docker exec -i … cat": procd mounts a
+# tmpfs over /tmp that docker cp does not see.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+RELEASE=${RELEASE:-25.12.6}
+IMAGE="openwrt/rootfs:x86-64-$RELEASE"
+PREFIX=owrt-
+CHROME=${CHROME:-}     # empty: Google Chrome through "open", so that the window outlives this script
+
+die() { echo "stage: $*" >&2; exit 1; }
+name() { case "$1" in "$PREFIX"*) echo "$1" ;; *) echo "$PREFIX$1" ;; esac; }
+ip_of() { docker inspect "$1" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'; }
+
+# a TCP port of this computer from START on that nothing listens on and no container has published
+free_port() {
+	p=$1
+	ids=$(docker ps -aq)
+	used=$( [ -n "$ids" ] && docker inspect -f '{{range $k, $v := .HostConfig.PortBindings}}{{range $v}}{{.HostPort}} {{end}}{{end}}' $ids)
+	while lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 || case " $used " in *" $p "*) true ;; *) false ;; esac; do
+		p=$((p + 1))
+	done
+	echo "$p"
+}
+
+url() {
+	n=$(name "$1")
+	h=$(docker port "$n" 80/tcp 2>/dev/null | grep -m1 '^127\.0\.0\.1:' | sed 's/^127\.0\.0\.1://')
+	s=$(docker port "$n" 443/tcp 2>/dev/null | grep -m1 '^127\.0\.0\.1:' | sed 's/^127\.0\.0\.1://')
+	[ -n "$h" ] && echo "  LuCI:  http://127.0.0.1:$h/cgi-bin/luci/  (root, empty password)"
+	[ -n "$s" ] && echo "  HTTPS: https://127.0.0.1$( [ "$s" = 443 ] || echo ":$s" )/"
+	[ -n "$h$s" ] || echo "  (no web port published)"
+}
+
+create() {
+	n=$(name "$1"); shift
+	role=wan
+	case "${1:-}" in wan|lan) role=$1; shift ;; esac
+	ports="" http=no https=no
+	while [ $# -gt 0 ]; do
+		[ "$1" = -p ] && [ $# -gt 1 ] || die "create: expected -p HOST:PORT, got $1"
+		case "$2" in *:80) http=yes ;; *:443) https=yes ;; esac
+		ports="$ports -p $2"; shift 2
+	done
+	docker rm -f "$n" >/dev/null 2>&1
+	[ $http = yes ] || ports="$ports -p 127.0.0.1:$(free_port 8090):80"
+	[ $https = yes ] || ports="$ports -p 127.0.0.1:$(free_port 9443):443"
+	# shellcheck disable=SC2086
+	docker create -t --name "$n" --privileged $ports "$IMAGE" /sbin/init >/dev/null || die "docker create failed"
+	# the stock network config would put 192.168.1.1 on eth0: only the loopback before the first boot
+	printf "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n" > "/tmp/stage-$$"
+	docker cp "/tmp/stage-$$" "$n:/etc/config/network" >/dev/null; rm -f "/tmp/stage-$$"
+	docker start "$n" >/dev/null || die "docker start failed"
+	i=0; until docker exec "$n" ubus call system board >/dev/null 2>&1; do i=$((i + 1)); [ $i -gt 30 ] && die "$n does not boot"; sleep 1; done
+	sleep 3
+	ip=$(docker inspect "$n" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IPPrefixLen}}{{end}}')
+	gw=$(docker inspect "$n" --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}')
+	# netifd takes eth0 down: it gets its Docker address back as the chosen interface; as the wan,
+	# a firewall rule lets the web interface through for this computer
+	docker exec "$n" sh -c "uci set network.$role=interface; uci set network.$role.device=eth0; uci set network.$role.proto=static
+		uci set network.$role.ipaddr=$ip; uci set network.$role.gateway=$gw; uci add_list network.$role.dns=0.250.250.200
+		uci commit network
+		if [ $role = wan ]; then
+			uci set firewall.stage_web=rule; uci set firewall.stage_web.name='stage: web interface from this computer'
+			uci set firewall.stage_web.src=wan; uci set firewall.stage_web.proto=tcp; uci set firewall.stage_web.dest_port='80 443'
+			uci set firewall.stage_web.target=ACCEPT; uci commit firewall
+		fi
+		/etc/init.d/network restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; sleep 6
+		apk update >/dev/null 2>&1 || echo 'apk update failed'" 2>&1 | grep -v udhcpc
+	echo "$n: $ip ($role on eth0)"
+	url "$n"
+}
+
+install() {
+	n=$(name "$1"); shift
+	[ $# -gt 0 ] || set -- $(cd "$ROOT/dist" && ls luci-app-tunnel-*.apk | sed 's/^luci-app-tunnel-//; s/-[0-9].*$//')
+	files=""
+	for p in "$@"; do
+		f=$(ls "$ROOT"/dist/luci-app-tunnel-"$p"-*.apk 2>/dev/null | head -1)
+		[ -n "$f" ] || die "no dist/luci-app-tunnel-$p-*.apk (run utils/build.sh)"
+		docker exec -i "$n" sh -c "cat > /root/$(basename "$f")" < "$f"
+		files="$files /root/$(basename "$f")"
+	done
+	docker exec "$n" sh -c "apk add --allow-untrusted $files 2>&1 | tail -1; reload_config"
+}
+
+# a Chrome window of its own (profile in /tmp) for the stage: the hostnames of its
+# luci-app-tunnel-ddns domains resolve to 127.0.0.1 (its HTTPS has to be published on port 443 for
+# them), and the certificates with the keys installed on it are accepted (Let's Encrypt's test
+# certificates are not trusted by browsers; the flag accepts such a certificate for any of these
+# names, so a name mismatch among them is not shown)
+browser() {
+	n=$(name "$1")
+	hosts=$(docker exec "$n" sh -c "uci -q show tunnel-ddns | sed -n \"s/^tunnel-ddns\\.[^.]*\\.hostname='\\(.*\\)'\$/\\1/p\"")
+	keys=$(docker exec "$n" sh -c 'ls /etc/ssl/tunnel-ddns/*/key.pem /etc/ssl/tunnel-ddns/*/staging/key.pem /etc/tunnel-ddns/acme*/private/*/key.pem 2>/dev/null')
+	spki=$(for k in $keys; do
+			docker exec "$n" cat "$k" | openssl pkey -pubout -outform der 2>/dev/null | openssl dgst -sha256 -binary | base64
+		done | sort -u | paste -sd, -)
+	rules=$(for h in $hosts; do printf 'MAP %s 127.0.0.1, ' "$h"; done | sed 's/, $//')
+	h=$(docker port "$n" 80/tcp 2>/dev/null | grep -m1 '^127\.0\.0\.1:' | sed 's/^127\.0\.0\.1://')
+	start="http://127.0.0.1:$h/cgi-bin/luci/"
+	site=$(docker exec "$n" sh -c 'cat /etc/tunnel-ddns/site.cert 2>/dev/null')
+	if [ -n "$site" ] && [ "$(docker port "$n" 443/tcp 2>/dev/null | grep -m1 '^127\.0\.0\.1:')" = 127.0.0.1:443 ]; then
+		# the site's own login page when it has one (it replaces LuCI's login), else LuCI
+		if docker exec "$n" sh -c 'test -e "$(uci -q get uhttpd.main.home)/cgi-bin/login"'; then start="https://$site/cgi-bin/login"
+		else start="https://$site/cgi-bin/luci/"; fi
+	fi
+	set -- --user-data-dir="/tmp/stage-browser-$n" --no-first-run --no-default-browser-check \
+		${rules:+--host-resolver-rules="$rules"} ${spki:+--ignore-certificate-errors-spki-list="$spki"} "$start"
+	if [ -n "$CHROME" ]; then "$CHROME" "$@" >/dev/null 2>&1 &
+	else open -na "Google Chrome" --args "$@"; fi
+	echo "Chrome window for $n (only in this window the names below lead to the stage; elsewhere they"
+	echo "resolve through the public DNS): $start"
+	[ -n "$hosts" ] && echo "  names to 127.0.0.1: $(echo $hosts)"
+}
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+	create) [ $# -gt 0 ] || die "create NAME"; create "$@" ;;
+	install) [ $# -gt 0 ] || die "install NAME [PACKAGE ...]"; install "$@" ;;
+	up)
+		[ $# -gt 0 ] || die "up PROFILE [NAME]"
+		[ -r "$HERE/profiles/$1.sh" ] || die "no profiles/$1.sh"
+		STAGE="$0" N=$(name "${2:-$1}") ROOT="$ROOT" sh "$HERE/profiles/$1.sh" && echo "$(name "${2:-$1}"):" && url "${2:-$1}" ;;
+	url) [ $# -gt 0 ] || die "url NAME"; url "$1" ;;
+	browser) [ $# -gt 0 ] || die "browser NAME"; browser "$1" ;;
+	sh) [ $# -gt 0 ] || die "sh NAME [COMMAND]"; n=$(name "$1"); shift
+		if [ $# -gt 0 ]; then docker exec -i "$n" sh -c "$*"; else docker exec -it "$n" sh; fi ;;
+	ip) [ $# -gt 0 ] || die "ip NAME"; ip_of "$(name "$1")" ;;
+	rm) [ $# -gt 0 ] || die "rm NAME"; docker rm -f "$(name "$1")" >/dev/null && echo "removed" ;;
+	list) for n in $(docker ps -a --filter "name=^$PREFIX" --format '{{.Names}}'); do
+			echo "$n  $(docker inspect -f '{{.State.Status}}' "$n")"; url "$n"
+		done ;;
+	*) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

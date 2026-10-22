@@ -1,0 +1,94 @@
+#!/bin/sh
+# tor-client DEVICE [ssh options] [command]: SSH to a router through its Tor onion service (port 22).
+# DEVICE names the directory config/DEVICE/ of the repository (gitignored, see also utils/certs.sh);
+# its file .env has:
+#   ONION           the name the router is reached under: its onion address, or an alias such as
+#                   DEVICE.onion (a MapAddress of the real address, which is the first field of AUTH_LINE)
+#   AUTH_LINE       the client authorization line of one of its profiles (tor's ClientOnionAuthDir format)
+#   SSH_KEY         the key in the router's dropbear authorized_keys
+#   HOST_KEY_ALIAS  the name the router's host key is known under in ~/.ssh/known_hosts (else ONION)
+# The tor client runs in the Docker container tunnel-tor-client (built from this directory; its cache
+# in the volume tunnel-tor-client-data); its torrc carries the MapAddress alias and the client key of
+# every device in config/*/.env. When the onion does not answer (a client holding the descriptor of
+# introduction points the service has replaced), tor is restarted and the connection tried again.
+#   tor-client DEVICE 'uptime'                 a command
+#   tor-client DEVICE 'cat > /tmp/x' < x       a file to the router
+#   tor-client DEVICE                          an interactive shell
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+IMAGE=tunnel-tor-client
+NAME=tunnel-tor-client
+VOLUME=tunnel-tor-client-data
+
+die() { echo "tor-client: $*" >&2; exit 1; }
+[ $# -gt 0 ] || die "usage: tor-client DEVICE [ssh options] [command] (DEVICE: a directory config/DEVICE/ with .env)"
+DEVICE=$1; shift
+ENV="$ROOT/config/$DEVICE/.env"
+[ -r "$ENV" ] || die "no $ENV"
+ONION=''; AUTH_LINE=''; SSH_KEY=''; HOST_KEY_ALIAS=''
+. "$ENV"
+[ -n "$AUTH_LINE" ] || die "AUTH_LINE missing in $ENV"
+REAL="${AUTH_LINE%%:*}.onion"
+ONION=${ONION:-$REAL}
+KEY=${SSH_KEY:-$HOME/.ssh/id_ed25519}
+ALIAS=${HOST_KEY_ALIAS:-$ONION}
+
+# the image (rebuilt when this directory's Dockerfile or entrypoint changed) and the container
+SUM=$(cat "$HERE/Dockerfile" "$HERE/entrypoint.sh" | shasum | cut -c1-12)
+if [ "$(docker image inspect -f '{{index .Config.Labels "sum"}}' $IMAGE 2>/dev/null)" != "$SUM" ]; then
+	docker build -q --label sum=$SUM -t $IMAGE "$HERE" >/dev/null || die "the image could not be built"
+	docker rm -f $NAME >/dev/null 2>&1
+fi
+if [ "$(docker inspect -f '{{.State.Running}}' $NAME 2>/dev/null)" != true ]; then
+	docker rm -f $NAME >/dev/null 2>&1
+	docker run -d --name $NAME --restart unless-stopped -v $VOLUME:/var/lib/tor $IMAGE >/dev/null || die "the container could not be started"
+fi
+
+# the torrc and the client keys of all devices in config/; tor re-reads them on SIGHUP
+RC=$(printf 'User tor\nSocksPort 127.0.0.1:9050\nDataDirectory /var/lib/tor\nClientOnionAuthDir /etc/tor/auth\nLog notice file /var/lib/tor/notice.log\n'
+	for f in "$ROOT"/config/*/.env; do
+		( ONION=''; AUTH_LINE=''; . "$f"; r="${AUTH_LINE%%:*}.onion"
+		  [ -n "$AUTH_LINE" ] && [ -n "$ONION" ] && [ "$ONION" != "$r" ] && printf 'MapAddress %s %s\n' "$ONION" "$r" )
+	done)
+KEYS=$(for f in "$ROOT"/config/*/.env; do
+		( AUTH_LINE=''; . "$f"; [ -n "$AUTH_LINE" ] && printf '%s %s\n' "$(basename "$(dirname "$f")")" "$AUTH_LINE" )
+	done)
+HAVE=$(docker exec $NAME sh -c 'cat /etc/tor/torrc; echo ==; for f in /etc/tor/auth/*.auth_private; do [ -f "$f" ] && echo "$(basename "$f" .auth_private) $(cat "$f")"; done')
+if [ "$HAVE" != "$(printf '%s\n==\n%s' "$RC" "$KEYS")" ]; then
+	printf '%s\n' "$RC" | docker exec -i $NAME sh -c 'cat > /etc/tor/torrc'
+	printf '%s\n' "$KEYS" | docker exec -i $NAME sh -c 'rm -f /etc/tor/auth/*.auth_private
+		while read -r d l; do [ -n "$d" ] && printf "%s\n" "$l" > "/etc/tor/auth/$d.auth_private"; done
+		chown -R tor:tor /etc/tor/auth; chmod 700 /etc/tor/auth; chmod 600 /etc/tor/auth/* 2>/dev/null; pkill -HUP -x tor'
+fi
+
+# the client has a circuit (at most two minutes after a start)
+i=0
+until docker exec $NAME grep -q 'Bootstrapped 100%' /var/lib/tor/notice.log 2>/dev/null; do
+	i=$((i + 1)); [ $i -gt 60 ] && die "the tor client did not bootstrap (docker exec $NAME cat /var/lib/tor/notice.log)"
+	sleep 2
+done
+
+# the SSH banner through the onion, at most 60 s a try
+probe() { docker exec $NAME sh -c "printf '' | socat -T 60 - SOCKS4A:127.0.0.1:$ONION:22,socksport=9050 2>/dev/null | head -c 8" | grep -q '^SSH-2.0'; }
+if ! probe && ! probe; then
+	echo "tor-client: $ONION does not answer, restarting the tor client" >&2
+	docker restart $NAME >/dev/null
+	i=0
+	until docker exec $NAME grep -q 'Bootstrapped 100%' /var/lib/tor/notice.log 2>/dev/null; do
+		i=$((i + 1)); [ $i -gt 60 ] && die "the tor client did not bootstrap"; sleep 2
+	done
+	probe || probe || probe || die "$ONION does not answer on port 22 (the router's tor may be down or offline)"
+fi
+
+OPTS=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-o) OPTS="$OPTS -o $2"; shift 2 ;;
+		-*) OPTS="$OPTS $1"; shift ;;
+		*) break ;;
+	esac
+done
+# shellcheck disable=SC2086
+exec ssh -i "$KEY" -o HostKeyAlias="$ALIAS" -o ConnectTimeout=240 -o ServerAliveInterval=30 $OPTS \
+	-o ProxyCommand="docker exec -i $NAME socat - SOCKS4A:127.0.0.1:%h:%p,socksport=9050" "root@$ONION" "$@"

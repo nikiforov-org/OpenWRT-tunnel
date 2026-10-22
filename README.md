@@ -9,8 +9,8 @@ Docker is needed (OrbStack, for example). The script builds **unsigned** `.apk` 
 OpenWrt 25.12 into `dist/` with the official OpenWrt SDK:
 
 ```sh
-./build.sh            # 25.12.6 by default
-./build.sh 25.12.6
+./utils/build.sh            # 25.12.6 by default
+./utils/build.sh 25.12.6
 ```
 
 Every package is a directory `luci-app-tunnel-<name>/` with a `Makefile` based on `luci.mk`. The last

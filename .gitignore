@@ -19,5 +19,5 @@ credentials.md
 CLAUDE.md
 luci-app-tunnel-ddns/REQUIREMENTS.md
 
-# certificates saved from the router for DEV checks (private keys)
-/certs/
+# the LuCI UI test harness: addresses and names of the test setup, node_modules, screenshots
+/utils/ui-test/
