@@ -5,6 +5,9 @@
 // its parameters, checked with session access for the ubus scope; "list"), but only for a request
 // with a logged-in session cookie: without one, LuCI's own pages get "login required" (403, LuCI
 // then shows its session notice) and every other request the site's 404 page, as from luci-gate.
+// One call is taken without the cookie: tunnel-ddns move_confirm with a logged-in session in its
+// parameters, which the page of the package sends to the router under the name the site moved to
+// (the cookie belongs to the old name).
 
 'use strict';
 
@@ -77,7 +80,17 @@ while (length(body) < len) {
 let name = (getenv('HTTPS') == 'on') ? 'sysauth_https' : 'sysauth_http';
 let m = match(getenv('HTTP_COOKIE') ?? '', regexp(`(^|;[ ]*)${name}=([0-9a-f]{32})(;|$)`));
 let session = m ? m[2] : null;
-let logged_in = session && exists(ubus.call('session', 'get', { ubus_rpc_session: session })?.values ?? {}, 'username');
+function logged(sid) {
+	return type(sid) == 'string' && exists(ubus.call('session', 'get', { ubus_rpc_session: sid })?.values ?? {}, 'username');
+}
+
+let request = null;
+try { request = json(body); } catch (e) { request = null; }
+
+let logged_in = session && logged(session);
+if (!logged_in && type(request) == 'object' && request.method == 'call' && type(request.params) == 'array' &&
+    request.params[1] == 'tunnel-ddns' && request.params[2] == 'move_confirm' && logged(request.params[0]))
+	logged_in = true;
 
 if (!logged_in) {
 	if (index(getenv('HTTP_REFERER') ?? '', `//${getenv('HTTP_HOST') ?? ''}/cgi-bin/luci`) >= 0) {
@@ -89,8 +102,6 @@ if (!logged_in) {
 	exit(0);
 }
 
-let request = null;
-try { request = json(body); } catch (e) { request = null; }
 let out;
 if (type(request) == 'object') out = handle(request);
 else if (type(request) == 'array') out = map(request, handle);

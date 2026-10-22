@@ -7,6 +7,7 @@
 
 import { readfile, writefile, mkdir, unlink, rmdir, lsdir, lstat, readlink, symlink, rename, access, popen, glob } from 'fs';
 import { cursor } from 'uci';
+import { grade, in_effect, set_in_effect, target } from 'tunnel-ddns.sitecert';
 
 const CFG        = 'tunnel-ddns';
 const SITES      = '/usr/share/www';                // document roots, one directory per site
@@ -19,6 +20,7 @@ const LUCI_GATE  = '/usr/libexec/tunnel-ddns/luci-gate';
 const NOT_FOUND  = '/usr/libexec/tunnel-ddns/not-found';
 const SITEBUILD  = '/usr/libexec/tunnel-ddns/sitebuild';
 const UPDATE     = '/usr/libexec/tunnel-ddns/update';
+const MOVE       = '/usr/libexec/tunnel-ddns/move';
 const XRAY_CONF  = '/etc/tunnel-server/config.json';   // the xray server's configuration in effect
 const BEHIND_PORT = 4443;                               // where uhttpd serves HTTPS while Xray holds its port
 const CRONTAB    = '/etc/crontabs/root';
@@ -95,11 +97,10 @@ if (!serving) {
 	let m = match(split(h ?? '', ' ')[0] ?? '', /:([0-9]+)$/);
 	https_port = m ? m[1] : '443';
 }
-let xray_front = false;
+let xray_front = false, xray = null;
 if (uci.get('tunnel-server', 'main', 'enabled') == '1') {
-	let x = null;
-	try { x = json(readfile(XRAY_CONF) ?? ''); } catch (e) { x = null; }
-	for (let ib in x?.inbounds ?? [])
+	try { xray = json(readfile(XRAY_CONF) ?? ''); } catch (e) { xray = null; }
+	for (let ib in xray?.inbounds ?? [])
 		if (ib?.protocol == 'vless' && `${ib.port}` == https_port) xray_front = true;
 }
 
@@ -204,18 +205,32 @@ function site_links(add, dir) {
 
 // ---------- uhttpd ----------
 
+// The certificate the web server presents is that of the name in effect (sitecert): a change of
+// the site's domain does not replace it here, during the apply, because the browser that made the
+// change confirms the apply over that very certificate (LuCI rolls the apply back otherwise).
+// The move job gets the certificate of the new name and moves the site afterwards. While the site
+// is off, the router's pages keep that certificate too. The router's own (self-signed) certificate
+// is used only while there is no certificate of this package in effect.
+let eff = in_effect();
+if (!eff) {
+	// an installation of an earlier version: the certificate uhttpd presents now, when it is one of these
+	let m = match(`${uci.get('uhttpd', 'main', 'cert') ?? ''}`, /^\/etc\/ssl\/tunnel-ddns\/([^\/]+)\/fullchain\.pem$/);
+	if (m && grade(m[1]).grade > 0) { eff = lc(m[1]); set_in_effect(eff); }
+}
+let served = (mode == 'apply' && eff) ? grade(eff) : null;
+if (served && served.grade < 1) served = null;
+let tgt = serving ? target(uci, CFG) : null;
+
 let w = null;
 if (serving) {
 	backup_make();
 	let b = backup(), name = static_name();
-	let host = lc(uci.get(CFG, main.site_domain ?? '', 'hostname') ?? '');
-	let own = (host && access(`${CERTS}/${host}/fullchain.pem`) && access(`${CERTS}/${host}/key.pem`));
 	let theme = replace(b.mediaurlbase ?? '', /^.*\//, '') || 'bootstrap';
 	w = {
 		home: `${SITES}/${site}`,
 		https: `0.0.0.0:${site_port} [::]:${site_port}`,
-		cert: own ? `${CERTS}/${host}/fullchain.pem` : b.cert,
-		key: own ? `${CERTS}/${host}/key.pem` : b.key,
+		cert: served ? served.cert : b.cert,
+		key: served ? served.key : b.key,
 		// with a site login page every login must pass through it, so the direct JSON-RPC
 		// endpoint (/ubus) is switched off and LuCI uses its RPC path through cgi-bin/luci,
 		// which the gate protects
@@ -239,7 +254,8 @@ else if (access(BACKUP) || xray_front) {
 	w = {
 		home: b.home || '/www',
 		https: b.https || '0.0.0.0:443 [::]:443',
-		cert: b.cert, key: b.key,
+		cert: served ? served.cert : b.cert,
+		key: served ? served.key : b.key,
 		ubus: b.ubus || '/ubus',
 		ubuspath: b.ubuspath || '/ubus/',
 		dirlists: b.dirlists, errorpage: b.errorpage,
@@ -265,7 +281,7 @@ if (w) {
 		uci.commit('luci');
 		for (let f in glob('/tmp/luci-indexcache*') ?? []) unlink(f);
 	}
-	if (!serving && !xray_front) unlink(BACKUP);
+	if (!serving && !xray_front && !served) unlink(BACKUP);
 	if (changed.uhttpd) {
 		uci.commit('uhttpd');
 		system('sleep 2');       // let LuCI confirm its apply before the web server goes away for a moment
@@ -305,3 +321,23 @@ if (join('\n', ours) != join('\n', wanted)) {
 
 // a domain switched on gets its address at once
 if (want_update) system(`setsid ${UPDATE} >/dev/null 2>&1 </dev/null &`);
+
+// The Xray server's Hysteria2 transport can take the certificate of a domain of this package: when
+// the hostname of that domain was edited and the new name has a certificate already, the server
+// applies its files now (without one yet, cert does that once it is installed)
+let srv = uci.get_all('tunnel-server', 'main') ?? {};
+if (mode == 'apply' && xray && srv.hysteria2_enabled == '1' && (srv.cert_source ?? 'ddns') == 'ddns' && srv.cert_domain) {
+	let h = lc(uci.get(CFG, srv.cert_domain, 'hostname') ?? '');
+	let hy2 = filter(xray.inbounds ?? [], ib => ib?.tag == 'hysteria2')[0];
+	let file = hy2?.streamSettings?.tlsSettings?.certificates?.[0]?.certificateFile;
+	if (h && file != `${CERTS}/${h}/fullchain.pem` && access(`${CERTS}/${h}/fullchain.pem`) && access(`${CERTS}/${h}/key.pem`) &&
+	    access('/etc/init.d/tunnel-server', 'x')) {
+		log(`the Xray server's Hysteria2 certificate follows its domain to ${h}`);
+		system('/etc/init.d/tunnel-server reload >/dev/null 2>&1');
+	}
+}
+
+// the site is to answer to another name, or its name has no certificate of the kind its domain is
+// set to: the move job takes over after this apply is confirmed
+if (tgt && (tgt.host != eff || grade(eff).grade < (tgt.staging ? 1 : 2)))
+	system(`setsid ${MOVE} >/dev/null 2>&1 </dev/null &`);

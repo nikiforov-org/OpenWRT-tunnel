@@ -7,7 +7,7 @@
 'require poll';
 'require dom';
 
-var callStatus      = rpc.declare({ object: 'tunnel-ddns', method: 'status', expect: {} });
+var callStatus      = rpc.declare({ object: 'tunnel-ddns', method: 'status', params: [ 'host' ], expect: {} });
 var callDdnsUpdate  = rpc.declare({ object: 'tunnel-ddns', method: 'ddns_update', params: [ 'section' ], expect: {} });
 var callDdnsLog     = rpc.declare({ object: 'tunnel-ddns', method: 'ddns_log', params: [ 'section' ], expect: {} });
 var callCertIssue   = rpc.declare({ object: 'tunnel-ddns', method: 'cert_issue', params: [ 'section' ], expect: {} });
@@ -59,7 +59,7 @@ return view.extend({
 	status: {},
 
 	load: function() {
-		return L.resolveDefault(callStatus(), {}).then(L.bind(function(st) {
+		return L.resolveDefault(callStatus(window.location.hostname), {}).then(L.bind(function(st) {
 			this.status = st || {};
 		}, this));
 	},
@@ -107,6 +107,8 @@ return view.extend({
 			lines.push(span(col, (n != null && n >= 0) ? _('Valid, %d days left').format(n) : _('Expired')));
 			if (d.cert.staging)
 				lines.push(E('div', { 'style': 'color:' + COLOR.warn }, _('Test certificate (not trusted by browsers)')));
+			if (d.cert.staging_apart)
+				lines.push(E('div', { 'style': 'color:' + COLOR.dim }, _('A test certificate was issued and kept apart: this trusted one stays in use')));
 		}
 		else {
 			lines.push(span(COLOR.dim, _('Not issued yet')));
@@ -116,18 +118,132 @@ return view.extend({
 		return E('div', {}, lines);
 	},
 
+	/* the web site: the name it answers as (the certificate in effect), and its move to the name of
+	   its domain when that changed (see /usr/libexec/tunnel-ddns/move) */
 	overviewSite: function() {
-		var m = this.status.main || {};
+		var st = this.status, m = st.main || {}, sc = st.site_cert, mv = st.move || {};
+		var tgt = m.site_hostname, dom = (st.domains || {})[m.site_domain] || {};
+		var line = function(color, text) { return E('div', { 'style': 'color:' + color }, text); };
 		if (!m.site_enabled)
-			return span(COLOR.dim, _('Off — the router shows its administration pages'));
+			return span(COLOR.dim, sc ? _('Off — the router shows its administration pages, with the certificate of %s').format(sc.host)
+			                          : _('Off — the router shows its administration pages'));
 		if (!m.serving)
 			return span(COLOR.warn, _('Switching on…'));
-		var host = m.site_hostname;
-		return E('span', {}, [
-			span(COLOR.ok, _('Serving site "%s"').format(m.site)),
-			host ? E('span', {}, [ ' — ', E('a', { 'href': 'https://' + host + '/', 'target': '_blank' }, 'https://' + host + '/') ]) : ' — ' + _('no domain selected'),
-			m.uhttpd_cert && m.uhttpd_cert.indexOf('/etc/ssl/tunnel-ddns/') == 0 ? '' : E('div', { 'style': 'color:' + COLOR.warn }, _('Using the router\'s own self-signed certificate until a Let\'s Encrypt certificate is issued for the selected domain'))
-		]);
+		var out = [ E('div', {}, [ span(COLOR.ok, _('Serving site "%s"').format(m.site)),
+			sc ? E('span', {}, [ ' — ', E('a', { 'href': 'https://' + sc.host + '/', 'target': '_blank' }, 'https://' + sc.host + '/') ]) : '' ]) ];
+		if (!sc)
+			out.push(line(COLOR.warn, _('The router\'s own self-signed certificate is used until %s has a certificate; it is requested on its own').format(tgt || _('the domain of the site'))));
+		if (!tgt) {
+			out.push(line(COLOR.warn, sc ? _('The site has no domain: it keeps answering as %s with that certificate, which is not renewed while no domain has this name. Choose a domain below.').format(sc.host)
+			                             : _('Choose a domain for the site below.')));
+			return E('div', {}, out);
+		}
+		var want = dom.staging ? 1 : 2;
+		if (!sc || sc.host != tgt || sc.grade < want) {
+			var state = (mv.to == tgt) ? mv.state : '', now = sc ? sc.host : _('the router\'s own certificate');
+			var at = function(ts) { return new Date(ts * 1000).toLocaleTimeString(); };
+			if (state == 'issuing')
+				out.push(line(COLOR.warn, _('Moving to %s: requesting its certificate, usually one to three minutes…').format(tgt)));
+			else if (state == 'waiting-dns')
+				out.push(line(COLOR.warn, _('Moving to %s: waiting until the name points to this router%s').format(tgt, mv.points ? ' (' + _('now %s').format(mv.points) + ')' : '')));
+			else if (state == 'waiting-page' || state == 'ready')
+				out.push(line(COLOR.warn, _('Moving to %s in a few seconds: the router presents its certificate, this page checks that the browser reaches the router under that name and goes there').format(tgt)));
+			else if (state == 'switched')
+				out.push(line(COLOR.warn, _('The router presents the certificate of %s; waiting until a page reaches it under that name (otherwise back to %s at %s)').format(tgt, mv.from, at(mv.deadline))));
+			else if (state == 'failed' && mv.kind == 'confirm')
+				out.push(line(COLOR.bad, _('Moving to %s was undone: %s. The site keeps answering as %s; the next attempt at %s while this page is open.').format(tgt, mv.error || '?', now, at(mv.attempt + 600))));
+			else if (state == 'failed')
+				out.push(line(COLOR.bad, _('Moving to %s failed: %s. The site keeps answering as %s; the next attempt at %s, at once after "Save & Apply" or "Issue certificate" in the row of the domain.').format(tgt, mv.error || '?', now, at(mv.attempt + 3600))));
+			else if (state == 'kept')
+				out.push(line(COLOR.warn, mv.error || ''));
+			else
+				out.push(line(COLOR.warn, (sc && sc.host == tgt)
+					? _('A trusted certificate for %s is requested on its own; the site keeps the current one meanwhile').format(tgt)
+					: _('The site keeps answering as %s until %s has a certificate and points to this router; then it moves there, and this page goes to the new address').format(now, tgt)));
+			var named = sc && Object.keys(st.domains || {}).some(function(sid) { return (st.domains[sid].hostname || '').toLowerCase() == sc.host; });
+			if (sc && sc.host != tgt && !named)
+				out.push(line(COLOR.dim, _('The certificate of %s in use (valid until %s) is not renewed while no domain has this name.').format(sc.host, sc.expires ? new Date(sc.expires * 1000).toLocaleDateString() : '?')));
+		}
+		else if (mv.state == 'moved' && mv.to == sc.host && mv.from && mv.from != mv.to && Date.now() / 1000 - mv.time < 3600)
+			out.push(line(COLOR.dim, _('Moved from %s %s').format(mv.from, timeAgo(mv.time))));
+		return E('div', {}, out);
+	},
+
+	/* the move of the site to another name (see /usr/libexec/tunnel-ddns/move), as an open page takes
+	   part in it. From "ready" on, the page expects the router to present the certificate of the new
+	   name; then it calls the router under that name (move_confirm with its session; the cookie
+	   belongs to the old name), and only such a call keeps the new name. A page under the old name
+	   sees its own requests fail from the switch on; once its call went through, it goes to the new
+	   name. Returns true while the page is taken over by the move. */
+	trackMove: function(st) {
+		var here = window.location.hostname, mv = st ? (st.move || {}) : null, mt = this.move;
+		if (st) {
+			if (mv.state == 'waiting-page' || mv.state == 'ready' || mv.state == 'switched') {
+				if (!mt || mt.to != mv.to)
+					mt = this.move = { to: mv.to, from: mv.from, wait: 90, since: Date.now() };
+				if (mv.state != 'switched') {
+					mt.wait = mv.confirm_wait || 90;
+					mt.since = Date.now();
+					return false;
+				}
+			}
+			else if (mt && mv.state == 'moved' && mv.to == mt.to && mt.reached && here == mt.from) {
+				this.goMoved(mt);
+				return true;
+			}
+			else {
+				if (mt) ui.hideModal();
+				this.move = null;
+				return false;
+			}
+		}
+		if (!mt) return false;
+		// "switched" (a page under another address), or this page's own request failed after "ready"
+		this.confirmMove(mt).then(L.bind(function(ok) {
+			if (ok && here == mt.from) this.goMoved(mt);
+		}, this));
+		if (!st && here == mt.from && !mt.going) {
+			var left = Math.max(0, Math.round(mt.wait + 15 - (Date.now() - mt.since) / 1000));
+			ui.showModal(_('Moving the site to %s').format(mt.to), [
+				E('p', { 'class': 'spinning' }, _('The router now presents the certificate of %s. This page checks that the browser reaches the router under that name and then goes there.').format(mt.to)),
+				E('p', {}, left > 0
+					? _('If it does not within about %d seconds, the router goes back to %s and this page shows why.').format(left, mt.from)
+					: _('The router goes back to %s; this page shows why as soon as it answers there again.').format(mt.from))
+			]);
+		}
+		return !st;
+	},
+
+	/* the call under the new name; true when it went through (any answer: the router at that name
+	   answered over a certificate the browser accepts) */
+	confirmMove: function(mt) {
+		if (mt.busy) return Promise.resolve(false);
+		mt.busy = true;
+		var m = (this.status || {}).main || {}, port = m.site_port || '443';
+		var ctl = window.AbortController ? new AbortController() : null;
+		var timer = ctl ? window.setTimeout(function() { ctl.abort(); }, 8000) : null;
+		return window.fetch('https://' + mt.to + (port != '443' ? ':' + port : '') + L.url('admin/ubus'), {
+			method: 'POST', mode: 'no-cors', credentials: 'omit', cache: 'no-store',
+			headers: { 'Content-Type': 'text/plain' },
+			body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'call', params: [ L.env.sessionid, 'tunnel-ddns', 'move_confirm', { host: mt.to } ] }),
+			signal: ctl ? ctl.signal : null
+		}).then(function() { return true; }, function() { return false; }).then(function(ok) {
+			if (timer) window.clearTimeout(timer);
+			mt.busy = false;
+			if (ok) mt.reached = true;
+			return ok;
+		});
+	},
+
+	/* a new name has no session yet: the site's own login page when it has one (the gate answers
+	   every other address with the site's 404 page), else LuCI's login, which leads back here */
+	goMoved: function(mt) {
+		if (mt.going) return;
+		mt.going = true;
+		var m = (this.status || {}).main || {}, port = m.site_port || '443';
+		var url = 'https://' + mt.to + (port != '443' ? ':' + port : '') + (m.login_replaced ? '/cgi-bin/login' : '/cgi-bin/luci/admin/tunnel/ddns');
+		ui.showModal(_('The site has moved'), [ E('p', _('The web site and the administration pages now answer as %s. Going there: %s').format(mt.to, url)) ]);
+		window.setTimeout(function() { window.location.href = url; }, 2500);
 	},
 
 	overviewAccess: function() {
@@ -170,8 +286,8 @@ return view.extend({
 	},
 
 	refresh: function() {
-		return L.resolveDefault(callStatus(), null).then(L.bind(function(st) {
-			if (!st) return;
+		return L.resolveDefault(callStatus(window.location.hostname), null).then(L.bind(function(st) {
+			if (this.trackMove(st) || !st) return;
 			this.status = st;
 			var el;
 			if ((el = document.getElementById('tdd-ov-ip')))      dom.content(el, this.status.public_ip || span(COLOR.warn, _('Could not detect')));
@@ -478,7 +594,7 @@ return view.extend({
 
 		/* Domains */
 		s = m.section(form.GridSection, 'domain', _('Domains'),
-			_('Each domain is kept pointed at this router\'s public IP address and gets its own Let\'s Encrypt certificate. Add a domain, enter the login details of its provider, click "Save & Apply", then "Issue certificate".'));
+			_('Each domain is kept pointed at this router\'s public IP address and gets its own Let\'s Encrypt certificate: the domain of the web site on its own, any other one with "Issue certificate" after "Save & Apply".'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.nodescriptions = true;
@@ -518,6 +634,13 @@ return view.extend({
 		o.rmempty = false;
 		o.datatype = 'hostname';
 		o.placeholder = 'myname.duckdns.org';
+		o.renderWidget = function(section_id, option_index, cfgvalue) {
+			var node = form.Value.prototype.renderWidget.call(this, section_id, option_index, cfgvalue);
+			if (section_id != uci.get('tunnel-ddns', 'main', 'site_domain') || uci.get('tunnel-ddns', 'main', 'site_enabled') != '1')
+				return node;
+			return E('div', {}, [ node, E('div', { 'class': 'cbi-value-description', 'style': 'color:' + COLOR.warn },
+				_('This is the domain of the web site. After a change and "Save & Apply" the site keeps answering under its current name with its certificate; the router requests a certificate for the new name and waits until the name points to this router. Then, while this page is open, it presents the new certificate, the page checks that the browser reaches the router under the new name and goes there; without that check within 90 seconds the router goes back to the current name.')) ]);
+		};
 
 		o = s.taboption('general', form.ListValue, 'provider', _('Provider'),
 			_('Where the domain is registered. The login details below depend on the provider.'));
@@ -594,7 +717,7 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'site_domain', _('Domain'),
-			_('The site answers to this domain name and uses its certificate.'));
+			_('The site answers to this domain name with its certificate. After another domain is chosen, the site keeps answering under the current name until the new one has a certificate (requested on its own) and points to this router; then it moves while this page is open, once the page has reached the router under the new name, and the page goes there.'));
 		o.value('', _('— choose a domain —'));
 		Object.keys(st.domains || {}).forEach(function(sid) {
 			var d = st.domains[sid];

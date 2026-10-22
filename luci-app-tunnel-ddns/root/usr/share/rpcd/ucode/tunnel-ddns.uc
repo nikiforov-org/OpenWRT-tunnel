@@ -2,10 +2,11 @@
 
 'use strict';
 
-import { access, popen, readfile, writefile, lsdir, stat, mkdir, unlink, readlink } from 'fs';
+import { access, popen, readfile, writefile, lsdir, stat, mkdir, unlink, readlink, open } from 'fs';
 import { cursor } from 'uci';
 import { connect } from 'ubus';
 import { info } from 'tunnel-ddns.x509';
+import { grade, in_effect, target, move_state, note_watch, confirm } from 'tunnel-ddns.sitecert';
 import { request } from 'tunnel-ddns.http';
 
 const CFG       = 'tunnel-ddns';
@@ -20,6 +21,7 @@ const SYNC      = '/usr/libexec/tunnel-ddns/sync';
 const CERT      = '/usr/libexec/tunnel-ddns/cert';
 const SITEBUILD = '/usr/libexec/tunnel-ddns/sitebuild';
 const UPDATE    = '/usr/libexec/tunnel-ddns/update';
+const MOVE      = '/usr/libexec/tunnel-ddns/move';
 
 function exec(command) {
 	let p = popen(command, 'r');
@@ -105,6 +107,8 @@ function cert_info(host) {
 		expires: i.not_after,
 		valid: time() < i.not_after,
 		staging: index(i.issuer_cn ?? '', 'STAGING') >= 0,
+		// a test certificate issued while this trusted one is in use: kept apart (see cert)
+		staging_apart: access(`${CERTS}/${host}/staging/fullchain.pem`) == true,
 		path: crt
 	};
 }
@@ -112,9 +116,9 @@ function cert_info(host) {
 function parse_state(path, timeout) {
 	let s = trim(readfile(path) ?? '');
 	if (!s) return null;
-	let m = match(s, /^([a-z]+) ([0-9]+)( ([0-9]+))?$/);
+	let m = match(s, /^([a-z]+) ([0-9]+)( ([0-9]+))?( host=([^ ]+))?$/);
 	if (!m) return null;
-	let st = { state: m[1], ts: int(m[2]) };
+	let st = { state: m[1], ts: int(m[2]), host: m[6] };
 	if (st.state == 'running' && m[4] && access(`/proc/${m[4]}`) != true)
 		st = { state: 'failed', ts: st.ts, reason: 'The process ended unexpectedly.' };
 	else if (st.state == 'starting' && (time() - st.ts) > timeout)
@@ -124,7 +128,11 @@ function parse_state(path, timeout) {
 	return st;
 }
 
-function job_state(sid) { return parse_state(`${RUN}/cert-${sid}.state`, 120); }
+// the certificate job of a domain; a job for another hostname (the domain was edited since) does not count
+function job_state(sid, host) {
+	let st = parse_state(`${RUN}/cert-${sid}.state`, 120);
+	return (host != null && st?.host && st.host != lc(host)) ? null : st;
+}
 function site_job_state(name) { return parse_state(`${STATE}/site-${name}.state`, 120); }
 
 let ubus = null;
@@ -185,10 +193,25 @@ function ddns_status(sid) {
 	return { last_update: s?.sent ?? null, last_check: s?.checked ?? null, ip: s?.ip ?? '', error: s?.error ?? '' };
 }
 
+// a move of the site waits for an open page (see move): started from the page's status calls,
+// at most every 20 seconds and only while no run is going
+let move_kicked = 0;
+function move_kick(mv, to) {
+	if (!to || time() - move_kicked < 20) return;
+	if (mv?.state == 'failed' && mv.to == to && time() - (mv.attempt ?? 0) < ((mv.kind == 'confirm') ? 600 : 3600)) return;
+	let f = open(`${RUN}/move.lock`, 'r');
+	let idle = !f || f.lock('xn');
+	f?.close();
+	if (!idle) return;
+	move_kicked = time();
+	exec(`setsid ${MOVE} >/dev/null 2>&1 </dev/null &`);
+}
+
 const methods = {};
 
 methods.status = {
-	call: function() {
+	args: { host: '' },
+	call: function(req) {
 		let uci = cursor();
 		uci.load(CFG);
 		uci.load('uhttpd');
@@ -208,12 +231,22 @@ methods.status = {
 				resolved: host ? resolve(host) : '',
 				ddns: ddns_status(sid),
 				cert: cert_info(host),
-				job: job_state(sid)
+				job: job_state(sid, host)
 			};
 		});
 		let home = uci.get('uhttpd', 'main', 'home') ?? '/www';
 		let site_host = main.site_domain ? (uci.get(CFG, main.site_domain, 'hostname') ?? '') : '';
+		let eff = in_effect(), g = eff ? grade(eff) : null;
 		let crontab = readfile('/etc/crontabs/root') ?? '';
+		// the page tells the address it is open under: a move waits for an open page, and a page
+		// under the new name confirms that the browser reaches the router there
+		let mv = move_state(), here = lc(req.args?.host ?? '');
+		if (here) {
+			note_watch(here);
+			if (mv?.state == 'switched' && mv.to == here) confirm(here);
+			let t = (main.site_enabled == '1') ? target(uci, CFG) : null;
+			if (t && (t.host != eff || (g?.grade ?? 0) < (t.staging ? 1 : 2))) move_kick(mv, t.host);
+		}
 		return {
 			public_ip: public_ip(ip_url),
 			main: {
@@ -238,9 +271,25 @@ methods.status = {
 				cron: index(crontab, '# tunnel-ddns-cert') >= 0,
 				overlay_free_kb: overlay_free_kb()
 			},
+			// the name whose certificate the web server presents, and the move of the site to the
+			// name of its domain (see move)
+			site_cert: eff ? { host: eff, grade: g.grade, expires: g.expires ?? null, staging: g.staging ?? false } : null,
+			move: mv,
 			sites: site_list(),
 			domains: domains
 		};
+	}
+};
+
+// a page called the router under the name the site moved to (see move): the browser reaches it there
+methods.move_confirm = {
+	args: { host: '' },
+	call: function(req) {
+		let mv = move_state(), host = lc(req.args.host ?? '');
+		if (mv?.state != 'switched' || !host || mv.to != host)
+			return { ok: false };
+		confirm(host);
+		return { ok: true };
 	}
 };
 

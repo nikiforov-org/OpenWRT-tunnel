@@ -4,16 +4,19 @@
 // TXT record _acme-challenge.IDENT = AUTH at the provider of the domain section TDD_SECTION and
 // waits until every authoritative name server of the zone answers with it (at most 7 minutes;
 // a public resolver could keep a negative answer longer; when none of the name servers answers
-// queries from here, a fixed minute instead); "done" and "failed" remove it.
+// queries from here, two minutes instead: Beget's name servers took 30 s to more than a minute to
+// publish a record, and after an NXDOMAIN Let's Encrypt is asked again only 6 minutes later);
+// "done" and "failed" remove it.
 
 'use strict';
 
 import { popen } from 'fs';
 import { cursor } from 'uci';
 import { provider } from 'tunnel-ddns.providers';
+import { name_servers } from 'tunnel-ddns.dns';
 
 const WAIT_MAX = 420;
-const WAIT_BLIND = 60;
+const WAIT_BLIND = 120;
 
 function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
 
@@ -26,20 +29,6 @@ function exec(cmd) {
 }
 
 function say(msg) { print(`dns01: ${msg}\n`); }
-
-// the name servers of the zone a name belongs to: the NS records of the name or of a parent
-function name_servers(name) {
-	let parts = split(name, '.');
-	for (let i = 0; i < length(parts) - 1; i++) {
-		let zone = join('.', slice(parts, i)), ns = [];
-		for (let l in split(exec(`nslookup -type=ns ${shq(zone)} 2>/dev/null`), '\n')) {
-			let m = match(l, /nameserver = ([^ \t]+)/);
-			if (m) push(ns, rtrim(m[1], '.'));
-		}
-		if (length(ns)) return { zone: zone, ns: ns };
-	}
-	return null;
-}
 
 // { all: every name server answers with the value, reached: how many answered at all }
 function lookup_all(fqdn, value, ns) {

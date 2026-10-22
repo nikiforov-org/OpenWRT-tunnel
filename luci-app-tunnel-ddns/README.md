@@ -21,14 +21,28 @@ after installing; the entry appears in the **Tunnel** section.
   the TXT record `_acme-challenge.<domain>`), an account without e-mail, no port has to be
   open for issuing. Before Let's Encrypt is asked to look, the router waits until every
   authoritative name server of the zone answers with the record (at most 7 minutes; when they
-  do not answer queries from the router, a fixed minute). Renewal is automatic: a nightly cron
+  do not answer queries from the router, two minutes). Renewal is automatic: a nightly cron
   job runs uacme, which renews when the certificate is due (Let's Encrypt's renewal window or
   30 days before expiry), and the web server reloads it. The HTTP requests go through
   `uclient-fetch` of the stock image; the package needs neither curl, wget, openssl nor
   acme.sh.
 - **Web site.** Upload a `.tar.gz` archive, pick a domain, tick a box. The router serves the
   site on its HTTPS port and opens that port from WAN. The LuCI administration stays at
-  `/cgi-bin/luci/`.
+  `/cgi-bin/luci/`. The site gets the certificate of its domain on its own.
+- **Changing the site's domain** (another domain chosen, the hostname of its domain edited, the
+  domain removed) never cuts off the browser that makes the change: the web server keeps the
+  certificate it presents during the apply, so LuCI's confirmation of the apply goes through.
+  Afterwards the router requests a certificate for the new name if it has none (a test one
+  with the test server ticked, else a trusted one) and waits until the name points to this
+  router. Then, while a page of the package is open, it presents the new certificate, and the
+  page calls the router under the new name (`move_confirm`, with its LuCI session); only that
+  call keeps the new name. Without it within 90 seconds (the browser does not resolve the
+  name to this router yet, for example) the router goes back to the certificate of the old
+  name, the page shows why, and the next attempt follows 10 minutes later. The page then goes
+  to the new address by itself. A move from the router's own certificate, or from a name
+  without a valid certificate or no longer pointing to this router, needs no open page. A
+  test certificate never replaces a trusted one: issued for a name with a trusted certificate
+  in use, it is kept apart. While the site is off, the router's pages keep the certificate too.
 - **Port.** The site's HTTPS port is configurable (443 by default). It is the port of the one
   uhttpd instance, so LuCI stays on it too.
 - **Sites with their own build.** A site may carry a build script (for example one that fetches
@@ -71,7 +85,10 @@ package sends them at least every 72 hours, so an enabled domain is safe.
    the test server, **Save & Apply** and click **Issue certificate** again for a real
    certificate.
 4. **Web site.** Tick **Serve the web site**, choose the **Domain** and the **Site**,
-   **Save & Apply**. The site is served at `https://domain/` with that domain's certificate.
+   **Save & Apply**. The site is served at `https://domain/` with that domain's certificate,
+   requested on its own if the domain has none yet. To move the site to another name, choose
+   (or add) that domain, or edit the hostname, and **Save & Apply**, and keep the page open:
+   the overview shows the move, and the page goes to the new address when the site has moved.
    Your own site is uploaded with **Upload a site archive…**: a `.tar.gz` with `index.html` at
    the top level or inside a single folder. The site name is taken from the archive name.
    The **HTTPS port** is changed with **Change…** (see below).
@@ -125,7 +142,10 @@ everything off).
   The result of a site's last build is kept in `/etc/tunnel-ddns/state/`.
 - Certificates: uacme's account and its copy of every certificate in `/etc/tunnel-ddns/acme/`
   (staging: `acme-staging/`), the copies for the web server and the server package in
-  `/etc/ssl/tunnel-ddns/<domain>/fullchain.pem` and `key.pem`. A certificate already installed
+  `/etc/ssl/tunnel-ddns/<domain>/fullchain.pem` and `key.pem` (a test certificate kept apart
+  from a trusted one: `<domain>/staging/`). The name whose certificate the web server presents:
+  `/etc/tunnel-ddns/site.cert`; the state of a move of the site: `/tmp/tunnel-ddns/move.json`
+  (the open pages: `/tmp/tunnel-ddns/watch/`, the call under the new name: `move.confirm`). A certificate already installed
   there (from an earlier version with acme.sh, or restored from a backup) is taken into uacme's
   directory before the first renewal, so it is renewed only when due. Beget is used only through
   `dns/changeRecords`, so its API password may be restricted to the "DNS" group.

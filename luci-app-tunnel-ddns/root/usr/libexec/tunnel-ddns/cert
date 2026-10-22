@@ -3,19 +3,21 @@
 // account without e-mail).
 //   cert issue SECTION       start "run" in the background, return at once
 //   cert run SECTION [renew] issue a certificate, or renew it when it is due; installs it to
-//                            /etc/ssl/tunnel-ddns/HOST/{fullchain,key}.pem
+//                            /etc/ssl/tunnel-ddns/HOST/{fullchain,key}.pem (a test certificate does
+//                            not replace a trusted one there: it goes to HOST/staging/ instead)
 //   cert renew-all           "run … renew" for every enabled domain with a certificate (cron)
 // uacme keeps its account and its copy of each certificate in /etc/tunnel-ddns/acme (production)
 // and acme-staging; a certificate installed before (by an earlier version, or restored from a
 // backup) is taken into that directory first, so that uacme renews it only when it is due.
-// State: /tmp/tunnel-ddns/cert-SECTION.state ("starting EPOCH" | "running EPOCH PID" |
-// "ok EPOCH" | "failed EPOCH"), log: cert-SECTION.log (renewals: renew.log).
+// State: /tmp/tunnel-ddns/cert-SECTION.state ("starting EPOCH" | "running EPOCH PID host=HOST" |
+// "ok EPOCH host=HOST" | "failed EPOCH host=HOST"), log: cert-SECTION.log (renewals: renew.log).
 
 'use strict';
 
 import { readfile, writefile, mkdir, unlink, access, readlink, rename, chmod, stat, popen } from 'fs';
 import { cursor } from 'uci';
 import { info } from 'tunnel-ddns.x509';
+import { grade, in_effect } from 'tunnel-ddns.sitecert';
 
 const CFG   = 'tunnel-ddns';
 const RUN   = '/tmp/tunnel-ddns';
@@ -73,7 +75,7 @@ let log = function(msg) {
 	let f = popen(`date "+%Y-%m-%d %H:%M:%S"`, 'r'), t = trim(f?.read('all') ?? ''); f?.close();
 	writefile(logfile, (readfile(logfile) ?? '') + `== ${t} ${msg}\n`);
 };
-let set_state = (word) => writefile(state, `${word} ${time()}${word == 'running' ? ' ' + readlink('/proc/self') : ''}\n`);
+let set_state = (word) => writefile(state, `${word} ${time()}${word == 'running' ? ' ' + readlink('/proc/self') : ''} host=${host}\n`);
 let fail = function(msg) {
 	log(msg);
 	set_state('failed');
@@ -128,20 +130,44 @@ for (let attempt = 1; attempt <= 3; attempt++) {
 	}
 	break;
 }
-if (rc == 1) {
+let apart = (staging && grade(host).grade == 2);
+if (rc == 1 && access(apart ? `${CERTS}/${host}/staging/fullchain.pem` : installed)) {
 	log('the certificate is still valid; nothing to renew');
 	if (!renew) set_state('ok');
 	exit(0);
 }
-if (rc != 0) fail(`uacme failed with exit code ${rc}.`);
+if (rc == 1) log('the certificate is still valid; installing uacme\'s copy, the installed one is missing');
+else if (rc != 0) fail(`uacme failed with exit code ${rc}.`);
 
 mkdir(CERTS, 0o700);
 mkdir(`${CERTS}/${host}`, 0o700);
+if (apart) {
+	// a test certificate does not replace the trusted one of the name: the web server and the
+	// server package go on using that
+	mkdir(`${CERTS}/${host}/staging`, 0o700);
+	if (!copy(`${dir}/${host}/cert.pem`, `${CERTS}/${host}/staging/fullchain.pem`, 0o644) ||
+	    !copy(`${dir}/private/${host}/key.pem`, `${CERTS}/${host}/staging/key.pem`, 0o600))
+		fail('The certificate could not be installed.');
+	log(`test certificate installed to ${CERTS}/${host}/staging/; the trusted certificate of ${host} stays in use`);
+	set_state('ok');
+	system(`logger -t tunnel-ddns ${shq(`test certificate for ${host} issued (kept apart from the trusted one)`)}`);
+	exit(0);
+}
 if (!copy(`${dir}/${host}/cert.pem`, installed, 0o644) || !copy(`${dir}/private/${host}/key.pem`, ikey, 0o600))
 	fail('The certificate could not be installed.');
+if (!staging) system(`rm -rf ${shq(`${CERTS}/${host}/staging`)}`);
 log(`certificate installed to ${CERTS}/${host}/`);
 set_state('ok');
 system(`logger -t tunnel-ddns ${shq(`certificate for ${host} issued`)}`);
-system('/etc/init.d/uhttpd reload >/dev/null 2>&1');
+// the web server re-reads it when it is the certificate in effect; sync starts the move of the
+// site when the site waits for this one
+if (in_effect() == host) system('/etc/init.d/uhttpd reload >/dev/null 2>&1');
 system(`${SYNC} >/dev/null 2>&1`);
+// the Xray server's Hysteria2 transport can take its certificate from this domain: its sync
+// applies the certificate files of the new name (the same files again change nothing)
+let srv = cursor();
+if (access('/etc/init.d/tunnel-server', 'x') && srv.load('tunnel-server') &&
+    srv.get('tunnel-server', 'main', 'enabled') == '1' && srv.get('tunnel-server', 'main', 'hysteria2_enabled') == '1' &&
+    (srv.get('tunnel-server', 'main', 'cert_source') ?? 'ddns') == 'ddns' && srv.get('tunnel-server', 'main', 'cert_domain') == sid)
+	system('/etc/init.d/tunnel-server reload >/dev/null 2>&1');
 exit(0);

@@ -1,0 +1,198 @@
+#!/usr/bin/env ucode
+// tunnel-ddns move: brings the web site to the name of its domain without cutting off the browser
+// that changed it. Started by sync after an apply that changed the site's domain (another domain
+// chosen, its hostname edited), by cert after a certificate was installed, by update (cron) and by
+// the status calls of an open page while a move is pending; one run at a time.
+//   1. waits while a LuCI apply waits for its confirmation (rpcd's snapshot): the web server keeps
+//      its certificate until the browser has confirmed, so the apply is not rolled back
+//   2. requests a certificate for the new name when it has none of the kind its domain is set to
+//      (a test one with "staging", else a trusted one); a failed request is repeated after an hour,
+//      or at the next run once the configuration was saved again
+//   3. waits until the name points to this router (10 minutes per run, the next run continues)
+//   4. moves: the web server presents the certificate of the new name, and an open page of this
+//      package (under any address) calls the router under the new name (move_confirm). Without that
+//      call within 90 seconds the web server goes back to the certificate in effect, and the next
+//      attempt is made 10 minutes later while a page is open. A move needs no page and no call when
+//      no browser can be using the old name: from the router's own certificate, from an invalid one
+//      or from a name that no longer points to this router. A test certificate never replaces a
+//      trusted one.
+// State for the page: /tmp/tunnel-ddns/move.json { state, from, to, error, time, ... }.
+
+'use strict';
+
+import { readfile, mkdir, open, popen, stat } from 'fs';
+import { cursor } from 'uci';
+import { grade, in_effect, set_in_effect, target, apply_pending, move_state, set_move_state, watchers, confirmed } from 'tunnel-ddns.sitecert';
+import { lookup, published } from 'tunnel-ddns.dns';
+
+const CFG  = 'tunnel-ddns';
+const RUN  = '/tmp/tunnel-ddns';
+const SYNC = '/usr/libexec/tunnel-ddns/sync';
+const CERT = '/usr/libexec/tunnel-ddns/cert';
+const RETRY_CERT    = 3600;
+const RETRY_CONFIRM = 600;
+const DNS_WAIT      = 600;
+const CONFIRM_WAIT  = 90;   // as LuCI's rollback of an apply the browser did not confirm
+const WATCH_AGE     = 15;   // an open page calls status every 5 seconds
+
+function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
+function exec(cmd) { let p = popen(cmd, 'r'); let o = p?.read('all') ?? ''; p?.close(); return o; }
+function log(msg) { system(`logger -t tunnel-ddns ${shq(msg)}`); }
+
+function wait_apply() {
+	for (let i = 0; i < 150 && apply_pending(); i++) system('sleep 2');
+}
+
+function site_target() {
+	let u = cursor();
+	u.load(CFG);
+	return target(u, CFG);
+}
+
+function config_time() { return stat(`/etc/config/${CFG}`)?.mtime ?? 0; }
+
+// the name resolves to the router's public address (to any address while that is not known): for
+// the new name through the router's resolver and at every name server of its zone (the record is
+// published and no negative answer from before it was set is cached on the way, which the browsers
+// behind the same resolvers would get too); for the old name, ANY, at one of them
+function points_here(host, any) {
+	let ip = trim(readfile(`${RUN}/public_ip`) ?? '');
+	let here = (a) => length(a) > 0 && (!ip || index(a, ip) >= 0);
+	let local = lookup(host) ?? [], lists = published(host), addrs = [ ...local ];
+	for (let a in lists) for (let x in a) if (!(x in addrs)) push(addrs, x);
+	let ok = any ? (here(local) || length(filter(lists, here)) > 0)
+	             : (here(local) && length(filter(lists, a => !here(a))) == 0);
+	return { ok: ok, addrs: addrs };
+}
+
+// the reason of a failed certificate request, from the end of its log: the ACME server's own
+// explanation ("detail" of its error), else the last error of uacme or of the DNS hook, else the
+// last message of the request itself
+function cert_error(sid) {
+	let lines = split(readfile(`${RUN}/cert-${sid}.log`) ?? '', '\n');
+	for (let i = length(lines) - 1; i >= 0; i--) {
+		let d = match(lines[i], /^[ \t]*"detail": "(.*)",?$/);
+		if (d) return `Let's Encrypt: ${replace(d[1], '\\"', '"')}`;
+		if (match(lines[i], /^(uacme|dns01): .*(fail|error|invalid|denied|unauthori|refused|timed out|timeout|not found|no domain)/i) &&
+		    !match(lines[i], /following error:$/))
+			return trim(lines[i]);
+	}
+	let own = filter(lines, l => index(l, '== ') == 0);
+	return trim(replace(own[length(own) - 1] ?? '', /^== [0-9-]+ [0-9:]+ /, '')) || 'the certificate request failed';
+}
+
+// the web server presents the certificate of HOST ('' = the router's own one); false when it did not take it
+function present(host) {
+	set_in_effect(host);
+	system(`${SYNC} >/dev/null 2>&1`);
+	let u = cursor();
+	u.load('uhttpd');
+	return !host || u.get('uhttpd', 'main', 'cert') == grade(host).cert;
+}
+
+mkdir(RUN, 0o755);
+let lock = open(`${RUN}/move.lock`, 'w');
+if (!lock?.lock('xn')) exit(0);
+
+wait_apply();
+let t = site_target();
+if (!t) exit(0);                                    // the site is off or has no domain: the certificate in effect stays
+let from = in_effect(), want = t.staging ? 1 : 2;
+let g = grade(t.host), cur = grade(from);
+if (from == t.host && cur.grade >= want) exit(0);  // nothing to do
+let prev = move_state();
+if (prev?.to != t.host) prev = null;
+let saved = (prev?.config != null && prev.config != config_time());   // the configuration was saved since
+
+let fail = function(kind, error) {
+	set_move_state({ state: 'failed', kind: kind, from: from, to: t.host, error: error, attempt: time(), config: config_time() });
+	log(`site: not moved to ${t.host}: ${error}`);
+	exit(0);
+};
+
+// 2. a certificate for the name
+if (g.grade < want) {
+	if (prev?.state == 'failed' && prev.kind == 'cert' && !saved && time() - prev.attempt < RETRY_CERT) exit(0);
+	set_move_state({ state: 'issuing', from: from, to: t.host });
+	log(`site: requesting a certificate for ${t.host}`);
+	exec(`flock ${shq(`${RUN}/cert-${t.sid}.lock`)} ${CERT} run ${shq(t.sid)} 2>&1`);
+	g = grade(t.host);
+	if (g.grade < 1 || (g.grade < want && g.grade < cur.grade))
+		fail('cert', cert_error(t.sid));
+	if (site_target()?.host != t.host) exit(0);    // the domain changed meanwhile: the next run takes over
+}
+
+// the same name: its new certificate is served in place
+if (from == t.host) {
+	if (!present(t.host)) fail('server', 'the web server did not take the new certificate');
+	set_move_state({ state: 'moved', from: from, to: t.host });
+	exit(0);
+}
+
+// a test certificate does not replace a trusted one
+if (g.grade < cur.grade) {
+	set_move_state({ state: 'kept', from: from, to: t.host,
+		error: `${t.host} has only a test certificate: the site keeps the trusted certificate of ${from}` });
+	exit(0);
+}
+
+if (prev?.state == 'failed' && prev.kind != 'confirm' && !saved && time() - prev.attempt < RETRY_CERT) exit(0);
+if (prev?.state == 'failed' && prev.kind == 'confirm' && !saved && time() - prev.attempt < RETRY_CONFIRM) exit(0);
+
+// 3. the name points to this router
+let t0 = time();
+while (true) {
+	let p = points_here(t.host);
+	if (p.ok) break;
+	set_move_state({ state: 'waiting-dns', from: from, to: t.host, points: join(' ', p.addrs) });
+	if (time() - t0 > DNS_WAIT) exit(0);
+	system('sleep 20');
+	if (site_target()?.host != t.host) exit(0);
+}
+
+// 4. the move. A browser can be using the old name while its certificate is valid and it points here:
+// then a page has to be open, has to have seen "ready" (so that it calls the new name once the old
+// one stops answering), and has to reach the router under the new name
+let check = (from != '' && cur.grade > 0 && points_here(from, true).ok);
+wait_apply();
+if (check) {
+	if (!length(watchers(WATCH_AGE))) {
+		set_move_state({ state: 'waiting-page', from: from, to: t.host });
+		exit(0);
+	}
+	let ready = time(), seen = false;
+	set_move_state({ state: 'ready', from: from, to: t.host, confirm_wait: CONFIRM_WAIT });
+	for (let i = 0; i < 8 && !seen; i++) {
+		system('sleep 2');
+		for (let n, at in watchers(WATCH_AGE)) if (at > ready) seen = true;
+	}
+	if (!seen) {
+		set_move_state({ state: 'waiting-page', from: from, to: t.host });
+		exit(0);
+	}
+	if (site_target()?.host != t.host) exit(0);
+	wait_apply();
+}
+// "switched" before the web server restarts with the new certificate: a page's call can arrive as
+// soon as it presents it, before sync has returned
+let at = time();
+if (check) set_move_state({ state: 'switched', from: from, to: t.host, deadline: at + CONFIRM_WAIT });
+if (!present(t.host)) {
+	present(from);
+	fail('server', 'the web server did not take the new certificate');
+}
+if (check) {
+	let until = time() + CONFIRM_WAIT, ok = confirmed(t.host, at);
+	if (!ok && until > at + CONFIRM_WAIT) set_move_state({ state: 'switched', from: from, to: t.host, deadline: until });
+	while (!ok && time() < until) {
+		system('sleep 2');
+		ok = confirmed(t.host, at);
+		if (!ok && site_target()?.host != t.host) break;
+	}
+	if (!ok) {
+		present(from);
+		fail('confirm', `no open page reached the router under ${t.host} within ${CONFIRM_WAIT} seconds (the browser may not resolve the name to this router yet)`);
+	}
+}
+set_move_state({ state: 'moved', from: from, to: t.host });
+log(`site: moved from ${from || 'the router\'s own certificate'} to ${t.host}`);

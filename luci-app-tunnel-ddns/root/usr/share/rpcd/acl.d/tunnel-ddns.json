@@ -3,7 +3,7 @@
 		"description": "Manage domains (DDNS), Let's Encrypt certificates and the web site served by the router",
 		"read": {
 			"ubus": {
-				"tunnel-ddns": [ "status", "ddns_log", "cert_log", "site_rebuild_log" ]
+				"tunnel-ddns": [ "status", "move_confirm", "ddns_log", "cert_log", "site_rebuild_log" ]
 			},
 			"uci": [ "tunnel-ddns" ]
 		},

@@ -2,9 +2,10 @@
 // tunnel-ddns update [SECTION [force]]: points the enabled domains at the router's public IPv4
 // address. Runs from cron every 10 minutes while a domain is on, when an interface of the wan zone
 // comes up (hotplug), after Save & Apply and from "Update address" (force). For each domain the
-// address in its DNS record (a lookup through the router's resolver) and the address sent last are
-// compared with the public address (ip_url); the provider's API is called only when they differ,
-// and once 72 hours after the last update. Nothing stays running between the runs.
+// address in its DNS record (asked at the zone's name servers, else through the router's resolver)
+// and the address sent last are compared with the public address (ip_url); the provider's API is
+// called only when they differ, and once 72 hours after the last update. Nothing stays running
+// between the runs.
 // State: /tmp/tunnel-ddns/ddns-SECTION.json, log: ddns-SECTION.log, the public address for the
 // status page: public_ip.
 
@@ -14,6 +15,8 @@ import { readfile, writefile, mkdir, unlink, stat, popen } from 'fs';
 import { cursor } from 'uci';
 import { request } from 'tunnel-ddns.http';
 import { provider } from 'tunnel-ddns.providers';
+import { grade, in_effect, target } from 'tunnel-ddns.sitecert';
+import { lookup, published } from 'tunnel-ddns.dns';
 
 const CFG     = 'tunnel-ddns';
 const RUN     = '/tmp/tunnel-ddns';
@@ -52,14 +55,14 @@ function load_state(sid) {
 
 function save_state(sid, s) { writefile(`${RUN}/ddns-${sid}.json`, sprintf('%J\n', s)); }
 
-// the IPv4 addresses the name resolves to through the router's resolver
+// the IPv4 addresses of the name's record: at the zone's name servers (asking them leaves no negative
+// answer in the router's resolver while the record does not exist yet, which would keep the new
+// record from the router and the browsers behind it up to the zone's negative TTL), else through
+// the router's resolver when none of them answers queries from here
 function resolve(host) {
-	let out = [], seen = false;
-	for (let l in split(exec(`nslookup ${shq(host)} 2>/dev/null`), '\n')) {
-		if (index(l, 'Name:') >= 0) { seen = true; continue; }
-		let m = seen ? match(l, /Address[^:]*:[ \t]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/) : null;
-		if (m) push(out, m[1]);
-	}
+	let lists = published(host), out = [];
+	if (!length(lists)) return lookup(host) ?? [];
+	for (let a in lists) for (let x in a) if (!(x in out)) push(out, x);
 	return out;
 }
 
@@ -87,6 +90,8 @@ if (ip) writefile(`${RUN}/public_ip`, ip);
 let now = time();
 for (let s in domains) {
 	let sid = s['.name'], host = lc(s.hostname), st = load_state(sid);
+	// the state of another hostname (the domain was edited): nothing was sent for this one yet
+	if (st.host != host) st = { host: host };
 	st.checked = now;
 	if (!ip) {
 		st.error = `the public address is unknown (${url}: ${r.error || 'no address in the answer'})`;
@@ -119,3 +124,9 @@ for (let s in domains) {
 	save_state(sid, st);
 }
 unlink(LOCK);
+
+// a move of the web site to another name waits for this name's record or certificate: the move job
+// carries on (it repeats a failed certificate request at most once an hour)
+let t = target(uci, CFG);
+if (t && (t.host != in_effect() || grade(t.host).grade < (t.staging ? 1 : 2)))
+	system('setsid /usr/libexec/tunnel-ddns/move >/dev/null 2>&1 </dev/null &');
