@@ -103,7 +103,9 @@ function ddns_site(uci) {
 	let m = uci.get_all('tunnel-ddns', 'main');
 	if (!m) return null;
 	let host = m.site_domain ? uci.get('tunnel-ddns', m.site_domain, 'hostname') : null;
-	return { enabled: (m.site_enabled == '1'), port: m.site_port ?? '443', hostname: host ?? '' };
+	// the name whose certificate the router's web server presents (the site moves to a new name later)
+	let shown = lc(trim(readfile('/etc/tunnel-ddns/site.cert') ?? ''));
+	return { enabled: (m.site_enabled == '1'), port: m.site_port ?? '443', hostname: host ?? '', cert_host: shown };
 }
 
 // a certificate file: read once per change of the file
@@ -186,7 +188,9 @@ methods.status = {
 			cert: cert,
 			domains: ddns_domains(uci),
 			log_last: (enabled && !svc.running) ? tail(xray_log(), 3) : '',
-			site: ddns_site(uci)
+			site: ddns_site(uci),
+			target: main.target ?? '',
+			server_names: list(main.server_name)
 		};
 	}
 };

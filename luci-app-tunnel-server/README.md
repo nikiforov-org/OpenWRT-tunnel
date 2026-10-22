@@ -19,12 +19,14 @@ after installing; the entry appears in the **Tunnel** section.
   forwarded to the target, a site that answers over TLS 1.3, so no certificate of its own is
   needed. The natural target on this router is its own HTTPS site from
   [`luci-app-tunnel-ddns`](../luci-app-tunnel-ddns/README.md) (`127.0.0.1:443`, server name =
-  the site's domain); any public site that answers over TLS 1.3 works as well.
+  the site's domain; when the site moves to another name, the overview says so until that
+  name is among the server names); any public site that answers over TLS 1.3 works as well.
 - **Hysteria2** uses ordinary TLS 1.3 over QUIC, so it needs a certificate for the name clients
   connect to. The easiest source is a domain from the Dynamic DNS page: pick it in the
   **Certificate** field and the transport uses that domain's Let's Encrypt certificate and
-  name. Certificate files on the router (PEM paths and the TLS server name) work as well. xray
-  reads the files again every hour, so renewals need no restart. Optional: **Salamander**
+  name; when that domain's hostname is edited, the transport takes the certificate of the new
+  name as soon as it exists. Certificate files on the router (PEM paths and the TLS server
+  name) work as well. xray reads the files again every hour, so renewals need no restart. Optional: **Salamander**
   obfuscation with one shared password, and a **masquerade** for HTTP/3 requests without a
   profile password (a URL to proxy, a directory to serve or an xray masquerade object; by
   default a 404 answer).

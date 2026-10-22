@@ -110,8 +110,15 @@ return view.extend({
 			return span(COLOR.bad, _('xray-core is not installed on the router. It is a dependency of this package: run "apk update && apk add xray-core".'));
 		if (!st.enabled)
 			return span(COLOR.dim, _('Off: tick "Run the server" below and click "Save & Apply"'));
-		if (st.running)
-			return span(COLOR.ok, _('Running') + (st.version ? ' (Xray ' + st.version + ')' : ''));
+		if (st.running) {
+			var run = span(COLOR.ok, _('Running') + (st.version ? ' (Xray ' + st.version + ')' : ''));
+			// the target is the router's own site: its certificate is that of the name the site answers as
+			var site = st.site || {}, names = st.server_names || [];
+			if (/^(127\.0\.0\.1|localhost):(443|4443)$/.test(st.target || '') && site.cert_host && names.length && names.indexOf(site.cert_host) < 0)
+				return E('div', {}, [ run, E('div', { 'style': 'color:' + COLOR.warn + '; margin-top:.3em' },
+					_('The server names (%s) are not on the certificate of the router\'s site, which answers as %s: connections without a client key get a certificate for another name. Enter %s under "Server names".').format(names.join(', '), site.cert_host, site.cert_host)) ]);
+			return run;
+		}
 		var lines = [ span(COLOR.bad, _('Not running')) ];
 		if (st.log_last)
 			lines.push(E('pre', { 'style': 'color:' + COLOR.dim + '; white-space:pre-wrap; margin:.3em 0 0; font-size:90%' }, st.log_last));
