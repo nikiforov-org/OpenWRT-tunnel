@@ -81,13 +81,27 @@ return view.extend({
 		if (!st.installed)
 			return span(COLOR.bad, _('xray is not installed on the router. It is a dependency of this package: run "apk update && apk add xray-core".'));
 		if (!st.enabled)
-			return span(COLOR.dim, _('Off: tick "Route the LAN through the client" below and click "Save & Apply"'));
+			return span(COLOR.dim, _('Off: the LAN reaches the Internet as before'));
 		if (st.running)
 			return span(COLOR.ok, _('Running: the LAN reaches the Internet only through this router\'s xray (interception of the LAN, kill switch), IPv6 is off for the LAN') + (st.version ? ' (Xray ' + st.version + ')' : ''));
 		var lines = [ span(COLOR.bad, _('Not running: the LAN has no way to the Internet until it starts (kill switch)')) ];
 		if (st.log_last)
 			lines.push(E('pre', { 'style': 'color:' + COLOR.dim + '; white-space:pre-wrap; margin:.3em 0 0; font-size:90%' }, st.log_last));
 		return E('div', {}, lines);
+	},
+
+	/* the on/off button of the overview: sets "enabled" and runs LuCI's Save & Apply, with the rest of the page */
+	switchButton: function() {
+		var on = uci.get(CFG, 'main', 'enabled') == '1';
+		return E('button', {
+			'class': 'btn cbi-button ' + (on ? 'cbi-button-negative' : 'cbi-button-positive'),
+			'click': ui.createHandlerFn(this, 'handleSwitch', !on)
+		}, on ? _('Turn the client off') : _('Turn the client on'));
+	},
+
+	handleSwitch: function(on, ev) {
+		uci.set(CFG, 'main', 'enabled', on ? '1' : '0');
+		return this.handleSaveApply(ev, '0');
 	},
 
 	overviewActive: function() {
@@ -282,13 +296,16 @@ return view.extend({
 		};
 
 		m = new form.Map(CFG, _('Client'),
-			_('The devices connected to this router reach the Internet through tunnel clients: a profile holds the links of one server (TCP + XTLS-Vision, XHTTP, Hysteria2, as the server page shows them), every link is a client, and one of them is active, by hand or by the measured speed. The traffic of the LAN is split by a list of domains and subnets; nothing of it bypasses the clients (kill switch) and IPv6 is switched off for the LAN while the client is on. Nothing changes on the router until you click "Save & Apply".'));
+			_('The devices connected to this router reach the Internet through tunnel clients: a profile holds the links of one server (TCP + XTLS-Vision, XHTTP, Hysteria2, as the server page shows them), every link is a client, and one of them is active, by hand or by the measured speed. The traffic of the LAN is split by a list of domains and subnets; nothing of it bypasses the clients (kill switch) and IPv6 is switched off for the LAN while the client is on. Nothing changes on the router until you click "Save & Apply" or the button that turns the client on or off.'));
 		this.map = m;
 
 		/* Overview */
 		s = m.section(form.NamedSection, 'main', CFG, _('Overview'));
-		o = s.option(form.DummyValue, '_ov_service', _('Service'));
-		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-service' }, self.overviewService()); };
+		o = s.option(form.DummyValue, '_ov_service', _('Service'),
+			_('The button saves and applies the page like "Save & Apply". On: the LAN reaches the Internet only through this router\'s xray, which intercepts every connection of the LAN devices (TPROXY) and sends it to the active link or directly by the list; the lan → wan forwarding is switched off and IPv6 is switched off for the LAN. If xray stops, the LAN has no Internet (kill switch); ping and other protocols besides TCP and UDP do not leave the LAN meanwhile. Off: everything as before.'));
+		o.renderWidget = function() {
+			return E('div', {}, [ E('div', { 'id': 'tcl-ov-service' }, self.overviewService()), E('div', { 'style': 'margin-top:.5em' }, self.switchButton()) ]);
+		};
 		o = s.option(form.DummyValue, '_ov_active', _('Active link'));
 		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-active' }, self.overviewActive()); };
 		o = s.option(form.DummyValue, '_ov_measure', _('Measurement'));
@@ -317,10 +334,6 @@ return view.extend({
 		/* Settings */
 		s = m.section(form.NamedSection, 'main', CFG, _('Settings'));
 		this.mainSection = s;
-
-		o = s.option(form.Flag, 'enabled', _('Route the LAN through the client'),
-			_('On: the LAN reaches the Internet only through this router\'s xray, which intercepts every connection of the LAN devices (TPROXY) and sends it to the active link or directly by the list; the lan → wan forwarding is switched off and IPv6 is switched off for the LAN. If xray stops, the LAN has no Internet (kill switch); ping and other protocols besides TCP and UDP do not leave the LAN meanwhile. Off: everything as before.'));
-		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'mode', _('Choice of the link'));
 		o.value('auto', _('Automatic: the fastest of all links by the measurements'));

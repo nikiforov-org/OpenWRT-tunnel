@@ -59,8 +59,9 @@ after installing; the entry appears in the **Tunnel** section.
    the field is empty.
 4. **Profiles → Add profile…**, give it a name (the UUID and the Hysteria2 password are
    filled in), **Save** in the dialog.
-5. Tick **Run the server** and click **Save & Apply**. The overview shows "Running" and the
-   open ports a few seconds later.
+5. Click **Turn the server on** in the overview (it saves and applies the page like **Save &
+   Apply**). The overview shows "Running" and the open ports a few seconds later; the same
+   button then reads **Turn the server off**.
 6. **Links** next to a profile: pick the transport, copy the link or scan the QR code in the
    client app.
 

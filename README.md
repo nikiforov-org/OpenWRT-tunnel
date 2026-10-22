@@ -18,6 +18,23 @@ line of the Makefile must be `# call BuildPackage - OpenWrt buildroot signature`
 feed scanner selects Makefiles by this text, and without it the package is left out of the
 build (`No feed for package ... found`).
 
+## Firmware with the packages
+
+`utils/firmware.sh` makes an OpenWrt image for one device with the packages of the release's own
+image (LuCI included) and `luci-app-tunnel-ddns`, `-server`, `-client` and `-tor` from `dist/`, using
+the official Image Builder (Docker image `openwrt/imagebuilder`). PROFILE is the device's profile
+name in the release, as on firmware-selector.openwrt.org:
+
+```sh
+./utils/build.sh
+./utils/firmware.sh PROFILE             # 25.12.6 by default
+./utils/firmware.sh PROFILE 25.12.6
+```
+
+The images, their package list (`.manifest`) and `sha256sums` go to `firmware/PROFILE/`. The
+sysupgrade image is written over an installed OpenWrt (System → Backup / Flash Firmware, or
+`sysupgrade -n` to drop the settings); the packages start with everything off, as after `apk add`.
+
 ## Installing on the router
 
 OpenWrt 25.12 (the `apk` package manager). The packages are unsigned, so they are installed

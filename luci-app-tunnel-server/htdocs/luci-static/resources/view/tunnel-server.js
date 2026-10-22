@@ -109,7 +109,7 @@ return view.extend({
 		if (!st.installed)
 			return span(COLOR.bad, _('xray-core is not installed on the router. It is a dependency of this package: run "apk update && apk add xray-core".'));
 		if (!st.enabled)
-			return span(COLOR.dim, _('Off: tick "Run the server" below and click "Save & Apply"'));
+			return span(COLOR.dim, _('Off'));
 		if (st.running) {
 			var run = span(COLOR.ok, _('Running') + (st.version ? ' (Xray ' + st.version + ')' : ''));
 			// the target is the router's own site: its certificate is that of the name the site answers as
@@ -123,6 +123,20 @@ return view.extend({
 		if (st.log_last)
 			lines.push(E('pre', { 'style': 'color:' + COLOR.dim + '; white-space:pre-wrap; margin:.3em 0 0; font-size:90%' }, st.log_last));
 		return E('div', {}, lines);
+	},
+
+	/* the on/off button of the overview: sets "enabled" and runs LuCI's Save & Apply, with the rest of the page */
+	switchButton: function() {
+		var on = uci.get(CFG, 'main', 'enabled') == '1';
+		return E('button', {
+			'class': 'btn cbi-button ' + (on ? 'cbi-button-negative' : 'cbi-button-positive'),
+			'click': ui.createHandlerFn(this, 'handleSwitch', !on)
+		}, on ? _('Turn the server off') : _('Turn the server on'));
+	},
+
+	handleSwitch: function(on, ev) {
+		uci.set(CFG, 'main', 'enabled', on ? '1' : '0');
+		return this.handleSaveApply(ev, '0');
 	},
 
 	overviewAccess: function() {
@@ -330,14 +344,17 @@ return view.extend({
 		var m, s, o;
 
 		m = new form.Map(CFG, _('Server'),
-			_('One xray process on this router serves the enabled transports: VLESS + REALITY over TCP with XTLS-Vision, VLESS + REALITY over XHTTP and Hysteria2 over QUIC (UDP). Devices with a profile\'s links connect to it over the Internet and use the router\'s connection. Nothing changes on the router until you click "Save & Apply".'));
+			_('One xray process on this router serves the enabled transports: VLESS + REALITY over TCP with XTLS-Vision, VLESS + REALITY over XHTTP and Hysteria2 over QUIC (UDP). Devices with a profile\'s links connect to it over the Internet and use the router\'s connection. Nothing changes on the router until you click "Save & Apply" or the button that turns the server on or off.'));
 		this.map = m;
 
 		/* Overview */
 		s = m.section(form.NamedSection, 'main', CFG, _('Overview'));
 
-		o = s.option(form.DummyValue, '_ov_server', _('Server'));
-		o.renderWidget = function() { return E('span', { 'id': 'tsv-ov-server' }, self.overviewServer()); };
+		o = s.option(form.DummyValue, '_ov_server', _('Server'),
+			_('The button saves and applies the page like "Save & Apply". On: xray starts with the settings below and the ports of the enabled transports are opened from the Internet (firewall rules "tunnel-server: …"). Off: xray stops and the ports are closed.'));
+		o.renderWidget = function() {
+			return E('div', {}, [ E('div', { 'id': 'tsv-ov-server' }, self.overviewServer()), E('div', { 'style': 'margin-top:.5em' }, self.switchButton()) ]);
+		};
 
 		o = s.option(form.DummyValue, '_ov_access', _('Access from the Internet'));
 		o.renderWidget = function() { return E('span', { 'id': 'tsv-ov-access' }, self.overviewAccess()); };
@@ -359,10 +376,6 @@ return view.extend({
 
 		/* Server */
 		s = m.section(form.NamedSection, 'main', CFG, _('Server'));
-
-		o = s.option(form.Flag, 'enabled', _('Run the server'),
-			_('Starts xray with the settings below and opens the ports of the enabled transports from the Internet (firewall rules "tunnel-server: …"). Switch off to stop it and close the ports.'));
-		o.rmempty = false;
 
 		o = s.option(form.Flag, 'local_access', _('Access to local networks'),
 			_('Clients may reach the router itself and the networks behind it (LAN, the router in front) through the server. Off: only the Internet; private addresses are blocked.'));

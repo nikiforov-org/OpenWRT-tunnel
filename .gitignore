@@ -8,6 +8,7 @@ credentials.md
 /config/
 /keys/
 /dist/
+/firmware/
 /build/
 *.apk
 *.ipk

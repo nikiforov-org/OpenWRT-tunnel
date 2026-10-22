@@ -80,7 +80,8 @@ after installing.
 2. **Profiles → Add profile…**, give it the server's name and paste its links from the
    server page (**Links** next to a profile there), **Save**. Repeat for every server.
 3. Check the **Split tunnelling** section: the mode, your entries, the sources.
-4. Tick **Route the LAN through the client**, click **Save & Apply**. The overview shows the
+4. Click **Turn the client on** in the overview (it saves and applies the page like **Save &
+   Apply**; **Turn the client off** switches it off the same way). The overview shows the
    service running and the links ready; **Measure now** fills the speeds and, in the
    automatic mode, picks the fastest.
 5. By hand: choose **By hand**, pick the **Active link** (or **Choose** in the table) and
