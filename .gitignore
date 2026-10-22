@@ -21,3 +21,7 @@ luci-app-tunnel-ddns/REQUIREMENTS.md
 
 # the LuCI UI test harness: addresses and names of the test setup, node_modules, screenshots
 /utils/ui-test/
+
+# packages not in use for now (kept locally)
+/luci-app-tunnel-zerotier/
+/luci-app-tunnel-tailscale/
