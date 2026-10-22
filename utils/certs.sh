@@ -1,16 +1,16 @@
 #!/bin/sh
 # certs.sh DEVICE save|restore [HOST]: the router's certificates and onion service keys in the
-# directory config/DEVICE/ of the repository (gitignored), as plain files under the paths they
+# directory config/devices/DEVICE/ of the repository (gitignored), as plain files under the paths they
 # have on the router:
 #   etc/tunnel-ddns/acme   uacme's account key and its copy of every certificate
 #   etc/ssl/tunnel-ddns    the installed certificates (the web server, Hysteria2)
 #   etc/tor/tunnel-tor     the onion service's keys (its address) and the authorized clients
-# save     replaces these directories in config/DEVICE/ with the router's current ones; no older
+# save     replaces these directories in config/devices/DEVICE/ with the router's current ones; no older
 #          copy is kept
 # restore  puts them back on the router (owners and modes as the packages create them)
 # HOST: the router's SSH address, for a DEV check on its LAN, or docker:NAME for a stage container
 # (utils/stage); without HOST the router is reached over Tor (utils/tor-client/tor-client DEVICE,
-# settings in config/DEVICE/.env).
+# settings in config/devices/DEVICE/.env).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PATHS="etc/tunnel-ddns/acme etc/ssl/tunnel-ddns etc/tor/tunnel-tor"
@@ -19,7 +19,7 @@ die() { echo "certs.sh: $*" >&2; exit 1; }
 [ $# -ge 2 ] || die "usage: certs.sh DEVICE save|restore [HOST]"
 DEVICE=$1 OP=$2 HOST=${3:-}
 case "$DEVICE" in *[!A-Za-z0-9_.-]*|.*|'') die "invalid device name: $DEVICE" ;; esac
-DIR="$ROOT/config/$DEVICE"
+DIR="$ROOT/config/devices/$DEVICE"
 [ -r "$DIR/.env" ] || die "no $DIR/.env"
 SSH_KEY=$(. "$DIR/.env"; echo "${SSH_KEY:-}")
 

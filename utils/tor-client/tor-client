@@ -1,15 +1,15 @@
 #!/bin/sh
 # tor-client DEVICE [ssh options] [command]: SSH to a router through its Tor onion service (port 22).
-# DEVICE names the directory config/DEVICE/ of the repository (gitignored, see also utils/certs.sh);
-# its file .env has:
-#   ONION           the name the router is reached under: its onion address, or an alias such as
-#                   DEVICE.onion (a MapAddress of the real address, which is the first field of AUTH_LINE)
-#   AUTH_LINE       the client authorization line of one of its profiles (tor's ClientOnionAuthDir format)
-#   SSH_KEY         the key in the router's dropbear authorized_keys
-#   HOST_KEY_ALIAS  the name the router's host key is known under in ~/.ssh/known_hosts (else ONION)
+# DEVICE names the directory config/devices/DEVICE/ of the repository (gitignored, see also utils/certs.sh);
+# its file .env holds the device's credentials, of them used here:
+#   TOR_ONION           the name the router is reached under: its onion address, or a name such as
+#                       DEVICE.onion (a MapAddress of the real address, the first field of TOR_AUTH_LINE)
+#   TOR_AUTH_LINE       the client authorization line of one of its profiles (tor's ClientOnionAuthDir format)
+#   SSH_KEY             the key in the router's dropbear authorized_keys
+#   SSH_HOST_KEY_ALIAS  the name the router's host key is known under in ~/.ssh/known_hosts (else TOR_ONION)
 # The tor client runs in the Docker container tunnel-tor-client (built from this directory; its cache
 # in the volume tunnel-tor-client-data); its torrc carries the MapAddress alias and the client key of
-# every device in config/*/.env. When the onion does not answer (a client holding the descriptor of
+# every device in config/devices/*/.env. When the onion does not answer (a client holding the descriptor of
 # introduction points the service has replaced), tor is restarted and the connection tried again.
 #   tor-client DEVICE 'uptime'                 a command
 #   tor-client DEVICE 'cat > /tmp/x' < x       a file to the router
@@ -22,17 +22,17 @@ NAME=tunnel-tor-client
 VOLUME=tunnel-tor-client-data
 
 die() { echo "tor-client: $*" >&2; exit 1; }
-[ $# -gt 0 ] || die "usage: tor-client DEVICE [ssh options] [command] (DEVICE: a directory config/DEVICE/ with .env)"
+[ $# -gt 0 ] || die "usage: tor-client DEVICE [ssh options] [command] (DEVICE: a directory config/devices/DEVICE/ with .env)"
 DEVICE=$1; shift
-ENV="$ROOT/config/$DEVICE/.env"
+ENV="$ROOT/config/devices/$DEVICE/.env"
 [ -r "$ENV" ] || die "no $ENV"
-ONION=''; AUTH_LINE=''; SSH_KEY=''; HOST_KEY_ALIAS=''
+TOR_ONION=''; TOR_AUTH_LINE=''; SSH_KEY=''; SSH_HOST_KEY_ALIAS=''
 . "$ENV"
-[ -n "$AUTH_LINE" ] || die "AUTH_LINE missing in $ENV"
-REAL="${AUTH_LINE%%:*}.onion"
-ONION=${ONION:-$REAL}
+[ -n "$TOR_AUTH_LINE" ] || die "TOR_AUTH_LINE missing in $ENV"
+REAL="${TOR_AUTH_LINE%%:*}.onion"
+ONION=${TOR_ONION:-$REAL}
 KEY=${SSH_KEY:-$HOME/.ssh/id_ed25519}
-ALIAS=${HOST_KEY_ALIAS:-$ONION}
+ALIAS=${SSH_HOST_KEY_ALIAS:-$ONION}
 
 # the image (rebuilt when this directory's Dockerfile or entrypoint changed) and the container
 SUM=$(cat "$HERE/Dockerfile" "$HERE/entrypoint.sh" | shasum | cut -c1-12)
@@ -45,14 +45,14 @@ if [ "$(docker inspect -f '{{.State.Running}}' $NAME 2>/dev/null)" != true ]; th
 	docker run -d --name $NAME --restart unless-stopped -v $VOLUME:/var/lib/tor $IMAGE >/dev/null || die "the container could not be started"
 fi
 
-# the torrc and the client keys of all devices in config/; tor re-reads them on SIGHUP
+# the torrc and the client keys of all devices in config/devices/; tor re-reads them on SIGHUP
 RC=$(printf 'User tor\nSocksPort 127.0.0.1:9050\nDataDirectory /var/lib/tor\nClientOnionAuthDir /etc/tor/auth\nLog notice file /var/lib/tor/notice.log\n'
-	for f in "$ROOT"/config/*/.env; do
-		( ONION=''; AUTH_LINE=''; . "$f"; r="${AUTH_LINE%%:*}.onion"
-		  [ -n "$AUTH_LINE" ] && [ -n "$ONION" ] && [ "$ONION" != "$r" ] && printf 'MapAddress %s %s\n' "$ONION" "$r" )
+	for f in "$ROOT"/config/devices/*/.env; do
+		( TOR_ONION=''; TOR_AUTH_LINE=''; . "$f"; r="${TOR_AUTH_LINE%%:*}.onion"
+		  [ -n "$TOR_AUTH_LINE" ] && [ -n "$TOR_ONION" ] && [ "$TOR_ONION" != "$r" ] && printf 'MapAddress %s %s\n' "$TOR_ONION" "$r" )
 	done)
-KEYS=$(for f in "$ROOT"/config/*/.env; do
-		( AUTH_LINE=''; . "$f"; [ -n "$AUTH_LINE" ] && printf '%s %s\n' "$(basename "$(dirname "$f")")" "$AUTH_LINE" )
+KEYS=$(for f in "$ROOT"/config/devices/*/.env; do
+		( TOR_AUTH_LINE=''; . "$f"; [ -n "$TOR_AUTH_LINE" ] && printf '%s %s\n' "$(basename "$(dirname "$f")")" "$TOR_AUTH_LINE" )
 	done)
 HAVE=$(docker exec $NAME sh -c 'cat /etc/tor/torrc; echo ==; for f in /etc/tor/auth/*.auth_private; do [ -f "$f" ] && echo "$(basename "$f" .auth_private) $(cat "$f")"; done')
 if [ "$HAVE" != "$(printf '%s\n==\n%s' "$RC" "$KEYS")" ]; then
