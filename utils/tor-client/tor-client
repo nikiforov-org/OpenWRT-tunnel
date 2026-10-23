@@ -14,6 +14,8 @@
 #   tor-client DEVICE 'uptime'                 a command
 #   tor-client DEVICE 'cat > /tmp/x' < x       a file to the router
 #   tor-client DEVICE                          an interactive shell
+#   tor-client --start                         only the tor client, running and connected (its SOCKS port
+#                                              127.0.0.1:9050 inside the container, e.g. for utils/build.sh)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -22,17 +24,22 @@ NAME=tunnel-tor-client
 VOLUME=tunnel-tor-client-data
 
 die() { echo "tor-client: $*" >&2; exit 1; }
-[ $# -gt 0 ] || die "usage: tor-client DEVICE [ssh options] [command] (DEVICE: a directory config/devices/DEVICE/ with .env)"
-DEVICE=$1; shift
-ENV="$ROOT/config/devices/$DEVICE/.env"
-[ -r "$ENV" ] || die "no $ENV"
-TOR_ONION=''; TOR_AUTH_LINE=''; SSH_KEY=''; SSH_HOST_KEY_ALIAS=''
-. "$ENV"
-[ -n "$TOR_AUTH_LINE" ] || die "TOR_AUTH_LINE missing in $ENV"
-REAL="${TOR_AUTH_LINE%%:*}.onion"
-ONION=${TOR_ONION:-$REAL}
-KEY=${SSH_KEY:-$HOME/.ssh/id_ed25519}
-ALIAS=${SSH_HOST_KEY_ALIAS:-$ONION}
+[ $# -gt 0 ] || die "usage: tor-client DEVICE [ssh options] [command] (DEVICE: a directory config/devices/DEVICE/ with .env) | tor-client --start"
+START=''
+if [ "$1" = --start ]; then
+	START=1
+else
+	DEVICE=$1; shift
+	ENV="$ROOT/config/devices/$DEVICE/.env"
+	[ -r "$ENV" ] || die "no $ENV"
+	TOR_ONION=''; TOR_AUTH_LINE=''; SSH_KEY=''; SSH_HOST_KEY_ALIAS=''
+	. "$ENV"
+	[ -n "$TOR_AUTH_LINE" ] || die "TOR_AUTH_LINE missing in $ENV"
+	REAL="${TOR_AUTH_LINE%%:*}.onion"
+	ONION=${TOR_ONION:-$REAL}
+	KEY=${SSH_KEY:-$HOME/.ssh/id_ed25519}
+	ALIAS=${SSH_HOST_KEY_ALIAS:-$ONION}
+fi
 
 # the image (rebuilt when this directory's Dockerfile or entrypoint changed) and the container
 SUM=$(cat "$HERE/Dockerfile" "$HERE/entrypoint.sh" | shasum | cut -c1-12)
@@ -68,6 +75,7 @@ until docker exec $NAME grep -q 'Bootstrapped 100%' /var/lib/tor/notice.log 2>/d
 	i=$((i + 1)); [ $i -gt 60 ] && die "the tor client did not bootstrap (docker exec $NAME cat /var/lib/tor/notice.log)"
 	sleep 2
 done
+[ -z "$START" ] || exit 0
 
 # the SSH banner through the onion, at most 60 s a try
 probe() { docker exec $NAME sh -c "printf '' | socat -T 60 - SOCKS4A:127.0.0.1:$ONION:22,socksport=9050 2>/dev/null | head -c 8" | grep -q '^SSH-2.0'; }

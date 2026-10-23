@@ -17,11 +17,13 @@ after installing; the entry appears in the **Tunnel** section.
   router itself; the default list is 22 (SSH), 80 (the web interface or the site) and 443
   (the site over HTTPS, with the Xray server in front of it when it runs).
 - **Bridges.** The router's tor connects to the Tor network by itself; where direct
-  connections are blocked, it goes through bridges. **Built-in bridges** starts from the set
-  of snowflake and obfs4 bridges shipped with the package
-  (`/usr/share/tunnel-tor/bridges.txt`, Tor Browser's built-in list). With a
-  **Country for bridges** set, the router refreshes that list once a day and on **Update
-  bridges**: it asks `bridges.torproject.org` (the moat API, what Tor Browser's connection
+  connections are blocked, it goes through bridges. **Built-in bridges** starts from the
+  bridges shipped with the package (`/usr/share/tunnel-tor/bridges.txt`: the bridges
+  `bridges.torproject.org` handed out for the country ru when the package was built, then Tor
+  Browser's built-in snowflake and obfs4 bridges). With a **Country for bridges** set, the
+  router refreshes that list once a day, on **Update bridges** and, while the list shipped with
+  the package is in use, as soon as tor has a working circuit (again every 30 minutes until an
+  update succeeds): it asks `bridges.torproject.org` (the moat API, what Tor Browser's connection
   assist uses) for the bridges handed out in that country, through its own Tor connection
   (directly if tor is not connected), and merges them into the list, newest first, up to 12
   per transport. tor restarts with the new list only when the answer did not come through tor
@@ -117,7 +119,8 @@ configuration is applied again right away.
   the service runs with the built-in list and a country, a line in `/etc/crontabs/root`
   (`# tunnel-tor-bridges`, once a day at a time chosen at random) runs
   `/usr/libexec/tunnel-tor/bridges-update`. The update needs `curl` (a dependency).
-- With snowflake as the fallback and a list of snowflake and other lines, a line in
+- With snowflake as the fallback and a list of snowflake and other lines, and while the list
+  shipped with the package is in use with a country set (for the first update), a line in
   `/etc/crontabs/root` (`# tunnel-tor-watch`, every 2 minutes) runs
   `/usr/libexec/tunnel-tor/watch`; its last result is in `/tmp/tunnel-tor/watch.json`, and
   `/etc/tunnel-tor/snowflake.on` (the time it was written) exists while the snowflake lines are

@@ -337,11 +337,13 @@ let cache_after = enabled ? data_dir_of(readfile(CONF)) : STOCK_DATA;
 if (enabled || access(MANAGED) != true) move_cache(cache_before, cache_after);
 sync_tor(enabled, changed);
 tidy_cache(main, cache_after);
-// the watch script runs while snowflake is held back as the fallback and the list has both kinds
+// the watch script runs while snowflake is held back as the fallback and the list has both kinds, and
+// while the list shipped with the package is in use with a country for the updates (the first update)
 let wl = [];
 if (enabled && ((main.bridges ?? 'builtin') == 'builtin' || (main.bridges ?? 'builtin') == 'custom'))
 	wl = bridge_lines(main, []);
 let watch = enabled && (main.snowflake ?? 'fallback') == 'fallback'
 	&& length(filter(wl, is_snowflake)) > 0 && length(filter(wl, l => !is_snowflake(l))) > 0;
 if (!watch) unlink(FALLBACK);
-sync_cron(enabled && (main.bridges ?? 'builtin') == 'builtin' && match(lc(trim(main.bridge_country ?? '')), /^[a-z][a-z]$/) != null, watch);
+let update = enabled && (main.bridges ?? 'builtin') == 'builtin' && match(lc(trim(main.bridge_country ?? '')), /^[a-z][a-z]$/) != null;
+sync_cron(update, watch || (update && !length(trim(readfile(LIST) ?? ''))));
