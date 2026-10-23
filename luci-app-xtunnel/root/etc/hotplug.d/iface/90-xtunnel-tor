@@ -1,0 +1,15 @@
+#!/bin/sh
+# An interface of the firewall zone "wan" came up, went down or changed its addresses (a cable pulled
+# or plugged, a second uplink): when the route to the Internet changed, tor closes its connections
+# bound to the old address and connects again (watch reconnect; one at a time).
+case "$ACTION" in ifup|ifdown|ifupdate) ;; *) exit 0 ;; esac
+[ -e /etc/xtunnel-tor/torrc ] || exit 0              # tor runs with this package's file
+for z in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+	[ "$(uci -q get firewall.$z.name)" = wan ] || continue
+	for n in $(uci -q get firewall.$z.network); do
+		[ "$n" = "$INTERFACE" ] || continue
+		( sleep 3; flock /var/lock/xtunnel-tor-uplink /usr/libexec/xtunnel-tor/watch reconnect "uplink $INTERFACE: $ACTION" ) >/dev/null 2>&1 &
+		exit 0
+	done
+done
+exit 0

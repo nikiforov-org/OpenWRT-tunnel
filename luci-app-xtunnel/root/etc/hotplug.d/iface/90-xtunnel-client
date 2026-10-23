@@ -1,0 +1,15 @@
+#!/bin/sh
+# An interface of the firewall zone "wan" came up or went down (a second uplink, a cable pulled):
+# the way out and the provider's resolvers changed, so the client applies its settings again.
+case "$ACTION" in ifup|ifdown) ;; *) exit 0 ;; esac
+[ "$(uci -q get xtunnel-client.main.enabled)" = 1 ] || exit 0
+for z in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+	[ "$(uci -q get firewall.$z.name)" = wan ] || continue
+	for n in $(uci -q get firewall.$z.network); do
+		[ "$n" = "$INTERFACE" ] || continue
+		# netifd writes the resolvers of the interfaces still up around this event: settle first
+		( sleep 3; logger -t xtunnel-client "uplink $INTERFACE: $ACTION, applying the settings again"; /etc/init.d/xtunnel-client reload ) >/dev/null 2>&1 &
+		exit 0
+	done
+done
+exit 0

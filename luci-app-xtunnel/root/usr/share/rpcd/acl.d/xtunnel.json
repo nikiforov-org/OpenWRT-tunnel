@@ -1,0 +1,27 @@
+{
+	"xtunnel": {
+		"description": "XTunnel: dynamic DNS, certificates and the web site, the xray server with the Tor onion service, the tunnel clients of the LAN",
+		"read": {
+			"ubus": {
+				"xtunnel-ddns": [ "status", "move_confirm", "ddns_log", "cert_log", "site_rebuild_log" ],
+				"xtunnel-server": [ "status", "keypair", "pubkey", "links", "log", "config" ],
+				"xtunnel-client": [ "status", "log", "config" ],
+				"xtunnel-tor": [ "status", "keypair", "pubkey", "config", "log" ]
+			},
+			"uci": [ "xtunnel-ddns", "xtunnel-server", "xtunnel-client" ]
+		},
+		"write": {
+			"ubus": {
+				"xtunnel-ddns": [ "ddns_update", "cert_issue", "site_install", "site_delete", "site_rebuild", "set_port", "revert" ],
+				"xtunnel-server": [ "restart" ],
+				"xtunnel-client": [ "measure", "update_sources", "restart" ],
+				"xtunnel-tor": [ "restart", "update_bridges" ]
+			},
+			"uci": [ "xtunnel-ddns", "xtunnel-server", "xtunnel-client" ],
+			"cgi-io": [ "upload" ],
+			"file": {
+				"/tmp/xtunnel-ddns-upload.tar.gz": [ "write" ]
+			}
+		}
+	}
+}

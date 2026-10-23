@@ -300,7 +300,11 @@ return view.extend({
 			dom.content(qr, svg ? Object.assign(E(svg), { style: 'width:100%; height:auto' }) : span(COLOR.dim, _('QR code unavailable')));
 		};
 		ui.showModal(_('Client links') + ' » ' + r.name, [
-			E('p', _('One link per enabled transport, for the address %s. Import a link or scan its QR code in the client app.').format(r.host)),
+			E('p', [
+				r.host ? _('One link per enabled transport, for the address %s.').format(r.host) + ' ' : '',
+				r.onion ? _('The links through Tor go to the onion address %s of Tunnel → Tor; a client needs the key of a profile there too ("Key").').format(r.onion) + ' ' : '',
+				_('Import a link or scan its QR code in the client app.')
+			].join('')),
 			E('div', { 'style': 'margin-bottom:.5em' }, btns),
 			note,
 			ta,

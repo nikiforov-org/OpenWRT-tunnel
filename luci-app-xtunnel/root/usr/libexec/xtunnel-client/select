@@ -1,0 +1,50 @@
+#!/bin/sh
+# select [TAG]: makes TAG the active link of the running xray (balancer "active", through its API,
+# without a restart). Without an argument: the configured link by hand, else the last automatic
+# choice (also one made by measure after the last sync) while it is a link of the configuration in
+# effect, else the choice sync made (the first link). Only a link of the configuration in effect is
+# selected: xray accepts an override to any tag, also a removed one. Waits up to 30 s for the API
+# after a start. Prints nothing; logs a switch. The link in effect is written with the pid of that
+# xray to /tmp/xtunnel-client/active, where the status and the measurements read it.
+API=127.0.0.1:61085
+STATE=/tmp/xtunnel-client/state.json
+AUTO=/etc/xtunnel-client/auto.json
+ACTIVE=/tmp/xtunnel-client/active
+known() { [ -n "$1" ] && [ -n "$(jsonfilter -i $STATE -e "@.clients[@.tag='$1'].tag" 2>/dev/null)" ]; }
+TAG="$1"
+if [ -z "$TAG" ]; then
+	[ "$(uci -q get xtunnel-client.main.mode)" != manual ] && TAG="$(jsonfilter -i $AUTO -e '@.active' 2>/dev/null)"
+	known "$TAG" || TAG="$(jsonfilter -i $STATE -e '@.active' 2>/dev/null)"
+fi
+[ -n "$TAG" ] || exit 0
+if ! known "$TAG"; then
+	logger -t xtunnel-client "not selected: $TAG is not a link of the configuration in effect"
+	exit 1
+fi
+# the current choice: the override if one is set, else the balancer's own selection
+current() {
+	xray api bi --server=$API active 2>/dev/null | awk '
+		/Selecting Override:/ { sec = "o"; next }
+		/Selects:/            { sec = "s"; next }
+		/^[ \t]*[0-9]+[ \t]+/ { if (sec == "o" && o == "") o = $2; if (sec == "s" && s == "") s = $2 }
+		END { print (o != "") ? o : s }'
+}
+NOW=""
+for i in $(seq 1 30); do
+	NOW="$(current)"
+	[ -n "$NOW" ] && break
+	sleep 1
+done
+[ -n "$NOW" ] || exit 1
+PID="$(ubus call service list '{"name":"xtunnel-xray"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')"
+if [ "$NOW" = "$TAG" ]; then
+	echo "$TAG $PID" > $ACTIVE
+	exit 0
+fi
+if xray api bo --server=$API -b active "$TAG" >/dev/null 2>&1 && [ "$(current)" = "$TAG" ]; then
+	echo "$TAG $PID" > $ACTIVE
+	logger -t xtunnel-client "active link: $TAG"
+else
+	logger -t xtunnel-client "could not make $TAG the active link"
+	exit 1
+fi

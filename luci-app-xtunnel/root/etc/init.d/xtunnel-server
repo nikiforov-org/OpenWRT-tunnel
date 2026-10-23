@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+# Applies /etc/config/xtunnel-server: sync generates the xray configuration of the enabled
+# transports (TCP + XTLS-Vision, XHTTP, Hysteria2), then xray-service runs xray with it and with
+# the client's configuration while the client is started, as one process (the procd
+# service "xtunnel-xray"). LuCI's apply triggers a reload: procd restarts xray only when a file
+# changed; with the server switched off its file is removed.
+
+START=99
+USE_PROCD=1
+
+start_service() {
+	/usr/libexec/xtunnel-server/sync
+	/usr/libexec/xtunnel/xray-service start /etc/xtunnel-server/config.json
+}
+
+stop_service() {
+	/usr/libexec/xtunnel/xray-service stop /etc/xtunnel-server/config.json
+}
+
+service_triggers() {
+	procd_add_reload_trigger "xtunnel-server"
+}

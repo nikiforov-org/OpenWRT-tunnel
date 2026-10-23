@@ -1,0 +1,174 @@
+#!/usr/bin/env ucode
+// sources: fetches every enabled list source of /etc/config/xtunnel-client and stores it in the form
+// xray uses, under /etc/xtunnel-client/sources/:
+//   - a text list (one domain or IPv4 subnet per line; also the v2fly domain-list-community format
+//     with include:, domain:, full:, keyword:, regexp: and @attributes) -> <name>.domains, <name>.ips;
+//   - a .dat file (v2fly geoip/geosite format) -> <name>.dat, used as ext:<name>.dat:<tag> (the source
+//     needs the options "kind" = ip or domain and "tag").
+// Downloads go through the active client (the list host's tap in xray) while xray runs, else
+// directly. When a file changed, the client is reloaded and rebuilds its configuration.
+// Runs daily from cron, from the page, and once when the clients are switched on.
+
+'use strict';
+
+import { access, readfile, writefile, mkdir, unlink, rename, stat } from 'fs';
+import { cursor } from 'uci';
+import { RUN, shq, exec, lock, cidr } from 'xtunnel-client.common';
+
+const CFG   = 'xtunnel-client';
+const DIR   = '/etc/xtunnel-client/sources';
+const STATE = `${RUN}/state.json`;
+const LOCK  = `${RUN}/sources.lock`;
+const MAX_FILES = 300;                           // include: files per source
+
+function log(msg) { system(`logger -t ${CFG} ${shq(msg)}`); }
+
+function url_parts(url) {
+	let m = match(url ?? '', /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
+	if (!m) return null;
+	let port = m[4] ? int(m[4]) : (m[1] == 'https' ? 443 : 80);
+	return { host: m[2], port: port, hostport: `${m[2]}:${port}` };
+}
+
+// downloads url into dest: through the list host's tap when there is one, else directly
+function fetch(url, dest, taps) {
+	let u = url_parts(url), tries = [];
+	if (u && taps[u.hostport])
+		push(tries, `curl -sfL -m 90 --connect-to ${shq(u.hostport + ':127.0.0.1:' + taps[u.hostport])} -o ${shq(dest)} ${shq(url)}`);
+	push(tries, `curl -sfL -m 90 -o ${shq(dest)} ${shq(url)}`);
+	for (let t in tries) {
+		unlink(dest);
+		if (exec(t).code == 0 && (stat(dest)?.size ?? 0) > 0) return true;
+	}
+	unlink(dest);
+	return false;
+}
+
+// one line of a text list -> [ 'domain', entry ] | [ 'ip', cidr ] | [ 'include', name ] | null
+function parse_line(line) {
+	let tok = split(trim(line), /[ \t]+/)[0] ?? '';
+	if (!length(tok) || substr(tok, 0, 1) == '#' || substr(tok, 0, 1) == ';' || substr(tok, 0, 2) == '//') return null;
+	tok = lc(tok);
+	let m = match(tok, /^include:([a-z0-9._!-]+)$/);
+	if (m) return [ 'include', m[1] ];
+	if (match(tok, /^[0-9.\/]+$/)) {
+		let c = cidr(tok);
+		return c ? [ 'ip', c ] : null;
+	}
+	if (index(tok, ':') >= 0 && match(tok, /^[0-9a-f:]+(\/[0-9]+)?$/)) return null;     // IPv6: the LAN has none
+	m = match(tok, /^(domain|full|keyword|regexp):(.+)$/);
+	if (m) return [ 'domain', `${m[1]}:${m[2]}` ];
+	tok = replace(tok, /^(\*\.|\+\.|\.)/, '');
+	if (match(tok, /^[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*$/)) return [ 'domain', `domain:${tok}` ];
+	return null;
+}
+
+// a text list with its includes (resolved next to the base URL, as in v2fly domain-list-community)
+function parse_text(url, text, taps, acc) {
+	let base = replace(url, /\/[^\/]*$/, '');
+	for (let line in split(text, '\n')) {
+		let e = parse_line(line);
+		if (!e) continue;
+		if (e[0] == 'include') {
+			let inc = `${base}/${e[1]}`;
+			if ((inc in acc.visited) || acc.files >= MAX_FILES) continue;
+			acc.visited[inc] = true;
+			let tmp = `${DIR}/.inc.tmp`;
+			if (!fetch(inc, tmp, taps)) { acc.missing++; continue; }
+			acc.files++;
+			let t = readfile(tmp);
+			unlink(tmp);
+			parse_text(inc, t, taps, acc);
+		}
+		else if (!(e[1] in acc.seen)) {
+			acc.seen[e[1]] = true;
+			push(e[0] == 'ip' ? acc.ips : acc.domains, e[1]);
+		}
+	}
+}
+
+// true when the text in path differs from text (written atomically)
+function store(path, text) {
+	if (readfile(path) == text) return false;
+	writefile(`${path}.tmp`, text);
+	rename(`${path}.tmp`, path);
+	return true;
+}
+
+// a list, one entry per line; no file for an empty list. True when the file changed.
+function store_list(path, items) {
+	if (length(items)) return store(path, join('\n', items) + '\n');
+	if (access(path) != true) return false;
+	unlink(path);
+	return true;
+}
+
+// ---- main ----
+
+mkdir(RUN, 0o755);
+mkdir(DIR, 0o755);
+let held = lock(LOCK);
+if (!held) exit(0);
+let st = null;
+try { st = json(readfile(STATE) ?? ''); } catch (e) { st = null; }
+// the taps exist while the shared xray runs with the client's file (xray-service)
+let joined = index(split(readfile('/tmp/xtunnel-xray/parts') ?? '', '\n'), '/etc/xtunnel-client/config.json') >= 0;
+let taps = (type(st?.src_taps) == 'object' && joined && exec("pidof xray >/dev/null").code == 0) ? st.src_taps : {};
+let uci = cursor();
+uci.load(CFG);
+let changed = false, report = [];
+uci.foreach(CFG, 'source', function(sec) {
+	let name = trim(sec.name ?? ''), url = trim(sec.url ?? '');
+	if (!match(name, /^[A-Za-z0-9._-]{1,64}$/) || sec.enabled == '0') return;
+	let meta = { time: time(), url: url, format: '', kind: '', tag: '', file: '', domains: 0, ips: 0, files: 0, error: '' };
+	let tmp = `${DIR}/.${name}.tmp`;
+	if (!url_parts(url)) meta.error = 'the URL is not an http(s) address';
+	else if (!fetch(url, tmp, taps)) meta.error = 'download failed';
+	else {
+		let data = readfile(tmp);
+		if (index(data, '\0') >= 0 || match(url, /\.dat([?#].*)?$/)) {
+			// a v2fly .dat file: used as ext:<file>:<tag>
+			let kind = sec.kind ?? '', tag = lc(trim(sec.tag ?? ''));
+			if ((kind != 'ip' && kind != 'domain') || !match(tag, /^[a-z0-9!@._-]+$/))
+				meta.error = 'a .dat file needs the kind (ip or domain) and the tag of the list inside it';
+			else {
+				let test = `${DIR}/.${name}.test.json`, field = (kind == 'ip') ? 'ip' : 'domain';
+				writefile(test, sprintf('%J', { outbounds: [ { protocol: 'freedom', tag: 'd' } ],
+					routing: { rules: [ { type: 'field', [field]: [ `ext:.${name}.tmp:${tag}` ], outboundTag: 'd' } ] } }));
+				let r = exec(`XRAY_LOCATION_ASSET=${shq(DIR)} xray run -test -c ${shq(test)} 2>&1`);
+				unlink(test);
+				if (r.code != 0) meta.error = `xray cannot read the list "${tag}" from this file`;
+				else {
+					meta.format = 'dat'; meta.kind = kind; meta.tag = tag; meta.file = `${name}.dat`;
+					if (store(`${DIR}/${name}.dat`, data)) changed = true;
+					for (let f in [ `${name}.domains`, `${name}.ips` ]) if (access(`${DIR}/${f}`) == true) { unlink(`${DIR}/${f}`); changed = true; }
+				}
+			}
+		}
+		else {
+			let acc = { domains: [], ips: [], seen: {}, visited: { [url]: true }, files: 1, missing: 0 };
+			parse_text(url, data, taps, acc);
+			meta.files = acc.files;
+			if (!length(acc.domains) && !length(acc.ips)) meta.error = 'no domains or IPv4 subnets found in the source';
+			else {
+				if (acc.missing) meta.error = `${acc.missing} included files could not be downloaded`;
+				meta.format = 'text'; meta.domains = length(acc.domains); meta.ips = length(acc.ips);
+				if (store_list(`${DIR}/${name}.domains`, acc.domains)) changed = true;
+				if (store_list(`${DIR}/${name}.ips`, acc.ips)) changed = true;
+				if (access(`${DIR}/${name}.dat`) == true) { unlink(`${DIR}/${name}.dat`); changed = true; }
+			}
+		}
+	}
+	unlink(tmp);
+	// a failed download keeps the list fetched before
+	let old = null;
+	try { old = json(readfile(`${DIR}/${name}.meta`) ?? ''); } catch (e) { old = null; }
+	if (meta.error && !meta.format && type(old) == 'object' && old.format) {
+		meta = { ...old, error: meta.error, failed: time() };
+	}
+	writefile(`${DIR}/${name}.meta`, sprintf('%J\n', meta));
+	push(report, `${name}: ` + (meta.format ? `${meta.domains} domains, ${meta.ips} subnets` : '') + (meta.error ? ` (${meta.error})` : ''));
+});
+log('sources: ' + join('; ', report) + (changed ? ' (changed, routing reloaded)' : ''));
+held.close();
+if (changed) system('/etc/init.d/xtunnel-client reload >/dev/null 2>&1');

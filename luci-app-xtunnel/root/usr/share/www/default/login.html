@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Login page — a web site on the router</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar"><div class="container"><a class="brand" href="/">xtunnel-ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a href="/backend.html">Backend</a><a class="current" href="/login.html">Login page</a><a href="/archive.html">Archive and upload</a></nav></div></header>
+<div class="container page">
+<aside class="sidebar"><nav>
+<div class="group">Guide</div><ul>
+<li><a class="pagelink" href="/">Overview</a>
+</li>
+<li><a class="pagelink" href="/frontend.html">Frontend</a>
+</li>
+<li><a class="pagelink" href="/backend.html">Backend</a>
+</li>
+<li><a class="pagelink current" href="/login.html">Login page</a>
+<ul class="sections"><li><a href="#what-changes-when-the-site-has-a-login-page">What changes when the site has a login page</a></li><li><a href="#how-the-cgi-works">How the CGI works</a></li><li><a href="#the-package-s-modules">The package's modules</a></li><li><a href="#a-complete-cgi-bin-login">A complete cgi-bin/login</a></li><li><a href="#security">Security</a></li></ul>
+</li>
+<li><a class="pagelink" href="/archive.html">Archive and upload</a>
+</li>
+</ul>
+</nav></aside>
+<main class="content">
+<h1>A login page of your own</h1>
+<p>If the archive has an executable file <code>cgi-bin/login</code>, then, while this site is served, the router administration can only be entered through it. The standard LuCI form is shown nowhere, and the login page looks like part of the site, for example like a "members area".</p>
+
+<h2 id="what-changes-when-the-site-has-a-login-page">What changes when the site has a login page</h2>
+<div class="table-wrap"><table>
+<tr><th>Request</th><th>Answer of the router</th></tr>
+<tr><td><code>/cgi-bin/luci/…</code> without a session</td><td>the site's 404 page: the administration is entered only through the login page</td></tr>
+<tr><td><code>/cgi-bin/luci/…</code> with a valid session</td><td>LuCI as usual</td></tr>
+<tr><td><code>/cgi-bin/luci/admin/logout</code></td><td>the session is ended, the cookie cleared, 302 to <code>/</code>, the front page of the site</td></tr>
+<tr><td>JSON requests of LuCI's own pages without a session</td><td>403 with the header that makes LuCI show "session expired"; the same request from anywhere else gets the 404 page</td></tr>
+<tr><td><code>/ubus</code> (direct JSON-RPC)</td><td>404: switched off, otherwise passwords could be guessed past the login page. LuCI switches to its RPC path through <code>/cgi-bin/luci</code> by itself</td></tr>
+</table></div>
+<p>The LuCI files on the router are not modified: a link to the package's gate is placed into the site's document root, and the gate decides whether a request may go on. Switching the site off, or choosing a site without a login page, puts everything back.</p>
+
+<h2 id="how-the-cgi-works">How the CGI works</h2>
+<p>uhttpd runs <code>cgi-bin/login</code> for every request to <code>/cgi-bin/login</code> and passes the details in environment variables: <code>REQUEST_METHOD</code>, <code>CONTENT_LENGTH</code>, <code>QUERY_STRING</code>, <code>REMOTE_ADDR</code>, <code>HTTPS</code> (equal to <code>on</code> over HTTPS). The body of a POST is read from standard input. The answer is printed to standard output: header lines, an empty line, the body.</p>
+<pre><code>Status: 200 OK
+Content-Type: text/html; charset=utf-8
+Cache-Control: no-store
+
+&lt;!doctype html&gt;…</code></pre>
+<p>The script runs as root. ucode is the natural language for it: the package's modules are ucode too, and parsing a form and producing HTML is easier there than in shell.</p>
+
+<h2 id="the-package-s-modules">The package's modules</h2>
+<p>Two modules take care of everything that is not about the look of the page.</p>
+<h3><code>xtunnel-ddns.captcha</code>, the picture with the code</h3>
+<pre><code>import { create, verify } from 'xtunnel-ddns.captcha';
+
+let c = create({ language: 'en' });   // { id: '…32 hex digits…', png: '…base64 PNG…' } or null
+                                      // when too many pictures are waiting for an answer
+verify(c.id, typed_text);             // true when the right code was typed</code></pre>
+<ul>
+<li>Five characters: for <code>en</code> Latin capitals and digits, for <code>ru</code> Cyrillic capitals and digits; both alphabets leave out characters that look alike (O and 0, I and 1, and so on).</li>
+<li>Every character has its own colour, a random tilt and size; the picture is bent along a wave and crossed by lines. The PNG is assembled on the router without any image library, in a fraction of a second.</li>
+<li>The answer is kept on the router for three minutes and checked once: after <code>verify()</code>, successful or not, the picture is no longer valid. Case does not matter, and Latin/Cyrillic look-alikes (A and А, C and С…) are accepted for each other.</li>
+</ul>
+<h3><code>xtunnel-ddns.login</code>, signing in to LuCI</h3>
+<pre><code>import { login } from 'xtunnel-ddns.login';
+
+let r = login({ username: 'root', password: '…', client: env.REMOTE_ADDR, https: env.HTTPS == 'on' });
+// r = { cookie: 'sysauth_https=…; path=/cgi-bin/luci/; …' }  logged in: send it as Set-Cookie
+//   | { error: 'throttled', wait: 30 }                      this address has to wait
+//   | { error: 'denied' }                                   wrong user name or password</code></pre>
+<ul>
+<li>The session is created the way LuCI does it, so after the redirect to <code>/cgi-bin/luci/</code> the browser is in the ordinary administration.</li>
+<li>After three failures in a row from one address there is a pause of 30 seconds, doubling with every further failure up to 15 minutes. A successful login clears the record. All addresses together may fail at most 20 times per minute.</li>
+</ul>
+
+<h2 id="a-complete-cgi-bin-login">A complete <code>cgi-bin/login</code></h2>
+<p>A page with the user name, the password and the characters of the picture. The styling is yours: link the site's stylesheet and put your own markup into <code>show_form()</code>.</p>
+<pre><code>#!/usr/bin/ucode
+'use strict';
+// Login page of the site: a captcha, then the router credentials; a successful login opens LuCI.
+import { stdin } from 'fs';
+import { urldecode } from 'luci.http';
+import { create as new_captcha, verify as verify_captcha } from 'xtunnel-ddns.captcha';
+import { login } from 'xtunnel-ddns.login';
+
+const env = getenv();
+const LUCI = '/cgi-bin/luci/';
+
+// the fields of an application/x-www-form-urlencoded body
+function form_fields(text) {
+	let fields = {};
+	for (let pair in split(text ?? '', '&amp;')) {
+		let eq = index(pair, '=');
+		if (eq &gt; 0)
+			fields[urldecode(substr(pair, 0, eq), true)] = urldecode(substr(pair, eq + 1), true);
+	}
+	return fields;
+}
+
+function escape_html(text) {
+	return replace(replace(replace(replace(text ?? '', '&amp;', '&amp;amp;'), '&lt;', '&amp;lt;'), '&gt;', '&amp;gt;'), '"', '&amp;quot;');
+}
+
+function respond(status, headers, body) {
+	print(`Status: ${status}\r\n`);
+	for (let header in headers)
+		print(`${header}\r\n`);
+	print('Cache-Control: no-store\r\n\r\n', body);
+}
+
+// the form; `error` is shown above it, `username` is kept from the previous attempt
+function show_form(error, username) {
+	let captcha = new_captcha({ language: 'en' });
+	let picture = captcha
+		? `&lt;img src="data:image/png;base64,${captcha.png}" width="200" height="60" alt=""&gt;`
+		: '&lt;span&gt;try again in a minute&lt;/span&gt;';
+	respond('200 OK', [ 'Content-Type: text/html; charset=utf-8' ], `&lt;!doctype html&gt;
+&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;meta name="viewport" content="width=device-width, initial-scale=1"&gt;
+&lt;meta name="robots" content="noindex, nofollow"&gt;&lt;title&gt;Sign in&lt;/title&gt;&lt;link rel="stylesheet" href="/style.css"&gt;&lt;/head&gt;
+&lt;body&gt;&lt;form method="post" action="/cgi-bin/login" autocomplete="off"&gt;
+&lt;h1&gt;Sign in&lt;/h1&gt;
+${error ? `&lt;p class="error"&gt;${error}&lt;/p&gt;` : ''}
+&lt;label&gt;User name &lt;input name="username" value="${escape_html(username)}" autofocus&gt;&lt;/label&gt;
+&lt;label&gt;Password &lt;input name="password" type="password"&gt;&lt;/label&gt;
+&lt;label&gt;Characters of the picture ${picture} &lt;input name="code" autocomplete="off" autocapitalize="characters"&gt;&lt;/label&gt;
+&lt;input type="hidden" name="code_id" value="${captcha ? captcha.id : ''}"&gt;
+&lt;button type="submit"&gt;Sign in&lt;/button&gt;
+&lt;/form&gt;&lt;/body&gt;&lt;/html&gt;
+`);
+}
+
+if (env.REQUEST_METHOD == 'POST') {
+	let size = +env.CONTENT_LENGTH || 0;
+	let form = form_fields(size &gt; 0 ? stdin.read(size) : '');
+	if (!verify_captcha(form.code_id, form.code))
+		show_form('The characters do not match the picture.', form.username);
+	else {
+		let result = login({ username: form.username, password: form.password,
+		                     client: env.REMOTE_ADDR, https: env.HTTPS == 'on' });
+		if (result.cookie)
+			respond('302 Found', [ `Set-Cookie: ${result.cookie}`, `Location: ${LUCI}` ], '');
+		else if (result.error == 'throttled')
+			show_form(`Too many attempts. Wait ${result.wait} seconds.`, form.username);
+		else
+			show_form('Wrong user name or password.', form.username);
+	}
+}
+else
+	show_form('', '');</code></pre>
+
+<h2 id="security">Security</h2>
+<div class="note"><strong>Set a root password</strong> (System → Administration in LuCI). Without one, rpcd accepts any password, and neither the login page nor the captcha nor the delays can help.</div>
+<ul>
+<li>Open the site over HTTPS only: the password travels in the form, and over HTTPS the session cookie gets the <code>secure</code> flag. The package does not open port 80 from the Internet.</li>
+<li>Never print passwords or codes into the log or onto the page. The login module writes only the user name and the client address to the system log.</li>
+<li>The CGI runs as root, like everything in uhttpd. Do not pull code you do not trust into it.</li>
+<li>The login page is only the door to the administration. It cannot protect sections of the site itself: the site is static, and all its files are available to anyone.</li>
+<li>Keep the page anonymous: neutral field names, no mention of the software behind it in the markup, scripts or error texts. The package does its part: while a site with a login page is served, LuCI's static files are linked under a random name, directory listings are off, and a request to an administration address without a session gets the site's 404 page, exactly like any other missing address.</li>
+</ul>
+<nav class="pager"><a class="prev" href="/backend.html"><span>Previous</span>Backend</a><a class="next" href="/archive.html"><span>Next</span>Archive and upload</a></nav>
+<footer>xtunnel-ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+</main>
+<aside class="toc"><div class="title">On this page</div><ul><li><a href="#what-changes-when-the-site-has-a-login-page">What changes when the site has a login page</a></li><li><a href="#how-the-cgi-works">How the CGI works</a></li><li><a href="#the-package-s-modules">The package's modules</a></li><li><a href="#a-complete-cgi-bin-login">A complete cgi-bin/login</a></li><li><a href="#security">Security</a></li></ul></aside>
+</div>
+</body>
+</html>

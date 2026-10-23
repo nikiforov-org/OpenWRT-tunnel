@@ -6,16 +6,18 @@ SDK="openwrt/sdk:x86-64-${REL}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$REPO/dist"
 
-# Fresh bridges for luci-app-tunnel-tor (the router's tor uses them until its first bridge update): what
+# Fresh bridges for luci-app-xtunnel and luci-app-tunnel-tor (the router's tor uses them until its first bridge update): what
 # bridges-update asks on the router, the moat API of bridges.torproject.org for the country
 # BRIDGE_COUNTRY (default ru), through the tor client of utils/tor-client, else directly. The answer's
 # obfs4, meek_lite and snowflake lines first, then those of the package's bridges.txt, unique by
 # transport + address + fingerprint, at most 12 per transport. The list goes into the package being built
-# and into dist/tunnel-tor-bridges.txt; the file in the repository stays as it is. Without a usable
+# and into dist/tunnel-tor-bridges.txt; the files in the repository stay as they are. Without a usable
 # answer the build stops.
 BRIDGES="$REPO/dist/tunnel-tor-bridges.txt"
 rm -f "$BRIDGES"
-if [ -d "$REPO/luci-app-tunnel-tor" ]; then
+SHIPPED="$REPO/luci-app-xtunnel/root/usr/share/xtunnel-tor/bridges.txt"
+[ -f "$SHIPPED" ] || SHIPPED="$REPO/luci-app-tunnel-tor/root/usr/share/tunnel-tor/bridges.txt"
+if [ -f "$SHIPPED" ]; then
 	C="${BRIDGE_COUNTRY:-ru}"
 	API=https://bridges.torproject.org/moat/circumvention/settings
 	ANS=$(mktemp)
@@ -31,7 +33,7 @@ if [ -d "$REPO/luci-app-tunnel-tor" ]; then
 		echo "build.sh: bridges.torproject.org was reached neither through tor nor directly" >&2
 		exit 1
 	fi
-	python3 - "$ANS" "$REPO/luci-app-tunnel-tor/root/usr/share/tunnel-tor/bridges.txt" > "$BRIDGES" <<'PY' ||
+	python3 - "$ANS" "$SHIPPED" > "$BRIDGES" <<'PY' ||
 import json, re, sys
 try:
 	ans = json.load(open(sys.argv[1]))
@@ -66,7 +68,7 @@ print('\n'.join('Bridge ' + l for l in out))
 PY
 		{ rm -f "$ANS" "$BRIDGES"; exit 1; }
 	rm -f "$ANS"
-	echo "bridges for luci-app-tunnel-tor: from bridges.torproject.org ($VIA, $C), $(grep -c . "$BRIDGES") lines"
+	echo "bridges for the tor packages: from bridges.torproject.org ($VIA, $C), $(grep -c . "$BRIDGES") lines"
 fi
 
 docker run --rm \
@@ -79,14 +81,15 @@ docker run --rm \
 		# report 700 for everything): 644 for files, 755 for directories and scripts.
 		rm -rf /tmp/custom && mkdir -p /tmp/custom
 		PKGS=""
-		for d in /custom/luci-app-tunnel-*/; do
+		for d in /custom/luci-app-xtunnel/ /custom/luci-app-tunnel-*/; do
 			[ -f "${d}Makefile" ] || continue
 			cp -r "$d" /tmp/custom/
 			PKGS="$PKGS $(basename "$d")"
 		done
 		# the bridge list fetched above replaces the one of the source tree in the package
-		if [ -f /out/tunnel-tor-bridges.txt ] && [ -d /tmp/custom/luci-app-tunnel-tor ]; then
-			cp /out/tunnel-tor-bridges.txt /tmp/custom/luci-app-tunnel-tor/root/usr/share/tunnel-tor/bridges.txt
+		if [ -f /out/tunnel-tor-bridges.txt ]; then
+			[ -d /tmp/custom/luci-app-xtunnel ] && cp /out/tunnel-tor-bridges.txt /tmp/custom/luci-app-xtunnel/root/usr/share/xtunnel-tor/bridges.txt
+			[ -d /tmp/custom/luci-app-tunnel-tor ] && cp /out/tunnel-tor-bridges.txt /tmp/custom/luci-app-tunnel-tor/root/usr/share/tunnel-tor/bridges.txt
 		fi
 		find /tmp/custom -type d -exec chmod 755 {} +
 		find /tmp/custom -type f -exec chmod 644 {} +
@@ -98,7 +101,7 @@ docker run --rm \
 
 		cp feeds.conf.default feeds.conf
 		echo "src-link custom /tmp/custom" >> feeds.conf
-		[ -n "$PKGS" ] || { echo "no luci-app-tunnel-* packages found"; exit 1; }
+		[ -n "$PKGS" ] || { echo "no luci-app-xtunnel or luci-app-tunnel-* packages found"; exit 1; }
 
 		./scripts/feeds update luci custom
 		./scripts/feeds install $PKGS

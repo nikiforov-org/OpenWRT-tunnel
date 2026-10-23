@@ -1,0 +1,404 @@
+#!/usr/bin/env ucode
+// xtunnel-tor sync: the router's tor as the Tor settings of /etc/config/xtunnel-server (section "tor",
+// the Server page) and the links through Tor of /etc/config/xtunnel-client need it. tor runs while the
+// onion service is on or the client uses links through Tor; the connection settings (bridges, the
+// cache, the padding) apply to both.
+//   sync          apply (idempotent): this package's tor configuration file (bridges, the onion
+//                 service with the enabled server profiles that have a Tor key as its authorized
+//                 clients, the client keys of the onion services the client's links go to), its
+//                 inclusion through tor.conf.tail_include, the stock tor service, tor's cache
+//                 directory, the cron lines
+//   sync revert   undo everything the package configured (used when the package is removed)
+// The configuration file is replaced only after "tor --verify-config" accepts the result; any
+// error leaves the configuration in effect in place, with the reason in
+// /tmp/xtunnel-tor/error for the page. Only when nothing needs tor any more is it removed.
+
+'use strict';
+
+import { access, readfile, writefile, mkdir, unlink, chmod, rename, lsdir, open } from 'fs';
+import { cursor } from 'uci';
+import { shq, exec, valid_key, public_key, tor_instance } from 'xtunnel-tor.common';
+import { profile_links, in_use, onion_keys } from 'xtunnel-client.common';
+
+const CFG     = 'xtunnel-tor';                    // the log tag
+const SRV     = 'xtunnel-server';                 // the Tor settings (section "tor") and the server profiles
+const CLI     = 'xtunnel-client';                 // the client's links through Tor and their keys
+const DIR     = '/etc/xtunnel-tor';
+const CONF    = `${DIR}/torrc`;                   // appended to the stock torrc by the tor init script
+const NEW     = `${DIR}/torrc.new`;
+const HS      = '/etc/tor/xtunnel-tor';       // the onion service directory (owned by the tor user)
+const CLIENTS = `${HS}/authorized_clients`;
+const AUTH    = '/etc/tor/xtunnel-client';        // ClientOnionAuthDir: the keys of the onion services the client uses
+const RUN     = '/tmp/xtunnel-tor';
+const ERROR   = `${RUN}/error`;
+const MANAGED = `${DIR}/managed`;                  // exists while this package runs the stock service
+const TOR     = '/usr/sbin/tor';
+const SHIPPED = '/usr/share/xtunnel-tor/bridges.txt';      // the bridge list shipped with the package
+const LIST    = `${DIR}/bridges.txt`;                              // the list kept up to date by bridges-update
+const CRONTAB = '/etc/crontabs/root';
+const CRONTAG = '# xtunnel-tor-bridges';
+const WATCHTAG = '# xtunnel-tor-watch';
+const FALLBACK = `${DIR}/snowflake.on`;            // exists while the snowflake bridges are added as the fallback
+const STOCK_DATA = '/var/lib/tor';                  // the DataDirectory of the stock torrc (tmpfs)
+const FLASH_DATA = '/etc/tor/xtunnel-tor-data';      // tor's DataDirectory with the cache kept on the router's storage
+
+const mode = ARGV[0] ?? 'apply';
+
+function log(msg) {
+	system(`logger -t ${CFG} ${shq(msg)}`);
+}
+
+function flag(v, dflt) {
+	return (v == null || v == '') ? dflt : (v == '1');
+}
+
+function list(v) {
+	if (type(v) == 'array') return v;
+	return (v == null || v == '') ? [] : [ v ];
+}
+
+function set_error(msg) {
+	mkdir(RUN, 0o755);
+	writefile(ERROR, msg);
+	log(`not applied: ${msg}`);
+}
+
+// ---- the configuration file ----
+
+function valid_bridge(line) {
+	return match(line, /^(obfs4|snowflake|meek_lite|webtunnel) [^ ]+:[0-9]+ [0-9A-Fa-f]{40}( [^ ]+)*$/) != null
+	    || match(line, /^[^ ]+:[0-9]+ [0-9A-Fa-f]{40}$/) != null;
+}
+
+// the DataDirectory of a configuration: the stock one in tmpfs, or the one on the router's storage
+function data_dir(main) {
+	return flag(main.persistent_cache, false) ? FLASH_DATA : STOCK_DATA;
+}
+
+function data_dir_of(text) {
+	return (index(text ?? '', `\nDataDirectory ${FLASH_DATA}\n`) >= 0) ? FLASH_DATA : STOCK_DATA;
+}
+
+// the bridge lines of the configured source, without the "Bridge " prefix
+function bridge_lines(main, errors) {
+	let bridges = main.bridges ?? 'builtin', out = [];
+	if (bridges == 'builtin') {
+		let text = readfile(LIST);
+		if (text == null || !length(trim(text))) text = readfile(SHIPPED) ?? '';
+		if (!length(text)) push(errors, `the built-in bridge list ${SHIPPED} is missing`);
+		for (let l in split(rtrim(text, '\n'), '\n'))
+			if (index(l, 'Bridge ') == 0) push(out, trim(substr(l, 7)));
+	}
+	else if (bridges == 'custom') {
+		let own = list(main.bridge);
+		if (!length(own)) push(errors, 'no bridge lines are set');
+		for (let l in own) {
+			l = trim(replace(trim(l), /^Bridge +/, ''));
+			if (!valid_bridge(l)) push(errors, `bridge line not understood: "${substr(l, 0, 40)}"`);
+			push(out, l);
+		}
+	}
+	return out;
+}
+
+function is_snowflake(l) {
+	return index(l, 'snowflake ') == 0;
+}
+
+// whether the snowflake lines go into the configuration: always, never, or as the fallback while
+// the watch script found no other bridge working (the marker FALLBACK); a list of snowflake lines
+// only is used as it is
+function use_snowflake(main, lines) {
+	let mode = main.snowflake ?? 'fallback';
+	if (!length(filter(lines, l => !is_snowflake(l)))) return true;
+	if (mode == 'always') return true;
+	if (mode == 'never') return false;
+	return access(FALLBACK) == true;
+}
+
+function build(main, onion, ports, client_keys) {
+	let errors = [], lines = [ '# generated by xtunnel-tor from /etc/config/xtunnel-server (Tor) and /etc/config/xtunnel-client' ];
+	let bridges = main.bridges ?? 'builtin';
+	if (bridges == 'builtin' || bridges == 'custom') {
+		let all = bridge_lines(main, errors);
+		let snow = use_snowflake(main, all);
+		let chosen = filter(all, l => snow || !is_snowflake(l));
+		push(lines, 'UseBridges 1');
+		if (length(filter(chosen, is_snowflake))) push(lines, 'ClientTransportPlugin snowflake exec /usr/bin/snowflake-client');
+		push(lines, 'ClientTransportPlugin obfs4,meek_lite exec /usr/bin/obfs4proxy');
+		for (let l in chosen) push(lines, `Bridge ${l}`);
+	}
+	if (onion && !length(ports)) push(errors, 'no onion service port is set');
+	// the cache on the router's storage: the last DataDirectory wins over the stock one
+	if (flag(main.persistent_cache, false)) push(lines, `DataDirectory ${FLASH_DATA}`);
+	// less padding on the connections and circuits (tor's options for clients on metered links)
+	if (flag(main.reduced_padding, false)) push(lines, 'ReducedConnectionPadding 1', 'ReducedCircuitPadding 1');
+	// the control port the watch script asks: a free port on 127.0.0.1, written to a file, cookie auth
+	push(lines, 'ControlPort auto', `ControlPortWriteToFile ${data_dir(main)}/control.port`, 'CookieAuthentication 1');
+	if (length(errors)) return { errors: errors };
+	// the keys of the onion services the client's links through Tor go to
+	if (length(client_keys)) push(lines, `ClientOnionAuthDir ${AUTH}`);
+	if (onion) {
+		push(lines, `HiddenServiceDir ${HS}`, 'HiddenServiceVersion 3');
+		for (let p in ports)
+			push(lines, `HiddenServicePort ${p} 127.0.0.1:${p}`);
+	}
+	return { text: join('\n', lines) + '\n' };
+}
+
+// the configuration in effect without the onion service; returns true on a change
+function strip_onion() {
+	let text = readfile(CONF);
+	if (text == null || index(text, '\nHiddenServiceDir ') < 0) return false;
+	writefile(CONF, join('\n', filter(split(text, '\n'), l => index(l, 'HiddenService') != 0)));
+	system(`chown root:tor ${shq(CONF)} 2>/dev/null; chmod 640 ${shq(CONF)}`);
+	log('the onion service removed from the configuration in effect: no authorized client');
+	return true;
+}
+
+function prepare_dirs(main) {
+	mkdir(DIR, 0o755);
+	mkdir(HS, 0o700);
+	mkdir(CLIENTS, 0o700);
+	system(`chown -R tor:tor ${shq(HS)} 2>/dev/null; chmod 700 ${shq(HS)} ${shq(CLIENTS)}`);
+	if (flag(main.persistent_cache, false)) {
+		mkdir(FLASH_DATA, 0o700);
+		system(`chown -R tor:tor ${shq(FLASH_DATA)} 2>/dev/null; chmod 700 ${shq(FLASH_DATA)}`);
+	}
+}
+
+// before tor restarts with another DataDirectory, the cache goes along (cached-*, state), so that tor
+// does not download the directory again; tor replaces these files by renaming, a copy taken while it
+// runs is consistent
+function move_cache(from, to) {
+	if (from == to || access(`${from}/cached-microdesc-consensus`) != true || access(`${to}/cached-microdesc-consensus`) == true) return;
+	mkdir(to, 0o700);
+	system(`cp -a ${shq(from)}/cached-* ${shq(from)}/state ${shq(to)}/ 2>/dev/null; chown -R tor:tor ${shq(to)} 2>/dev/null; chmod 700 ${shq(to)}`);
+	log(`tor cache copied from ${from} to ${to}`);
+}
+
+// after the restart: the copy in tmpfs is freed while the configuration in effect uses the router's
+// storage; the one on the storage is removed when that option is off and tor does not use it (a
+// rejected change keeps it), and when the package is removed
+function tidy_cache(main, now) {
+	if (now == FLASH_DATA)
+		system(`rm -f ${STOCK_DATA}/cached-* ${STOCK_DATA}/state 2>/dev/null`);
+	if (now != FLASH_DATA && access(FLASH_DATA) == true && (mode == 'revert' || !flag(main.persistent_cache, false))) {
+		system(`rm -rf ${shq(FLASH_DATA)}`);
+		log('tor cache on the router\'s storage removed');
+	}
+}
+
+// the authorized_clients directory: one .auth file per enabled server profile with a Tor key (named
+// after its section); returns true on a change
+function sync_clients(profiles) {
+	let want = {};
+	for (let p in profiles)
+		want[`${p.sid}.auth`] = `descriptor:x25519:${p.public_key}\n`;
+	let changed = false;
+	for (let f in (lsdir(CLIENTS) ?? [])) {
+		if (!(f in want)) { unlink(`${CLIENTS}/${f}`); changed = true; }
+	}
+	for (let f, content in want) {
+		let path = `${CLIENTS}/${f}`;
+		if (readfile(path) != content) { writefile(path, content); chmod(path, 0o600); changed = true; }
+	}
+	if (changed) system(`chown -R tor:tor ${shq(HS)} 2>/dev/null`);
+	return changed;
+}
+
+// the client keys: one .auth_private file per client profile in AUTH (owned by tor's user, which reads
+// them after the start; tor reads them only when it starts); returns true on a change
+function sync_client_keys(files) {
+	let changed = false;
+	if (!length(files)) {
+		if (access(AUTH) == true) { system(`rm -rf ${shq(AUTH)}`); changed = true; }
+		return changed;
+	}
+	mkdir(AUTH, 0o700);
+	for (let f in (lsdir(AUTH) ?? []))
+		if (!(f in files)) { unlink(`${AUTH}/${f}`); changed = true; }
+	for (let f, line in files)
+		if (readfile(`${AUTH}/${f}`) != line) { writefile(`${AUTH}/${f}`, line); changed = true; }
+	system(`chown -R tor:tor ${shq(AUTH)} 2>/dev/null; chmod 700 ${shq(AUTH)}; chmod 600 ${shq(AUTH)}/* 2>/dev/null`);
+	return changed;
+}
+
+// 'same' when CONF already holds this configuration, 'written' after a successful check, false otherwise
+function write_config(text) {
+	if (readfile(CONF) == text) {
+		system(`chown root:tor ${shq(CONF)} 2>/dev/null; chmod 640 ${shq(CONF)}`);
+		return 'same';
+	}
+	if (access(TOR, 'x') != true) {
+		set_error('tor is not installed (/usr/sbin/tor is missing)');
+		return false;
+	}
+	writefile(NEW, text);
+	chmod(NEW, 0o600);
+	// verify the stock torrc with this file appended, the way the tor init script builds it
+	let test = `${RUN}/torrc.test`;
+	mkdir(RUN, 0o700);
+	writefile(test, (readfile('/etc/tor/torrc') ?? '') + '\n' + text);
+	let r = exec(`${TOR} --verify-config -f ${shq(test)} 2>&1`);
+	unlink(test);
+	if (r.code != 0) {
+		unlink(NEW);
+		let bad = filter(split(rtrim(r.out, '\n'), '\n'), l => index(l, '[warn]') >= 0 || index(l, '[err]') >= 0);
+		let last = bad[length(bad) - 1] ?? 'tor --verify-config failed';
+		set_error('tor rejected the configuration: ' + trim(replace(last, /^.*\[(warn|err)\] /, '')));
+		return false;
+	}
+	rename(NEW, CONF);
+	system(`chown root:tor ${shq(CONF)} 2>/dev/null; chmod 640 ${shq(CONF)}`);
+	log('configuration written');
+	return 'written';
+}
+
+// ---- the stock tor service ----
+
+// enabled: this package's file is included and tor runs; changed: tor has to restart to read it
+function sync_tor(enabled, changed) {
+	let uci = cursor();
+	if (!uci.load('tor')) {
+		if (enabled) set_error('the tor package is not installed (/etc/config/tor is missing)');
+		return;
+	}
+	let incl = list(uci.get('tor', 'conf', 'tail_include'));
+	let has = (index(incl, CONF) >= 0);
+	let uci_changed = false;
+	if (enabled && !has) { push(incl, CONF); uci_changed = true; }
+	if (!enabled && has) { incl = filter(incl, x => x != CONF); uci_changed = true; }
+	if (uci_changed) {
+		if (uci.get('tor', 'conf') != 'tor') uci.set('tor', 'conf', 'tor');
+		if (length(incl)) uci.set('tor', 'conf', 'tail_include', incl);
+		else uci.delete('tor', 'conf', 'tail_include');
+		uci.commit('tor');
+	}
+	let running = (tor_instance() != null);
+	if (enabled) {
+		if (access(MANAGED) != true && system('/etc/init.d/tor enabled >/dev/null 2>&1') != 0)
+			writefile(MANAGED, '');                 // the service was off: this package switches it on
+		system('/etc/init.d/tor enable >/dev/null 2>&1');
+		if (uci_changed || changed || !running) {
+			// always a restart: the stock reload (SIGHUP) makes tor re-read /etc/tor/torrc as the
+			// tor user, which cannot read it, and tor exits
+			system('/etc/init.d/tor restart >/dev/null 2>&1');
+			log('tor service restarted');
+		}
+	}
+	else if (has) {
+		if (access(MANAGED) == true) {
+			system('/etc/init.d/tor stop >/dev/null 2>&1; /etc/init.d/tor disable >/dev/null 2>&1');
+			unlink(MANAGED);
+			log('tor service stopped');
+		}
+		else if (running) {
+			system('/etc/init.d/tor restart >/dev/null 2>&1');  // the service belongs to someone else: only this package's part goes
+			log('tor service restarted without this package\'s configuration');
+		}
+	}
+}
+
+// ---- cron: the daily bridge update, the watch script ----
+
+// want: a line "M H * * * bridges-update" is kept (its time is chosen once); watch: the line of the
+// watch script every two minutes; otherwise the lines go. The file goes when no line is left.
+function sync_cron(want, watch) {
+	let lines = filter(split(readfile(CRONTAB) ?? '', '\n'), l => length(l));
+	let ours = filter(lines, l => index(l, CRONTAG) >= 0);
+	let theirs = filter(lines, l => index(l, WATCHTAG) >= 0);
+	if (want == (length(ours) > 0) && watch == (length(theirs) > 0)) return;
+	lines = filter(lines, l => index(l, CRONTAG) < 0 && index(l, WATCHTAG) < 0);
+	if (want) {
+		if (length(ours)) push(lines, ours[0]);
+		else {
+			let r = readfile('/dev/urandom', 2) ?? '';
+			let minute = length(r) > 1 ? ord(r, 0) % 60 : 23, hour = length(r) > 1 ? ord(r, 1) % 24 : 4;
+			push(lines, `${minute} ${hour} * * * /usr/libexec/xtunnel-tor/bridges-update >/dev/null 2>&1 ${CRONTAG}`);
+		}
+	}
+	if (watch) push(lines, `*/2 * * * * /usr/libexec/xtunnel-tor/watch >/dev/null 2>&1 ${WATCHTAG}`);
+	if (length(lines)) {
+		mkdir('/etc/crontabs', 0o755);
+		writefile(`${CRONTAB}.tst`, join('\n', lines) + '\n');
+		rename(`${CRONTAB}.tst`, CRONTAB);
+	}
+	else unlink(CRONTAB);
+	system('/etc/init.d/cron restart >/dev/null 2>&1');
+	log(`cron: bridge update ${want ? 'scheduled' : 'off'}, bridge watch ${watch ? 'every 2 minutes' : 'off'}`);
+}
+
+// ---- main ----
+
+// one run at a time (an apply of both configurations, watch, bridges-update)
+let sync_lock = open('/var/lock/xtunnel-tor-sync', 'we');
+sync_lock?.lock('x');
+let uci = cursor();
+uci.load(SRV);
+let main = uci.get_all(SRV, 'tor') ?? {};
+// the authorized clients of the onion service: the enabled server profiles with a Tor key
+let profiles = [];
+uci.foreach(SRV, 'profile', function(s) {
+	let key = trim(s.tor_key ?? '');
+	let pub = (flag(s.enabled, true) && valid_key(key)) ? public_key(key) : null;
+	if (pub) push(profiles, { sid: s['.name'], public_key: pub });
+});
+// the client: its links through Tor in use need tor, and the keys of their onion services go to it
+let cli = cursor(), client_keys = {}, client_tor = false;
+if (mode == 'apply' && cli.load(CLI) && cli.get(CLI, 'main', 'enabled') == '1') {
+	let links = profile_links(cli);
+	client_keys = onion_keys(cli, links);
+	client_tor = (length(filter(links, l => l.tor && in_use(l))) > 0);
+}
+unlink(ERROR);
+
+// tor lets every client in to an onion service without authorized clients: the service is published
+// only while an enabled server profile has a Tor key
+let onion = (mode == 'apply' && flag(main.enabled, false) && length(profiles) > 0);
+let enabled = onion || client_tor;                // tor runs with this package's file
+let cache_before = data_dir_of(readfile(CONF));
+if (enabled && access(TOR, 'x') != true) {
+	set_error('the tor package is not installed (/usr/sbin/tor is missing)');
+	enabled = false;
+}
+let changed = false;
+if (enabled) {
+	prepare_dirs(main);
+	let ports = filter(map(list(main.port), p => int(p)), p => p >= 1 && p <= 65535);
+	if (sync_client_keys(client_keys))
+		changed = true;
+	let b = build(main, onion, ports, client_keys);
+	if (b.errors)
+		set_error(join('; ', b.errors));
+	else if (write_config(b.text) == 'written')
+		changed = true;
+	// a configuration in effect that a rejected one left in place does not keep the service published
+	if (!onion && strip_onion())
+		changed = true;
+	if (sync_clients(onion ? profiles : []))
+		changed = true;
+	if (access(CONF) != true)
+		enabled = false;                          // nothing in effect yet: the service stays off, the error says why
+}
+else {
+	unlink(CONF);
+	unlink(NEW);
+	sync_client_keys({});
+}
+// the DataDirectory after this run: the configuration in effect, or the stock one without it (tor is
+// then stopped, or restarted without this package's file when the service was not switched on here)
+let cache_after = enabled ? data_dir_of(readfile(CONF)) : STOCK_DATA;
+if (enabled || access(MANAGED) != true) move_cache(cache_before, cache_after);
+sync_tor(enabled, changed);
+tidy_cache(main, cache_after);
+// the watch script runs while snowflake is held back as the fallback and the list has both kinds, and
+// while the list shipped with the package is in use with a country for the updates (the first update)
+let wl = [];
+if (enabled && ((main.bridges ?? 'builtin') == 'builtin' || (main.bridges ?? 'builtin') == 'custom'))
+	wl = bridge_lines(main, []);
+let watch = enabled && (main.snowflake ?? 'fallback') == 'fallback'
+	&& length(filter(wl, is_snowflake)) > 0 && length(filter(wl, l => !is_snowflake(l))) > 0;
+if (!watch) unlink(FALLBACK);
+let update = enabled && (main.bridges ?? 'builtin') == 'builtin' && match(lc(trim(main.bridge_country ?? '')), /^[a-z][a-z]$/) != null;
+sync_cron(update, watch || (update && !length(trim(readfile(LIST) ?? ''))));

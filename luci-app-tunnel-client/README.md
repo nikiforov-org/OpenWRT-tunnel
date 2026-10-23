@@ -10,6 +10,11 @@ another router shows them:
 | TCP + XTLS-Vision | `vless://` with `type=tcp` and `flow=xtls-rprx-vision` |
 | XHTTP | `vless://` with `type=xhttp` |
 | Hysteria2 | `hysteria2://` or `hy2://` |
+| TCP + XTLS-Vision through Tor | the same `vless://` link to the server's onion address |
+| XHTTP through Tor | the same `vless://` link to the server's onion address |
+
+The links through Tor reach a server that has no public address or open ports, through its
+onion service: see [Links through Tor](#links-through-tor).
 
 Links of the same kinds from any other Xray or Hysteria2 server (a VPS, another router) work
 too. Every link is a client; one of them is active, chosen by hand or automatically by the
@@ -75,14 +80,50 @@ after installing.
   for servers that do not have it, and its download is cut off after the test size.
 - **Links that are refused:** VLESS over other transports (WebSocket, gRPC and others), TCP
   header obfuscation, an unchecked TLS certificate (`allowInsecure=1`, or `insecure=1`
-  without `pinSHA256` for Hysteria2: xray has no switch for an unchecked certificate), and
-  Hysteria2 port ranges. The reason is shown next to the link.
+  without `pinSHA256` for Hysteria2: xray has no switch for an unchecked certificate),
+  Hysteria2 port ranges, an `.onion` address in a field that is not through Tor, and HTTP/3
+  (`alpn=h3`) through Tor. The reason is shown next to the link.
+
+## Links through Tor
+
+A server router that runs the onion service of
+[`luci-app-tunnel-tor`](../luci-app-tunnel-tor/README.md) is reachable through its onion
+address without a public address or open ports (behind a mobile operator's NAT, for
+example). Its Server page then gives *TCP + Vision through Tor* and *XHTTP through Tor* links
+next to the others, and its Tor page the line of **Key** of a profile: the onion service lets
+in only clients with a key.
+
+- A profile holds them next to the direct links: the fields **TCP + Vision through Tor
+  link** and **XHTTP through Tor link**, the **Onion service key** (the whole line of **Key**,
+  `<address>:descriptor:x25519:<key>`) and the box **Through Tor**, which decides whether
+  they are used; switched off, they are kept but left out.
+- The links through Tor are clients like the others: measured, checked every minute and
+  chosen by hand or automatically. When the direct links of a server stop answering (its
+  cable out, the server on a mobile uplink), the minute check makes the link through Tor
+  that answers first active, and the measurements then choose the faster of the links
+  through Tor; when the direct links answer again, the next measurement goes back to the
+  fastest. Measured between two test routers in Docker over the Tor network: 230-430 KB/s
+  through Tor against tens of MB/s directly, 1-7 s to the first byte.
+- xray dials them through the SOCKS port of this router's tor, `127.0.0.1:9050` (tor's
+  default), so tor has to run here: it does with the onion service of
+  `luci-app-tunnel-tor` on, or as the stock service `tor` (the package `tor` starts it when it
+  is installed). The page shows its state next to the active link.
+- The keys go to tor: `/etc/tor/tunnel-client/<profile>.auth_private` (owned by tor's user)
+  and `/etc/tunnel-client/torrc` with `ClientOnionAuthDir /etc/tor/tunnel-client`, included
+  through `tor.conf.tail_include` after `tor --verify-config` accepted the result. tor reads
+  the keys only when it starts, so a new, changed or removed key (also the client switched
+  on or off, or **Through Tor** switched) restarts tor; meanwhile the router's own onion
+  service is unreachable for some minutes.
+- Tor carries TCP only, so there is no Hysteria2 link through Tor. The names of the servers
+  of the links through Tor are resolved by tor, not at the provider.
 
 ## Step by step
 
 1. Install the package, log in to LuCI again, open **Tunnel → Client**.
 2. **Profiles → Add profile…**, give it the server's name and paste its links from the
-   server page (**Links** next to a profile there), **Save**. Repeat for every server.
+   server page (**Links** next to a profile there), **Save**. Repeat for every server. For a
+   server with an onion service also paste its links through Tor and the line of **Key** of
+   a profile of its Tor page, and tick **Through Tor**.
 3. Check the **Split tunnelling** section: the mode, your entries, the sources.
 4. Click **Turn the client on** in the overview (it saves and applies the page like **Save &
    Apply**; **Turn the client off** switches it off the same way). The overview shows the
@@ -126,6 +167,9 @@ Everything only on **Save & Apply**, nothing at install time. While the client i
   tunnel-client-…` lines); the file is removed when no other line is left.
 - `/etc/tunnel-client/sources/`: the fetched lists and their `.meta` (the files of a removed
   source go at the next apply); `/tmp/tunnel-client/`: measurements, history, state.
+- While links through Tor with a key are in use: `/etc/tunnel-client/torrc`, added to the
+  list `tail_include` of `/etc/config/tor`, and the keys in `/etc/tor/tunnel-client/`; tor
+  restarts when they change.
 
 The original values of everything changed are kept in `/etc/tunnel-client/backup.json` and
 restored when the client is switched off.
@@ -133,7 +177,8 @@ restored when the client is switched off.
 ## Removal
 
 `apk del luci-app-tunnel-client` puts everything back: xray stops, the firewall, routing,
-IPv6, dnsmasq and cron settings are restored, the generated files go, and the dependencies
+IPv6, dnsmasq and cron settings are restored, the client keys leave tor's configuration, the
+generated files go, and the dependencies
 installed with the package (xray-core, the nftables TPROXY and socket kernel modules, curl)
 are removed unless another package needs them. `/etc/config/tunnel-client` (with the
 profiles) and `/etc/tunnel-client/` (the fetched sources, the last automatic choice) stay.

@@ -18,8 +18,11 @@ var callConfig        = rpc.declare({ object: CFG, method: 'config', expect: {} 
 var callRestart       = rpc.declare({ object: CFG, method: 'restart', expect: {} });
 
 var COLOR = { ok: '#2a9d4a', warn: '#d08a00', bad: '#d33', dim: '#888' };
-var PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2' ];
-var TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2' };
+var DIRECT = [ 'vision', 'xhttp', 'hysteria2' ];
+var VIA_TOR = [ 'vision_tor', 'xhttp_tor' ];
+var PROTOCOLS = DIRECT.concat(VIA_TOR);
+var TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
+               vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor' };
 
 function span(color, text) {
 	return E('span', { 'style': color ? 'color:' + color : '' }, text);
@@ -48,6 +51,11 @@ function textModal(title, text, header) {
 	]);
 }
 
+/* a link that can be chosen: of an enabled profile, through Tor only with "Through Tor" on */
+function usable(l) {
+	return l.enabled && !l.error && (!l.tor || l.tor_on);
+}
+
 function linkLabel(l) {
 	return (l.profile_name || l.profile) + ': ' + (l.title || TITLES[l.protocol] || l.protocol);
 }
@@ -57,6 +65,8 @@ function linkState(l) {
 	if (!l) return span(COLOR.dim, _('not applied yet'));
 	if (l.error) return span(COLOR.bad, l.error);
 	if (!l.enabled) return span(COLOR.dim, _('profile off'));
+	if (l.tor && !l.tor_on) return span(COLOR.dim, _('"Through Tor" is off'));
+	if (l.tor_down) return span(COLOR.bad, _('the router\'s tor is not running'));
 	if (!l.ready) return span(COLOR.warn, _('xray is not running'));
 	return span(COLOR.ok, _('ready') + (l.active ? ', ' + _('active') : ''));
 }
@@ -115,6 +125,16 @@ return view.extend({
 		else if (st.auto && st.auto.time)
 			parts.push(' ', span(COLOR.dim, _('(automatic: %s, %s)').format(st.auto.reason || '', timeAgo(st.auto.time))));
 		return E('span', {}, parts);
+	},
+
+	overviewTor: function() {
+		var t = this.status.tor || {};
+		if (!t.used)
+			return span(COLOR.dim, _('not used (no links through Tor in effect)'));
+		if (!t.running)
+			return span(COLOR.bad, _('The router\'s tor is not running, so the links through Tor do not work: it runs with the onion service of Tunnel → Tor or as the stock service "tor".'));
+		return span(COLOR.ok, _('The links through Tor go through the router\'s tor (SOCKS %s)').format(t.socks) +
+			(t.keys ? '; ' + _('client keys of onion services: %d').format(t.keys) : ''));
 	},
 
 	overviewLists: function() {
@@ -184,7 +204,7 @@ return view.extend({
 				E('td', { 'class': 'td', 'title': hist }, m ? (m.ok ? speedText(m.speed) : span(COLOR.bad, m.error || _('failed'))) : '—'),
 				E('td', { 'class': 'td' }, (m && m.ok) ? Math.round(m.latency * 1000) + ' ms' : '—'),
 				E('td', { 'class': 'td' }, m ? timeAgo(m.time) : '—'),
-				E('td', { 'class': 'td' }, (st.mode == 'manual' && l.enabled && !l.error)
+				E('td', { 'class': 'td' }, (st.mode == 'manual' && usable(l))
 					? E('button', { 'class': 'btn cbi-button', 'click': function() { self.chooseLink(l.tag); } }, _('Choose'))
 					: '')
 			]));
@@ -199,6 +219,7 @@ return view.extend({
 			var el;
 			if ((el = document.getElementById('tcl-ov-service'))) dom.content(el, this.overviewService());
 			if ((el = document.getElementById('tcl-ov-active')))  dom.content(el, this.overviewActive());
+			if ((el = document.getElementById('tcl-ov-tor')))     dom.content(el, this.overviewTor());
 			if ((el = document.getElementById('tcl-ov-lists')))   dom.content(el, this.overviewLists());
 			if ((el = document.getElementById('tcl-ov-measure'))) dom.content(el, this.overviewMeasure());
 			if ((el = document.getElementById('tcl-ov-config')))  dom.content(el, this.overviewConfig());
@@ -296,7 +317,7 @@ return view.extend({
 		};
 
 		m = new form.Map(CFG, _('Client'),
-			_('The devices connected to this router reach the Internet through tunnel clients: a profile holds the links of one server (TCP + XTLS-Vision, XHTTP, Hysteria2, as the server page shows them), every link is a client, and one of them is active, by hand or by the measured speed. The traffic of the LAN is split by a list of domains and subnets; nothing of it bypasses the clients (kill switch) and IPv6 is switched off for the LAN while the client is on. Nothing changes on the router until you click "Save & Apply" or the button that turns the client on or off.'));
+			_('The devices connected to this router reach the Internet through tunnel clients: a profile holds the links of one server (TCP + XTLS-Vision, XHTTP, Hysteria2, and TCP + XTLS-Vision and XHTTP through Tor, as the server page shows them), every link is a client, and one of them is active, by hand or by the measured speed. The traffic of the LAN is split by a list of domains and subnets; nothing of it bypasses the clients (kill switch) and IPv6 is switched off for the LAN while the client is on. Nothing changes on the router until you click "Save & Apply" or the button that turns the client on or off.'));
 		this.map = m;
 
 		/* Overview */
@@ -308,6 +329,8 @@ return view.extend({
 		};
 		o = s.option(form.DummyValue, '_ov_active', _('Active link'));
 		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-active' }, self.overviewActive()); };
+		o = s.option(form.DummyValue, '_ov_tor', _('Tor'));
+		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-tor' }, self.overviewTor()); };
 		o = s.option(form.DummyValue, '_ov_measure', _('Measurement'));
 		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-measure' }, self.overviewMeasure()); };
 		o = s.option(form.DummyValue, '_ov_lists', _('Lists'));
@@ -342,7 +365,7 @@ return view.extend({
 
 		o = s.option(form.ListValue, 'active', _('Active link'), _('Strictly this one; if it fails the LAN waits for it.'));
 		if (!links.length) o.value('', _('(no links yet)'));
-		links.forEach(function(l) { if (l.enabled && !l.error) o.value(l.tag, linkLabel(l)); });
+		links.forEach(function(l) { if (usable(l)) o.value(l.tag, linkLabel(l)); });
 		o.depends('mode', 'manual');
 
 		o = s.option(form.Value, 'test_interval', _('Measure every, minutes'), _('In the automatic mode with two links or more: the test download through every link, and the fastest one becomes active. The active link also gets a small request every minute (a HEAD request to its test URL, or one byte from the server\'s site); when it does not answer, the other links get the same request and the one that answers first becomes active. By hand or with one link nothing is measured on its own ("Measure now" still works).'));
@@ -454,7 +477,7 @@ return view.extend({
 
 		/* Profiles */
 		s = m.section(form.GridSection, 'profile', _('Profiles'),
-			_('A profile holds the links of one server: up to three, one per transport. Paste them from the server page ("Links" next to a profile there).'));
+			_('A profile holds the links of one server: one per transport, and with "Through Tor" the links through the onion address of the server with the key of its onion service. Paste them from the server page ("Links" next to a profile there) and from its Tor page ("Key").'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.nodescriptions = true;
@@ -493,18 +516,44 @@ return view.extend({
 				return (v.indexOf('hysteria2://') == 0 || v.indexOf('hy2://') == 0) ? true : _('Expected a hysteria2:// link');
 			}
 		};
-		PROTOCOLS.forEach(function(p) {
-			o = s.option(form.Value, p, _('%s link').format(TITLES[p]), _('Empty: no link for this transport.'));
+		var linkField = function(p, description) {
+			o = s.option(form.Value, p, _('%s link').format(TITLES[p]), description);
 			o.modalonly = true;
 			o.rmempty = true;
 			o.placeholder = (p == 'hysteria2') ? 'hysteria2://…' : 'vless://…';
 			o.validate = function(section_id, value) {
 				var v = String(value || '').trim();
 				if (!v) return true;
-				if (!/^[a-z0-9]+:\/\/[^@\/?#]*@([^:\/?#]+|\[[0-9a-fA-F:.]+\]):\d+/.test(v)) return _('A link of the form scheme://…@host:port');
-				return linkCheck[p](v);
+				var m = /^[a-z0-9]+:\/\/[^@\/?#]*@([^:\/?#]+|\[[0-9a-fA-F:.]+\]):\d+/.exec(v);
+				if (!m) return _('A link of the form scheme://…@host:port');
+				if (/\.onion$/i.test(m[1])) {
+					if (DIRECT.indexOf(p) >= 0) return _('An .onion address is reached only through Tor: this link belongs in the field through Tor');
+					if (!/^[a-z2-7]{56}\.onion$/i.test(m[1])) return _('The link needs the 56-character onion address that the server page gives');
+				}
+				return linkCheck[p.replace('_tor', '')](v);
 			};
-		});
+		};
+		DIRECT.forEach(function(p) { linkField(p, _('Empty: no link for this transport.')); });
+
+		o = s.option(form.Flag, 'tor', _('Through Tor'),
+			_('The links through Tor go through this router\'s tor (its SOCKS port 127.0.0.1:9050) to the onion address of the server and take part in the choice like the other links. tor runs with the onion service of Tunnel → Tor or as the stock service "tor". Tor carries TCP only, so Hysteria2 has no link through Tor. Off: the links through Tor are kept but not used.'));
+		o.rmempty = false;
+		o.default = '0';
+		o.editable = true;
+
+		VIA_TOR.forEach(function(p) { linkField(p, _('The link through Tor from the server page: to its onion address. Empty: none.')); });
+
+		o = s.option(form.Value, 'tor_key', _('Onion service key'),
+			_('The line of "Key" of a profile on the Tor page of the server router (address:descriptor:x25519:key): its onion service lets in only clients with a key. A new or changed key restarts the tor of this router.'));
+		o.modalonly = true;
+		o.rmempty = true;
+		o.placeholder = '…:descriptor:x25519:…';
+		o.validate = function(section_id, value) {
+			var v = String(value || '').trim();
+			if (!v) return true;
+			if (/^[A-Za-z2-7]{56}(\.onion)?:descriptor:x25519:[A-Za-z2-7]{52}$/.test(v) || /^[A-Za-z2-7]{52}$/.test(v)) return true;
+			return _('The line of "Key": the 56 characters of the address, ":descriptor:x25519:" and the 52 characters of the key');
+		};
 
 		o = s.option(form.DummyValue, '_links', _('Links'));
 		o.modalonly = false;

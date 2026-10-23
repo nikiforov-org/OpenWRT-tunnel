@@ -1,0 +1,375 @@
+#!/usr/bin/env ucode
+// xtunnel-server sync: make the system match /etc/config/xtunnel-server.
+//   sync          write the xray configuration and the firewall rules (idempotent)
+//   sync revert   remove everything the package configured (used when the package is removed)
+// One xray process serves every enabled transport: VLESS + REALITY over TCP with XTLS-Vision,
+// VLESS + REALITY over XHTTP, and Hysteria2 over QUIC. The generated file is replaced only
+// after "xray run -test" accepts it; any error (incomplete settings, a missing certificate, a
+// configuration rejected by xray) leaves the configuration in effect in place, with the reason
+// in /tmp/xtunnel-server/error for the status page. Only switching the server off removes it.
+
+'use strict';
+
+import { access, popen, readfile, writefile, mkdir, unlink, chmod, rename, open } from 'fs';
+import { cursor } from 'uci';
+
+const CFG   = 'xtunnel-server';
+const DIR   = '/etc/xtunnel-server';
+const CONF  = `${DIR}/config.json`;
+const NEW   = `${DIR}/config.new.json`;      // xray takes the format from the extension
+const RUN   = '/tmp/xtunnel-server';
+const ERROR = `${RUN}/error`;
+const XRAY  = '/usr/bin/xray';
+const DDNS_INIT   = '/etc/init.d/xtunnel-ddns';   // the part that runs the router's own site (uhttpd)
+const DDNS_CERTS  = '/etc/ssl/xtunnel-ddns';
+const BEHIND_PORT = 4443;                        // where that site listens while this server holds its port
+const RULES = {
+	vision:    { section: 'xtunnel_server_vision',    proto: 'tcp', name: 'xtunnel-server: TCP + Vision from WAN' },
+	xhttp:     { section: 'xtunnel_server_xhttp',     proto: 'tcp', name: 'xtunnel-server: XHTTP from WAN' },
+	hysteria2: { section: 'xtunnel_server_hysteria2', proto: 'udp', name: 'xtunnel-server: Hysteria2 from WAN' }
+};
+const PRIVATE = [ '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+	'172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4', '::1/128', 'fc00::/7', 'fe80::/10' ];
+
+const mode = ARGV[0] ?? 'apply';
+
+function shq(s) {
+	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
+}
+
+function exec(command) {
+	let p = popen(command, 'r');
+	if (p == null)
+		return { code: -1, out: '' };
+	let out = p.read('all') ?? '';
+	return { code: p.close(), out: out };
+}
+
+function log(msg) {
+	system(`logger -t ${CFG} ${shq(msg)}`);
+}
+
+function list(v) {
+	if (type(v) == 'array') return v;
+	return (v == null || v == '') ? [] : [ v ];
+}
+
+function flag(v, dflt) {
+	return (v == null || v == '') ? dflt : (v == '1');
+}
+
+function port(v) {
+	let n = int(v);
+	return (n >= 1 && n <= 65535) ? n : 0;
+}
+
+function uset(uci, cfg, sec, opt, val) {
+	if (uci.get(cfg, sec, opt) == val) return false;
+	uci.set(cfg, sec, opt, val);
+	return true;
+}
+
+// ---- the Hysteria2 certificate: a domain of the Dynamic DNS page or files on the router ----
+
+function certificate(main, uci) {
+	if ((main.cert_source ?? 'ddns') == 'files') {
+		if (!main.cert_path || !main.key_path) return { error: 'the certificate and key paths are empty' };
+		if (!main.cert_name) return { error: 'the TLS server name of the certificate is empty' };
+		if (access(main.cert_path) != true || access(main.key_path) != true)
+			return { error: `the certificate or key file is missing (${main.cert_path}, ${main.key_path})` };
+		return { cert: main.cert_path, key: main.key_path, server_name: main.cert_name };
+	}
+	if (!main.cert_domain) return { error: 'no domain is selected for the Hysteria2 certificate' };
+	if (!uci.load('xtunnel-ddns')) return { error: 'the Dynamic DNS settings (/etc/config/xtunnel-ddns) are missing' };
+	let host = uci.get('xtunnel-ddns', main.cert_domain, 'hostname');
+	if (!host) return { error: 'the domain selected for the Hysteria2 certificate no longer exists on the Dynamic DNS page' };
+	let cert = `${DDNS_CERTS}/${host}/fullchain.pem`, key = `${DDNS_CERTS}/${host}/key.pem`;
+	if (access(cert) != true || access(key) != true)
+		return { error: `no certificate for ${host} yet: issue it on the Dynamic DNS page` };
+	return { cert: cert, key: key, server_name: host };
+}
+
+// what a plain HTTP/3 visitor without a profile password gets from the Hysteria2 transport
+function masquerade(v) {
+	v = trim(v ?? '');
+	if (!length(v)) return { value: null };
+	if (substr(v, 0, 1) == '{') {
+		let o = null;
+		try { o = json(v); } catch (e) { o = null; }
+		return (type(o) == 'object') ? { value: o } : { error: 'the masquerade is not a valid JSON object' };
+	}
+	let m = match(v, /^https?:\/\/(\[[0-9A-Fa-f:.]+\]|[^\/:?#]+)/);
+	if (m) {
+		let loopback = match(m[1], /^(127\.[0-9.]+|localhost|\[::1\])$/);
+		let o = { type: 'proxy', url: v, rewriteHost: true };
+		if (loopback) o.insecure = true;               // the router's own site has no certificate for 127.0.0.1
+		return { value: o };
+	}
+	if (substr(v, 0, 7) == 'file://') v = substr(v, 7);
+	if (match(v, /^\/[^ ]*$/)) return { value: { type: 'file', dir: v } };
+	return { error: 'the masquerade must be an http(s):// URL, a directory or a JSON object' };
+}
+
+// ---- the xray configuration from uci ----
+
+function build(main, profiles, uci) {
+	let errors = [];
+	let vision = flag(main.vision_enabled, false), xhttp = flag(main.xhttp_enabled, false), hy2 = flag(main.hysteria2_enabled, false);
+	let vport = port(main.vision_port), xport = port(main.xhttp_port), hport = port(main.hysteria2_port);
+	let reality = vision || xhttp;
+	let names = list(main.server_name), sids = list(main.short_id);
+	if (!vision && !xhttp && !hy2) push(errors, 'no transport is enabled');
+	if (reality) {
+		if (!main.private_key) push(errors, 'the private key is empty');
+		if (!main.target) push(errors, 'the target is empty');
+		if (!length(names)) push(errors, 'no server name is set');
+		if (!length(sids)) push(errors, 'no short ID is set');
+	}
+	if (vision && !vport) push(errors, 'the TCP + Vision port is invalid');
+	if (xhttp && !xport) push(errors, 'the XHTTP port is invalid');
+	if (vision && xhttp && vport == xport) push(errors, `TCP + Vision and XHTTP both use TCP port ${vport}`);
+	if (hy2 && !hport) push(errors, 'the Hysteria2 port is invalid');
+	let cert = null, masq = { value: null };
+	if (hy2) {
+		cert = certificate(main, uci);
+		if (cert.error) push(errors, cert.error);
+		masq = masquerade(main.hysteria2_masquerade);
+		if (masq.error) push(errors, masq.error);
+	}
+	let seen_name = {}, seen_uuid = {}, seen_pw = {};
+	for (let p in profiles) {
+		let who = p.name || p.sid;
+		if (p.name && seen_name[lc(p.name)]) push(errors, `the name "${p.name}" is used twice`);
+		seen_name[lc(p.name)] = true;
+		if (reality) {
+			if (!p.uuid) push(errors, `profile "${who}" has no UUID`);
+			else if (seen_uuid[lc(p.uuid)]) push(errors, `the UUID of profile "${who}" is used twice`);
+			seen_uuid[lc(p.uuid)] = true;
+		}
+		if (hy2) {
+			if (!p.password) push(errors, `profile "${who}" has no Hysteria2 password`);
+			else if (seen_pw[p.password]) push(errors, `the Hysteria2 password of profile "${who}" is used twice`);
+			seen_pw[p.password] = true;
+		}
+	}
+	if (length(errors))
+		return { errors: errors };
+
+	// "127.0.0.1:<port>" with the port of a TCP transport means the router's own site: while
+	// this server holds that port, the Dynamic DNS part serves the site on 127.0.0.1:BEHIND_PORT
+	let target = main.target, behind = false;
+	if (reality) {
+		let m = match(target, /^(127\.0\.0\.1|localhost):([0-9]+)$/);
+		if (m && ((vision && int(m[2]) == vport) || (xhttp && int(m[2]) == xport))) {
+			target = `127.0.0.1:${BEHIND_PORT}`;
+			behind = true;
+		}
+	}
+	let sniffing = { enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: true };
+	let vless_clients = function(with_flow) {
+		let out = [];
+		for (let p in profiles) {
+			let c = { id: p.uuid, email: p.name || p.sid };
+			if (with_flow) c.flow = 'xtls-rprx-vision';
+			push(out, c);
+		}
+		return out;
+	};
+	let realitySettings = reality ? { target: target, serverNames: names, privateKey: main.private_key, shortIds: sids } : null;
+	let inbounds = [];
+	if (vision)
+		push(inbounds, {
+			tag: 'vision', listen: '::', port: vport, protocol: 'vless',
+			settings: { clients: vless_clients(true), decryption: 'none' },
+			streamSettings: { network: 'tcp', security: 'reality', realitySettings: realitySettings },
+			sniffing: sniffing
+		});
+	if (xhttp)
+		push(inbounds, {
+			tag: 'xhttp', listen: '::', port: xport, protocol: 'vless',
+			settings: { clients: vless_clients(false), decryption: 'none' },
+			streamSettings: {
+				network: 'xhttp',
+				xhttpSettings: { path: main.xhttp_path || '/', mode: main.xhttp_mode || 'auto' },
+				security: 'reality', realitySettings: realitySettings
+			},
+			sniffing: sniffing
+		});
+	if (hy2) {
+		let hs = { version: 2 };
+		if (masq.value != null) hs.masquerade = masq.value;
+		let stream = {
+			network: 'hysteria', security: 'tls',
+			// xray reads the certificate files again every ocspStapling seconds: renewals need no restart
+			tlsSettings: { certificates: [ { certificateFile: cert.cert, keyFile: cert.key, ocspStapling: 3600 } ], alpn: [ 'h3' ] },
+			hysteriaSettings: hs
+		};
+		if (main.hysteria2_obfs)
+			stream.finalmask = { udp: [ { type: 'salamander', settings: { password: main.hysteria2_obfs } } ] };
+		push(inbounds, {
+			tag: 'hysteria2', listen: '::', port: hport, protocol: 'hysteria',
+			settings: { version: 2, clients: map(profiles, p => ({ auth: p.password, email: p.name || p.sid })) },
+			streamSettings: stream,
+			sniffing: sniffing
+		});
+	}
+	// the rules are bound to this server's inbounds: xray may run with the client's configuration too
+	let tags = map(inbounds, ib => ib.tag), rules = [];
+	if (!flag(main.local_access, true))
+		push(rules, { type: 'field', inboundTag: tags, ip: PRIVATE, outboundTag: 'block' });
+	push(rules, { type: 'field', inboundTag: tags, protocol: [ 'bittorrent' ], outboundTag: 'block' });
+	push(rules, { type: 'field', inboundTag: tags, outboundTag: 'direct' });
+	return {
+		config: {
+			log: { loglevel: 'warning', access: 'none' },
+			inbounds: inbounds,
+			outbounds: [ { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' } ],
+			routing: { domainStrategy: 'AsIs', rules: rules }
+		},
+		ports: { vision: vision ? vport : 0, xhttp: xhttp ? xport : 0, hysteria2: hy2 ? hport : 0 },
+		behind: behind
+	};
+}
+
+// ---- firewall: one rule per enabled transport ----
+
+function sync_firewall(ports) {
+	let uci = cursor();
+	uci.load('firewall');
+	let changed = false, opened = [];
+	for (let key, rule in RULES) {
+		let p = ports[key];
+		let exists = (uci.get('firewall', rule.section) == 'rule');
+		if (p) {
+			if (!exists) { uci.set('firewall', rule.section, 'rule'); changed = true; }
+			changed = uset(uci, 'firewall', rule.section, 'name', rule.name) || changed;
+			changed = uset(uci, 'firewall', rule.section, 'src', 'wan') || changed;
+			changed = uset(uci, 'firewall', rule.section, 'proto', rule.proto) || changed;
+			changed = uset(uci, 'firewall', rule.section, 'dest_port', `${p}`) || changed;
+			changed = uset(uci, 'firewall', rule.section, 'target', 'ACCEPT') || changed;
+			changed = uset(uci, 'firewall', rule.section, 'enabled', '1') || changed;
+			push(opened, `${p}/${rule.proto}`);
+		}
+		else if (exists) {
+			uci.delete('firewall', rule.section);
+			changed = true;
+		}
+	}
+	if (!changed) return;
+	uci.commit('firewall');
+	system('/etc/init.d/firewall reload >/dev/null 2>&1');
+	log(`firewall: ${length(opened) ? 'open from WAN ' + join(', ', opened) : 'rules removed'}`);
+}
+
+// ---- the configuration file ----
+
+function set_error(msg) {
+	mkdir(RUN, 0o755);
+	writefile(ERROR, msg);
+	log(`not applied: ${msg}`);
+}
+
+// true when a configuration file was removed
+function remove_config() {
+	unlink(NEW);
+	if (access(CONF) != true) return false;
+	unlink(CONF);
+	log('configuration removed, xray stops');
+	return true;
+}
+
+// 'same' when CONF already holds this configuration, 'written' after a successful test, false otherwise
+function write_config(config) {
+	mkdir(DIR, 0o700);
+	let text = sprintf('%.2J\n', config);
+	if (readfile(CONF) == text) {
+		chmod(CONF, 0o600);
+		return 'same';
+	}
+	if (access(XRAY, 'x') != true) {
+		set_error('xray-core is not installed (/usr/bin/xray is missing)');
+		return false;
+	}
+	writefile(NEW, text);
+	chmod(NEW, 0o600);
+	let r = exec(`${XRAY} run -test -format json -c ${shq(NEW)} 2>&1`);
+	if (r.code != 0) {
+		unlink(NEW);
+		let lines = split(rtrim(r.out, '\n'), '\n');
+		let reason = split(lines[length(lines) - 1] ?? '', ' > ');
+		set_error('xray rejected the configuration: ' + trim(reason[length(reason) - 1]));
+		return false;
+	}
+	rename(NEW, CONF);
+	log('configuration written');
+	return 'written';
+}
+
+// The site package decides from the TCP ports of the VLESS inbounds of the configuration file in
+// effect whether this server holds the port its web server would use; it moves uhttpd behind the
+// server or back. When those ports changed, the running xray is stopped first and started again
+// only after this script (xray-service from the init script, which waits for the lock this script
+// holds), so the port is free for whichever of the two has to take it.
+function vless_ports() {
+	let cfg;
+	try { cfg = json(readfile(CONF) ?? ''); } catch (e) { cfg = null; }
+	return join(' ', sort(map(filter(cfg?.inbounds ?? [], ib => ib.protocol == 'vless'), ib => `${ib.port}`)));
+}
+
+function hand_over(before) {
+	if (vless_ports() == before) return;
+	system(`ubus call service delete '{"name":"xtunnel-xray"}' >/dev/null 2>&1`);
+	if (access(DDNS_INIT, 'x') == true)
+		system(`${DDNS_INIT} reload >/dev/null 2>&1`);
+}
+
+// the transport ports of the configuration file in effect (kept when a new one is rejected)
+function ports_of_file() {
+	let ports = { vision: 0, xhttp: 0, hysteria2: 0 };
+	let cfg;
+	try { cfg = json(readfile(CONF) ?? ''); } catch (e) { return ports; }
+	for (let ib in (cfg?.inbounds ?? []))
+		if (ib.tag in ports) ports[ib.tag] = port(ib.port);
+	return ports;
+}
+
+// ---- main ----
+
+let uci = cursor();
+uci.load(CFG);
+let main = uci.get_all(CFG, 'main') ?? {};
+let profiles = [];
+uci.foreach(CFG, 'profile', function(s) {
+	if (flag(s.enabled, true))
+		push(profiles, { sid: s['.name'], name: trim(s.name ?? ''), uuid: trim(s.uuid ?? ''), password: trim(s.password ?? '') });
+});
+chmod(`/etc/config/${CFG}`, 0o600);
+unlink(ERROR);
+// the lock of xray-service: the joined process is not rebuilt while the file and the port change
+let lock = open('/var/lock/xtunnel-xray', 'we');
+lock?.lock('x');
+let vless_before = vless_ports();
+
+let ports = { vision: 0, xhttp: 0, hysteria2: 0 }, changed = false;
+if (mode == 'apply' && flag(main.enabled, false)) {
+	let b = build(main, profiles, uci);
+	if (b.errors) {
+		set_error(join('; ', b.errors));
+		ports = ports_of_file();
+	}
+	else {
+		let w = write_config(b.config);
+		if (w) {
+			ports = b.ports;
+			changed = (w == 'written');
+			if (changed && b.behind) log(`target ${main.target} is this router's site: served behind the server on 127.0.0.1:${BEHIND_PORT}`);
+		}
+		else
+			ports = ports_of_file();
+	}
+}
+else {
+	changed = remove_config();
+}
+hand_over(vless_before);
+sync_firewall(ports);

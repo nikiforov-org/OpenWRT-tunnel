@@ -1,7 +1,7 @@
 'use strict';
 // Shared helpers of luci-app-tunnel-client: the links of a profile (one per transport of the
-// server page: TCP + XTLS-Vision, XHTTP, Hysteria2) into xray outbounds, the running xray and its
-// active link, locks, IPv4 subnets.
+// server page: TCP + XTLS-Vision, XHTTP, Hysteria2, and the VLESS ones through Tor) into xray
+// outbounds, the running xray and its active link, the router's tor, locks, IPv4 subnets.
 //   import { PROTOCOLS, link_outbound } from 'tunnel-client.common';
 
 import { popen, readfile, open } from 'fs';
@@ -9,8 +9,11 @@ import { connect } from 'ubus';
 
 export const RUN = '/tmp/tunnel-client';
 export const ACTIVE = `${RUN}/active`;          // "TAG PID": the link select applied to that xray process
-export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2' ];
-export const TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2' };
+export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2', 'vision_tor', 'xhttp_tor' ];
+export const TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
+                        vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor' };
+// the links through Tor go to the SOCKS port of the router's tor (tor's default: the stock torrc sets none)
+export const TOR_SOCKS = { address: '127.0.0.1', port: 9050 };
 
 export function shq(s) {
 	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
@@ -57,6 +60,30 @@ export function active_link(inst, state) {
 	if (!inst) return '';
 	let f = split(trim(readfile(ACTIVE) ?? ''), ' ');
 	return (length(f[0]) && int(f[1]) == inst.pid) ? f[0] : `${state?.active ?? ''}`;
+};
+
+// whether the stock tor service runs (the links through Tor use its SOCKS port)
+export function tor_running() {
+	bus ??= connect();
+	for (let n, i in bus?.call('service', 'list', { name: 'tor' })?.tor?.instances ?? {})
+		if (i?.running == true) return true;
+	return false;
+};
+
+// the client authorization key of an onion service: the line of "Key" of a profile of
+// luci-app-tunnel-tor ("<56 characters>:descriptor:x25519:<52 characters>") or the key alone ->
+// { address (without ".onion", '' for the key alone), key } or null
+export function onion_key(s) {
+	s = trim(s ?? '');
+	let m = match(s, /^([A-Za-z2-7]{56})(\.onion)?:descriptor:x25519:([A-Za-z2-7]{52})$/);
+	if (m) return { address: lc(m[1]), key: uc(m[3]) };
+	m = match(s, /^([A-Za-z2-7]{52})$/);
+	return m ? { address: '', key: uc(m[1]) } : null;
+};
+
+// a name of the Tor network: an onion address or a name that a tor client maps to one
+export function is_onion(host) {
+	return match(lc(host ?? ''), /\.onion$/) != null;
 };
 
 // the interface the router's IPv4 default route goes through (the lowest metric of the interfaces
@@ -188,15 +215,25 @@ function hysteria2(p) {
 	return { outbound: { protocol: 'hysteria', settings: { version: 2, address: p.host, port: p.port }, streamSettings: stream } };
 }
 
-// the link of one transport of a profile -> { outbound (an xray outbound without tag), host, port } or { error }
+// the link of one transport of a profile -> { outbound (an xray outbound without tag), host, port, tor }
+// or { error }. A link through Tor is dialed through the SOCKS port of the router's tor (the outbound
+// "tor"): to an onion address, or to any other address from a Tor exit. Tor carries TCP streams only.
 export function link_outbound(protocol, link) {
 	let p = parse_link(link);
 	if (protocol == 'hysteria2') {
 		if (!p || (p.scheme != 'hysteria2' && p.scheme != 'hy2')) return { error: 'not a hysteria2:// link' };
+		if (is_onion(p.host)) return { error: 'an .onion address is reached only through Tor, which carries no UDP: Hysteria2 cannot use it' };
 		let o = hysteria2(p);
-		return o.error ? o : { outbound: o.outbound, host: p.host, port: p.port };
+		return o.error ? o : { outbound: o.outbound, host: p.host, port: p.port, tor: false };
 	}
+	let tor = (protocol in [ 'vision_tor', 'xhttp_tor' ]);
 	if (!p || p.scheme != 'vless') return { error: 'not a vless:// link' };
-	let o = vless(p, protocol);
-	return o.error ? o : { outbound: o.outbound, host: p.host, port: p.port };
+	if (!tor && is_onion(p.host)) return { error: 'an .onion address is reached only through Tor: this link belongs in the field through Tor' };
+	if (tor && is_onion(p.host) && !match(lc(p.host), /^[a-z2-7]{56}\.onion$/))
+		return { error: `${p.host} is not an onion address: the link needs the 56-character address the server page gives` };
+	if (tor && index(split(lc(p.query.alpn ?? ''), ','), 'h3') >= 0) return { error: 'HTTP/3 (alpn=h3) runs over UDP, which Tor does not carry' };
+	let o = vless(p, tor ? substr(protocol, 0, index(protocol, '_')) : protocol);
+	if (o.error) return o;
+	if (tor) o.outbound.streamSettings.sockopt = { dialerProxy: 'tor' };
+	return { outbound: o.outbound, host: p.host, port: p.port, tor: tor };
 };

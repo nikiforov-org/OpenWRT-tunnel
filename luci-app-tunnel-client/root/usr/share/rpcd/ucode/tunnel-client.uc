@@ -1,8 +1,8 @@
 'use strict';
 
-import { access, readfile, stat } from 'fs';
+import { access, readfile, stat, lsdir } from 'fs';
 import { cursor } from 'uci';
-import { RUN, exec, instance, active_link, locked, uplink } from 'tunnel-client.common';
+import { RUN, exec, instance, active_link, locked, uplink, tor_running, TOR_SOCKS } from 'tunnel-client.common';
 
 const CFG     = 'tunnel-client';
 const CONF    = '/etc/tunnel-client/config.json';
@@ -50,11 +50,16 @@ methods.status = {
 		let measure = read_json(MEASURE, {}), history = read_json(HISTORY, {});
 		let in_config = {};
 		for (let c in (state.clients ?? [])) in_config[c.tag] = true;
+		// the router's tor, while links through it are in the configuration
+		let tor_used = (length(filter(state.clients ?? [], c => c.tor)) > 0);
+		let tor = { used: tor_used, running: tor_used && tor_running(), socks: `${TOR_SOCKS.address}:${TOR_SOCKS.port}`,
+		            keys: length(filter(lsdir('/etc/tor/tunnel-client') ?? [], f => match(f, /\.auth_private$/))) };
 		// every link of the profiles as sync saw it, with what the router knows about it now
 		let links = [];
 		for (let l in (state.links ?? [])) {
 			push(links, { ...l,
-				ready: (running && l.enabled && !l.error && in_config[l.tag] == true),
+				ready: (running && l.enabled && !l.error && in_config[l.tag] == true && (!l.tor || tor.running)),
+				tor_down: (l.tor && in_config[l.tag] == true && !tor.running),
 				active: (l.tag == now),
 				measure: measure.clients?.[l.tag] ?? null,
 				history: history[l.tag] ?? [] });
@@ -76,6 +81,7 @@ methods.status = {
 			links: links,
 			measure: { time: measure.time ?? 0, decision: measure.decision ?? '', bytes: measure.bytes ?? 0, health: measure.health ?? null },
 			uplink: uplink(),
+			tor: tor,
 			measuring: locked(`${RUN}/measure.lock`),
 			updating: locked(`${RUN}/sources.lock`),
 			error: trim(readfile(ERROR) ?? '') || trim(readfile('/tmp/tunnel-xray/error') ?? ''),

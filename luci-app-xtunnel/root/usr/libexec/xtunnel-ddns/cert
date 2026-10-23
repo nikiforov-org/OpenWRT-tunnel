@@ -1,0 +1,173 @@
+#!/usr/bin/env ucode
+// xtunnel-ddns cert: Let's Encrypt certificates through uacme (DNS-01 with the dns01 hook, an
+// account without e-mail).
+//   cert issue SECTION       start "run" in the background, return at once
+//   cert run SECTION [renew] issue a certificate, or renew it when it is due; installs it to
+//                            /etc/ssl/xtunnel-ddns/HOST/{fullchain,key}.pem (a test certificate does
+//                            not replace a trusted one there: it goes to HOST/staging/ instead)
+//   cert renew-all           "run … renew" for every enabled domain with a certificate (cron)
+// uacme keeps its account and its copy of each certificate in /etc/xtunnel-ddns/acme (production)
+// and acme-staging; a certificate installed before (by an earlier version, or restored from a
+// backup) is taken into that directory first, so that uacme renews it only when it is due.
+// State: /tmp/xtunnel-ddns/cert-SECTION.state ("starting EPOCH" | "running EPOCH PID host=HOST" |
+// "ok EPOCH host=HOST" | "failed EPOCH host=HOST"), log: cert-SECTION.log (renewals: renew.log).
+
+'use strict';
+
+import { readfile, writefile, mkdir, unlink, access, readlink, rename, chmod, stat, popen } from 'fs';
+import { cursor } from 'uci';
+import { info } from 'xtunnel.x509';
+import { grade, in_effect } from 'xtunnel-ddns.sitecert';
+
+const CFG   = 'xtunnel-ddns';
+const RUN   = '/tmp/xtunnel-ddns';
+const CERTS = '/etc/ssl/xtunnel-ddns';
+const ACME  = '/etc/xtunnel-ddns';
+const SELF  = '/usr/libexec/xtunnel-ddns/cert';
+const HOOK  = '/usr/libexec/xtunnel-ddns/dns01';
+const SYNC  = '/usr/libexec/xtunnel-ddns/sync';
+
+function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
+function valid_sid(s) { return type(s) == 'string' && match(s, /^[A-Za-z0-9_]{1,64}$/) != null; }
+
+function copy(from, to, mode) {
+	let data = readfile(from);
+	if (data == null) return false;
+	writefile(`${to}.new`, data);
+	chmod(`${to}.new`, mode);
+	return rename(`${to}.new`, to);
+}
+
+let cmd = ARGV[0], sid = ARGV[1] ?? '', renew = (ARGV[2] == 'renew');
+mkdir(RUN, 0o755);
+
+if (cmd == 'issue') {
+	if (!valid_sid(sid)) exit(1);
+	writefile(`${RUN}/cert-${sid}.state`, `starting ${time()}\n`);
+	system(`setsid flock -n ${RUN}/cert-${sid}.lock ${SELF} run ${sid} >/dev/null 2>&1 </dev/null &`);
+	exit(0);
+}
+
+if (cmd == 'renew-all') {
+	let uci = cursor();
+	uci.load(CFG);
+	uci.foreach(CFG, 'domain', function(s) {
+		let host = lc(s.hostname ?? '');
+		if (s.enabled != '1' || !host || !valid_sid(s['.name'])) return;
+		let dir = (s.staging == '1') ? `${ACME}/acme-staging` : `${ACME}/acme`;
+		if (access(`${CERTS}/${host}/fullchain.pem`) || access(`${dir}/${host}/cert.pem`))
+			system(`flock -n ${RUN}/cert-${s['.name']}.lock ${SELF} run ${s['.name']} renew`);
+	});
+	exit(0);
+}
+
+if (cmd != 'run' || !valid_sid(sid)) exit(1);
+
+let uci = cursor();
+uci.load(CFG);
+let s = uci.get_all(CFG, sid) ?? {};
+let host = lc(s.hostname ?? ''), staging = (s.staging == '1');
+let dir = staging ? `${ACME}/acme-staging` : `${ACME}/acme`;
+let logfile = renew ? `${RUN}/renew.log` : `${RUN}/cert-${sid}.log`;
+let state = `${RUN}/cert-${sid}.state`;
+if (!renew) writefile(logfile, '');
+let log = function(msg) {
+	let f = popen(`date "+%Y-%m-%d %H:%M:%S"`, 'r'), t = trim(f?.read('all') ?? ''); f?.close();
+	writefile(logfile, (readfile(logfile) ?? '') + `== ${t} ${msg}\n`);
+};
+let set_state = (word) => writefile(state, `${word} ${time()}${word == 'running' ? ' ' + readlink('/proc/self') : ''} host=${host}\n`);
+let fail = function(msg) {
+	log(msg);
+	set_state('failed');
+	system(`logger -t xtunnel-ddns ${shq(`certificate for ${host}: ${msg}`)}`);
+	exit(1);
+};
+// uacme's output goes to the log as well
+let uacme = function(args) {
+	let p = popen(`TDD_SECTION=${shq(sid)} uacme -c ${shq(dir)}${staging ? ' -s' : ''} -y ${args} >> ${shq(logfile)} 2>&1`, 'r');
+	p?.read('all');
+	return p ? p.close() : -1;
+};
+
+if (!renew) set_state('running');
+if (!host) fail('No hostname configured.');
+if (!s.provider) fail('No DNS provider configured.');
+
+mkdir(ACME, 0o755);
+mkdir(dir, 0o700);
+if (!access(`${dir}/private/key.pem`)) {
+	log(`creating the ACME account (${staging ? 'staging' : 'production'} server, no e-mail)`);
+	if (uacme('-v new') != 0) fail('The ACME account could not be created.');
+}
+
+// a certificate installed before: uacme's copy, so that it is renewed only when due
+let installed = `${CERTS}/${host}/fullchain.pem`, ikey = `${CERTS}/${host}/key.pem`;
+if (!access(`${dir}/${host}/cert.pem`) && access(installed) && access(ikey)) {
+	let c = info(readfile(installed));
+	let from_staging = (index(c?.issuer_cn ?? '', 'STAGING') >= 0);
+	if (c && from_staging == staging && lc(c.subject_cn ?? '') == host) {
+		mkdir(`${dir}/${host}`, 0o755);
+		mkdir(`${dir}/private`, 0o700);
+		mkdir(`${dir}/private/${host}`, 0o700);
+		copy(installed, `${dir}/${host}/cert.pem`, 0o644);
+		copy(ikey, `${dir}/private/${host}/key.pem`, 0o600);
+		log(`taken over the installed certificate (valid until ${trim(popen(`date -u -d @${c.not_after}`, 'r').read('all'))})`);
+	}
+}
+
+let rc = -1;
+for (let attempt = 1; attempt <= 3; attempt++) {
+	log(`${renew ? 'renewing (when due)' : 'issuing'} the certificate for ${host} (${staging ? 'staging' : 'production'} server, provider ${s.provider}, attempt ${attempt})`);
+	rc = uacme(`-v -t EC -h ${HOOK} issue ${shq(host)}`);
+	if (rc == 0 || rc == 1) break;
+	// Let's Encrypt keeps a negative DNS answer for a few minutes; after an NXDOMAIN failure
+	// another try makes sense only once that has expired
+	let tail = slice(split(readfile(logfile) ?? '', '\n'), -40);
+	if (attempt < 3 && index(join('\n', tail), 'NXDOMAIN looking up TXT') >= 0) {
+		log('Let\'s Encrypt did not see the record yet (negative DNS cache); trying again in 6 minutes');
+		system('sleep 360');
+		continue;
+	}
+	break;
+}
+let apart = (staging && grade(host).grade == 2);
+if (rc == 1 && access(apart ? `${CERTS}/${host}/staging/fullchain.pem` : installed)) {
+	log('the certificate is still valid; nothing to renew');
+	if (!renew) set_state('ok');
+	exit(0);
+}
+if (rc == 1) log('the certificate is still valid; installing uacme\'s copy, the installed one is missing');
+else if (rc != 0) fail(`uacme failed with exit code ${rc}.`);
+
+mkdir(CERTS, 0o700);
+mkdir(`${CERTS}/${host}`, 0o700);
+if (apart) {
+	// a test certificate does not replace the trusted one of the name: the web server and the
+	// server package go on using that
+	mkdir(`${CERTS}/${host}/staging`, 0o700);
+	if (!copy(`${dir}/${host}/cert.pem`, `${CERTS}/${host}/staging/fullchain.pem`, 0o644) ||
+	    !copy(`${dir}/private/${host}/key.pem`, `${CERTS}/${host}/staging/key.pem`, 0o600))
+		fail('The certificate could not be installed.');
+	log(`test certificate installed to ${CERTS}/${host}/staging/; the trusted certificate of ${host} stays in use`);
+	set_state('ok');
+	system(`logger -t xtunnel-ddns ${shq(`test certificate for ${host} issued (kept apart from the trusted one)`)}`);
+	exit(0);
+}
+if (!copy(`${dir}/${host}/cert.pem`, installed, 0o644) || !copy(`${dir}/private/${host}/key.pem`, ikey, 0o600))
+	fail('The certificate could not be installed.');
+if (!staging) system(`rm -rf ${shq(`${CERTS}/${host}/staging`)}`);
+log(`certificate installed to ${CERTS}/${host}/`);
+set_state('ok');
+system(`logger -t xtunnel-ddns ${shq(`certificate for ${host} issued`)}`);
+// the web server re-reads it when it is the certificate in effect; sync starts the move of the
+// site when the site waits for this one
+if (in_effect() == host) system('/etc/init.d/uhttpd reload >/dev/null 2>&1');
+system(`${SYNC} >/dev/null 2>&1`);
+// the Xray server's Hysteria2 transport can take its certificate from this domain: its sync
+// applies the certificate files of the new name (the same files again change nothing)
+let srv = cursor();
+if (access('/etc/init.d/xtunnel-server', 'x') && srv.load('xtunnel-server') &&
+    srv.get('xtunnel-server', 'main', 'enabled') == '1' && srv.get('xtunnel-server', 'main', 'hysteria2_enabled') == '1' &&
+    (srv.get('xtunnel-server', 'main', 'cert_source') ?? 'ddns') == 'ddns' && srv.get('xtunnel-server', 'main', 'cert_domain') == sid)
+	system('/etc/init.d/xtunnel-server reload >/dev/null 2>&1');
+exit(0);

@@ -5,11 +5,12 @@
 # on free ports unless given with -p, so that it can be opened in a browser here.
 #   stage create NAME [wan|lan] [-p HOST:PORT[/udp] ...]   a fresh router; the Docker network on eth0
 #                                                          as the wan (default) or the lan interface
-#   stage install NAME [PACKAGE ...]                       luci-app-tunnel-PACKAGE from dist/ (all without PACKAGE)
+#   stage install NAME [PACKAGE ...]                       luci-app-xtunnel from dist/ (PACKAGE xtunnel, the
+#                                                          default), or luci-app-tunnel-PACKAGE
 #   stage up PROFILE [NAME]                                a router as in profiles/PROFILE.sh
 #   stage url NAME                                         the addresses of its web interface here
 #   stage browser NAME                                     a Chrome window for it: the domains of its
-#                                                          luci-app-tunnel-ddns resolve to 127.0.0.1
+#                                                          luci-app-xtunnel resolve to 127.0.0.1
 #                                                          and their certificates are accepted
 #   stage sh NAME [COMMAND]                                a shell or a command on it
 #   stage ip NAME                                          its address on the Docker network
@@ -89,11 +90,12 @@ create() {
 
 install() {
 	n=$(name "$1"); shift
-	[ $# -gt 0 ] || set -- $(cd "$ROOT/dist" && ls luci-app-tunnel-*.apk | sed 's/^luci-app-tunnel-//; s/-[0-9].*$//')
+	[ $# -gt 0 ] || set -- xtunnel
 	files=""
 	for p in "$@"; do
-		f=$(ls "$ROOT"/dist/luci-app-tunnel-"$p"-*.apk 2>/dev/null | head -1)
-		[ -n "$f" ] || die "no dist/luci-app-tunnel-$p-*.apk (run utils/build.sh)"
+		case "$p" in xtunnel) a=luci-app-xtunnel ;; *) a=luci-app-tunnel-$p ;; esac
+		f=$(ls "$ROOT"/dist/"$a"-[0-9]*.apk 2>/dev/null | head -1)
+		[ -n "$f" ] || die "no dist/$a-*.apk (run utils/build.sh)"
 		docker exec -i "$n" sh -c "cat > /root/$(basename "$f")" < "$f"
 		files="$files /root/$(basename "$f")"
 	done
@@ -101,21 +103,21 @@ install() {
 }
 
 # a Chrome window of its own (profile in /tmp) for the stage: the hostnames of its
-# luci-app-tunnel-ddns domains resolve to 127.0.0.1 (its HTTPS has to be published on port 443 for
+# luci-app-xtunnel domains resolve to 127.0.0.1 (its HTTPS has to be published on port 443 for
 # them), and the certificates with the keys installed on it are accepted (Let's Encrypt's test
 # certificates are not trusted by browsers; the flag accepts such a certificate for any of these
 # names, so a name mismatch among them is not shown)
 browser() {
 	n=$(name "$1")
-	hosts=$(docker exec "$n" sh -c "uci -q show tunnel-ddns | sed -n \"s/^tunnel-ddns\\.[^.]*\\.hostname='\\(.*\\)'\$/\\1/p\"")
-	keys=$(docker exec "$n" sh -c 'ls /etc/ssl/tunnel-ddns/*/key.pem /etc/ssl/tunnel-ddns/*/staging/key.pem /etc/tunnel-ddns/acme*/private/*/key.pem 2>/dev/null')
+	hosts=$(docker exec "$n" sh -c "uci -q show xtunnel-ddns | sed -n \"s/^xtunnel-ddns\\.[^.]*\\.hostname='\\(.*\\)'\$/\\1/p\"")
+	keys=$(docker exec "$n" sh -c 'ls /etc/ssl/xtunnel-ddns/*/key.pem /etc/ssl/xtunnel-ddns/*/staging/key.pem /etc/xtunnel-ddns/acme*/private/*/key.pem 2>/dev/null')
 	spki=$(for k in $keys; do
 			docker exec "$n" cat "$k" | openssl pkey -pubout -outform der 2>/dev/null | openssl dgst -sha256 -binary | base64
 		done | sort -u | paste -sd, -)
 	rules=$(for h in $hosts; do printf 'MAP %s 127.0.0.1, ' "$h"; done | sed 's/, $//')
 	h=$(docker port "$n" 80/tcp 2>/dev/null | grep -m1 '^127\.0\.0\.1:' | sed 's/^127\.0\.0\.1://')
 	start="http://127.0.0.1:$h/cgi-bin/luci/"
-	site=$(docker exec "$n" sh -c 'cat /etc/tunnel-ddns/site.cert 2>/dev/null')
+	site=$(docker exec "$n" sh -c 'cat /etc/xtunnel-ddns/site.cert 2>/dev/null')
 	if [ -n "$site" ] && [ "$(docker port "$n" 443/tcp 2>/dev/null | grep -m1 '^127\.0\.0\.1:')" = 127.0.0.1:443 ]; then
 		# the site's own login page when it has one (it replaces LuCI's login), else LuCI
 		if docker exec "$n" sh -c 'test -e "$(uci -q get uhttpd.main.home)/cgi-bin/login"'; then start="https://$site/cgi-bin/login"

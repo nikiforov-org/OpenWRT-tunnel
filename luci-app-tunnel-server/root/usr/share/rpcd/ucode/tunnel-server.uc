@@ -136,6 +136,15 @@ function ddns_domains(uci) {
 	return out;
 }
 
+// the onion service of luci-app-tunnel-tor on this router while it is switched on: its address
+// ('' until tor created it) and ports (each leads to the same port on the router)
+function onion_service(uci) {
+	if (!uci.load('tunnel-tor') || uci.get('tunnel-tor', 'main', 'enabled') != '1')
+		return null;
+	return { address: trim(readfile('/etc/tor/tunnel-tor/hostname') ?? ''),
+	         ports: map(list(uci.get('tunnel-tor', 'main', 'port')), p => `${int(p)}`) };
+}
+
 // the certificate of the Hysteria2 transport (same rules as in sync)
 function certificate(main, uci) {
 	if ((main.cert_source ?? 'ddns') == 'files') {
@@ -218,8 +227,10 @@ methods.pubkey = {
 	}
 };
 
-// the links of a profile: one per enabled transport; a transport that cannot give a working
-// link is listed with the reason instead
+// the links of a profile: one per enabled transport, and while the onion service of
+// luci-app-tunnel-tor is on, one through Tor per VLESS transport whose port it has (to the onion
+// address, at the transport's own port); a transport that cannot give a working link is listed with
+// the reason instead
 methods.links = {
 	args: { profile: '' },
 	call: function(req) {
@@ -238,45 +249,63 @@ methods.links = {
 		let site = ddns_site(uci);
 		let cert = hy2 ? certificate(main, uci) : null;
 		let host = main.link_host || site?.hostname || ((cert && !cert.error) ? cert.server_name : '');
-		if (!host) return { error: 'Set the address for client links first (section "Client links").' };
+		let onion = (vision || xhttp) ? onion_service(uci) : null;
+		if (!host && !length(onion?.address ?? ''))
+			return { error: 'Set the address for client links first (section "Client links").' };
+		let nohost = host ? '' : 'no address for client links: set it in the section "Client links"';
 		let name = p.name || sid;
 		let links = [];
+		let why = '', common = '';
 		if (vision || xhttp) {
 			let pub = public_key(main.private_key), sni = list(main.server_name)[0], sid0 = list(main.short_id)[0];
-			let why = !p.uuid ? 'the profile has no UUID'
+			why = !p.uuid ? 'the profile has no UUID'
 				: !pub ? 'the private key is missing or invalid: generate a keypair and click Save & Apply'
 				: !sni ? 'no server name is set' : !sid0 ? 'no short ID is set' : '';
-			let common = `encryption=none&security=reality&sni=${urlenc(sni ?? '')}&fp=chrome&pbk=${urlenc(pub)}&sid=${urlenc(sid0 ?? '')}`;
+			common = `encryption=none&security=reality&sni=${urlenc(sni ?? '')}&fp=chrome&pbk=${urlenc(pub)}&sid=${urlenc(sid0 ?? '')}`;
 			if (vision)
-				push(links, why ? { transport: 'vision', title: 'TCP + Vision', error: why } : {
+				push(links, (why || nohost) ? { transport: 'vision', title: 'TCP + Vision', error: why || nohost } : {
 					transport: 'vision', title: 'TCP + Vision',
 					note: 'Works in clients with the Xray core and with sing-box (v2rayNG, Hiddify, Streisand, NekoBox and others).',
 					link: `vless://${p.uuid}@${host}:${main.vision_link_port || main.vision_port}?${common}&flow=xtls-rprx-vision&type=tcp&headerType=none#${urlenc(name)}`
 				});
 			if (xhttp)
-				push(links, why ? { transport: 'xhttp', title: 'XHTTP', error: why } : {
+				push(links, (why || nohost) ? { transport: 'xhttp', title: 'XHTTP', error: why || nohost } : {
 					transport: 'xhttp', title: 'XHTTP',
 					note: 'Needs a client with the Xray core (v2rayNG, Streisand, Hiddify with the Xray core selected); sing-box has no XHTTP.',
 					link: `vless://${p.uuid}@${host}:${main.xhttp_link_port || main.xhttp_port}?${common}&type=xhttp&path=${urlenc(main.xhttp_path || '/')}&mode=${urlenc(main.xhttp_mode || 'auto')}&core=xray#${urlenc(name + '-xhttp')}`
 				});
 		}
 		if (hy2) {
-			let why = !p.password ? 'the profile has no Hysteria2 password'
-				: cert.error ? 'the certificate is not set up: ' + cert.error : '';
+			let no = !p.password ? 'the profile has no Hysteria2 password'
+				: cert.error ? 'the certificate is not set up: ' + cert.error : nohost;
 			let link = '';
-			if (!why) {
+			if (!no) {
 				link = `hysteria2://${urlenc(p.password)}@${host}:${main.hysteria2_link_port || main.hysteria2_port}?sni=${urlenc(cert.server_name)}`;
 				if (main.hysteria2_obfs)
 					link += `&obfs=salamander&obfs-password=${urlenc(main.hysteria2_obfs)}`;
 				link += `#${urlenc(name + '-hysteria2')}`;
 			}
-			push(links, why ? { transport: 'hysteria2', title: 'Hysteria2', error: why } : {
+			push(links, no ? { transport: 'hysteria2', title: 'Hysteria2', error: no } : {
 				transport: 'hysteria2', title: 'Hysteria2',
 				note: 'Works in clients with the Xray core, with sing-box (Hiddify, NekoBox) and in the Hysteria2 apps.',
 				link: link
 			});
 		}
-		return { name: name, host: host, links: links };
+		// through Tor: to the onion address at the transport's own port (the onion service passes each
+		// of its ports to the same port of the router); Tor carries no UDP, so not for Hysteria2
+		for (let t in [ [ 'vision', vision, main.vision_port, 'TCP + Vision through Tor', `flow=xtls-rprx-vision&type=tcp&headerType=none#${urlenc(name + '-tor')}` ],
+		                [ 'xhttp', xhttp, main.xhttp_port, 'XHTTP through Tor', `type=xhttp&path=${urlenc(main.xhttp_path || '/')}&mode=${urlenc(main.xhttp_mode || 'auto')}&core=xray#${urlenc(name + '-xhttp-tor')}` ] ]) {
+			if (!onion || !t[1]) continue;
+			let port = `${int(t[2])}`;
+			let no = why || (!length(onion.address) ? 'the onion address is not known yet: Tunnel → Tor starts the service'
+				: (index(onion.ports, port) < 0) ? `port ${port} is not among the ports of the onion service (Tunnel → Tor)` : '');
+			push(links, no ? { transport: `${t[0]}_tor`, title: t[3], error: no } : {
+				transport: `${t[0]}_tor`, title: t[3],
+				note: 'Through the onion address of Tunnel → Tor, without a public address: for Tunnel → Client of another router (the field of this transport through Tor, with the line of "Key" of a profile on the Tor page) or for a client app behind a local tor.',
+				link: `vless://${p.uuid}@${onion.address}:${port}?${common}&${t[4]}`
+			});
+		}
+		return { name: name, host: host, onion: onion?.address ?? '', links: links };
 	}
 };
 

@@ -1,8 +1,7 @@
 #!/bin/sh
 # firmware.sh PROFILE [RELEASE]: an OpenWrt image for the device PROFILE (its profile name in the
 # release, as on firmware-selector.openwrt.org) with the packages of the release's own images (the target's manifest:
-# LuCI included) and luci-app-tunnel-ddns, -server, -client and -tor from dist/ (run utils/build.sh
-# first), made with the official Image Builder (Docker image openwrt/imagebuilder:TARGET-SUBTARGET-RELEASE).
+# LuCI included) and luci-app-xtunnel from dist/ (run utils/build.sh first), made with the official Image Builder (Docker image openwrt/imagebuilder:TARGET-SUBTARGET-RELEASE).
 # The images, the list of their packages (.manifest) and sha256sums go to firmware/PROFILE/
 # (gitignored; older files there are deleted first). RELEASE: default 25.12.6.
 # EXTRA (environment): more packages of the release for the image, e.g.
@@ -11,7 +10,7 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PROFILE=${1:?usage: firmware.sh PROFILE [RELEASE]}
 RELEASE=${2:-25.12.6}
-TUNNEL="luci-app-tunnel-ddns luci-app-tunnel-server luci-app-tunnel-client luci-app-tunnel-tor"
+TUNNEL="luci-app-xtunnel"
 URL="https://downloads.openwrt.org/releases/$RELEASE"
 OUT="$ROOT/firmware/$PROFILE"
 NAME=tunnel-firmware

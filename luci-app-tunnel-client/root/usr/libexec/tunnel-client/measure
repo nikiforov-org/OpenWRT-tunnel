@@ -59,8 +59,12 @@ function metered_uplink(main) {
 }
 
 // one curl through the tap of a link; the URL's host keeps its name for TLS. small: a request with
-// a small answer (HEAD to the link's own URL, one byte from the default target)
+// a small answer (HEAD to the link's own URL, one byte from the default target); through Tor it has
+// TOR_SMALL seconds, as the first stream to an onion service builds the circuits to it (5-6 s in a
+// container test, longer through bridges)
+const TOR_SMALL = 30;
 function curl_cmd(c, bytes, timeout, small, out) {
+	if (small && c.tor && timeout < TOR_SMALL) timeout = TOR_SMALL;
 	if (!length(c.test_url))
 		return `curl -sk -m ${timeout} -o /dev/null -w '${FMT}' 'https://127.0.0.1:${c.tap_port}/cgi-bin/speed?bytes=${small ? 1 : bytes}' > ${shq(out)} 2>/dev/null`;
 	let m = match(c.test_url, /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);

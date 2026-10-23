@@ -35,6 +35,15 @@ after installing; the entry appears in the **Tunnel** section.
   every enabled transport. The **Links** button shows one link and QR code per transport,
   ready for v2rayNG, Hiddify, Streisand, NekoBox, the Hysteria2 apps and the
   [Client page](../luci-app-tunnel-client/README.md) of another router.
+- **Links through Tor.** While the onion service of
+  [`luci-app-tunnel-tor`](../luci-app-tunnel-tor/README.md) is switched on on the same
+  router, **Links** also gives *TCP + Vision through Tor* and *XHTTP through Tor*: the same
+  VLESS links with the onion address and the transport's own port (the onion service passes
+  each of its ports to the same port of the router, so the transport's port has to be among
+  them: 443 for Vision, 8443 for XHTTP by default). They work without a public address or
+  open ports; a client needs the key of a profile of the Tor page too (**Key** there). The
+  [Client page](../luci-app-tunnel-client/README.md#links-through-tor) of another router
+  takes both. Tor carries TCP only, so there is no Hysteria2 link through Tor.
 - **Keys** are generated on the router (`xray x25519`) with one button; the public key is
   shown next to the private one. Short IDs, the XHTTP path and the obfuscation password get
   random values with a button too.
@@ -63,7 +72,8 @@ after installing; the entry appears in the **Tunnel** section.
    Apply**). The overview shows "Running" and the open ports a few seconds later; the same
    button then reads **Turn the server off**.
 6. **Links** next to a profile: pick the transport, copy the link or scan the QR code in the
-   client app.
+   client app. With the onion service of Tunnel → Tor on, the links through Tor are there
+   too; a transport whose port the onion service does not have shows that reason instead.
 
 If the router sits behind another router or behind the provider's NAT, the ports must be
 forwarded to it (or opened through UPnP) before clients from the Internet can connect.

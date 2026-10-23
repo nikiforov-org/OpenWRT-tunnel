@@ -89,6 +89,10 @@ after installing; the entry appears in the **Tunnel** section.
      line shown into the file `<name>.auth_private` in that directory, restart it, and connect
      through its SOCKS port: `ssh -o ProxyCommand='nc -x 127.0.0.1:9050 %h %p' root@<name or address>.onion`,
      or point an Xray client at `<name or address>.onion:443` through that proxy.
+   - **Tunnel → Client of another router**: the Server page of this router gives the links
+     through Tor (with the server's ports among those of the onion service: 443 for Vision,
+     8443 for XHTTP); paste them with the line shown into a profile there and tick **Through
+     Tor** ([client README](../luci-app-tunnel-client/README.md#links-through-tor)).
 
 Switching a profile off (or deleting it) locks its key out at the next apply; the address
 stays the same. A new key pair for a profile means the client has to get the new key.

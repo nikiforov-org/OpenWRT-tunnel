@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Archive and upload — a web site on the router</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar"><div class="container"><a class="brand" href="/">xtunnel-ddns</a><span class="tagline">writing a site for the router</span><nav class="topnav"><a href="/">Overview</a><a href="/frontend.html">Frontend</a><a href="/backend.html">Backend</a><a href="/login.html">Login page</a><a class="current" href="/archive.html">Archive and upload</a></nav></div></header>
+<div class="container page">
+<aside class="sidebar"><nav>
+<div class="group">Guide</div><ul>
+<li><a class="pagelink" href="/">Overview</a>
+</li>
+<li><a class="pagelink" href="/frontend.html">Frontend</a>
+</li>
+<li><a class="pagelink" href="/backend.html">Backend</a>
+</li>
+<li><a class="pagelink" href="/login.html">Login page</a>
+</li>
+<li><a class="pagelink current" href="/archive.html">Archive and upload</a>
+<ul class="sections"><li><a href="#the-archive">The archive</a></li><li><a href="#uploading-in-luci">Uploading in LuCI</a></li><li><a href="#what-the-package-changes-on-the-router-while-a-site-is-served">What the package changes on the router while a site is served</a></li><li><a href="#where-the-files-are">Where the files are</a></li><li><a href="#updating-and-deleting">Updating and deleting</a></li></ul>
+</li>
+</ul>
+</nav></aside>
+<main class="content">
+<h1>Archive and upload</h1>
+
+<h2 id="the-archive">The archive</h2>
+<ul>
+<li>Only <code>.tar.gz</code>. <code>index.html</code> must be at the top level of the archive or inside a single top-level folder; in the latter case the router takes the contents of that folder.</li>
+<li><code>.xtunnel-ddns/build</code> and <code>cgi-bin/*</code> are made executable by the router; the modes in the archive do not matter. Everything else is served as it is.</li>
+<li>Paths with <code>..</code> and absolute paths fail the check.</li>
+<li>On macOS <code>tar</code> adds <code>._*</code> and <code>.DS_Store</code> files; they are harmless but better left out.</li>
+</ul>
+<p>A packing script to keep next to the site's sources:</p>
+<pre><code>#!/bin/sh
+# Packs src/ into dist/site.tar.gz, the archive to upload in LuCI.
+set -eu
+HERE="$(cd "$(dirname "$0")" &amp;&amp; pwd)"
+mkdir -p "$HERE/dist"
+COPYFILE_DISABLE=1 tar -C "$HERE/src" --exclude='.DS_Store' --exclude='._*' -czf "$HERE/dist/site.tar.gz" .
+tar -tzf "$HERE/dist/site.tar.gz"</code></pre>
+
+<h2 id="uploading-in-luci">Uploading in LuCI</h2>
+<ol>
+<li><strong>XTunnel → Dynamic DNS</strong>, section <strong>Web site</strong>, button <strong>Upload a site archive…</strong>.</li>
+<li>The site name is suggested from the archive name: lowercase Latin letters, digits, dots, dashes and underscores, at most 32 characters. The name <code>default</code> belongs to this page.</li>
+<li>If a site with that name exists, LuCI asks whether to replace it. A replacement takes effect at once, even for the site being served: the links of the administration are restored and the build, if there is one, starts.</li>
+<li>Choose the site in the <strong>Site</strong> field and the domain in the <strong>Domain</strong> field, tick <strong>Serve the web site</strong> and click <strong>Save &amp; Apply</strong>.</li>
+</ol>
+<p>The HTTPS port is changed with the separate <strong>Change…</strong> button next to <strong>HTTPS port</strong>: it applies at once, without Save &amp; Apply, because the web server moves to the other port together with the administration.</p>
+
+<h2 id="what-the-package-changes-on-the-router-while-a-site-is-served">What the package changes on the router while a site is served</h2>
+<div class="table-wrap"><table>
+<tr><th>Where</th><th>What</th></tr>
+<tr><td><code>/etc/config/uhttpd</code></td><td><code>home</code> — the site's document root, <code>cert</code> and <code>key</code> — the domain's certificate, <code>listen_https</code> — the port, <code>no_dirlists</code> — on, <code>error_page</code> — the site's <code>404.html</code> if it has one; for a site with a login page <code>ubus_prefix</code> is removed as well</td></tr>
+<tr><td><code>/etc/config/luci</code></td><td><code>resourcebase</code> and <code>mediaurlbase</code> point at the random-named link to the static files</td></tr>
+<tr><td><code>/etc/config/firewall</code></td><td>the rule <code>xtunnel_ddns_https</code>: TCP to the HTTPS port from WAN</td></tr>
+<tr><td><code>/etc/crontabs/root</code></td><td>the line of the build schedule (and the certificate renewal line, as long as there is a certificate)</td></tr>
+<tr><td>the site's document root</td><td>links <code>cgi-bin/luci</code> and <code>cgi-bin/cgi-*</code> to the LuCI files (or to the package's gate when the site has a login page) and a random-named link to the static files</td></tr>
+</table></div>
+<p>The original uhttpd values are saved in <code>/etc/xtunnel-ddns/uhttpd.backup</code> and restored when the site is switched off (the <strong>Serve the web site</strong> box or the <strong>Switch everything off</strong> button). Under <code>/www</code> only the random-named link to the static files is added while a site is served; nothing else there is changed.</p>
+
+<h2 id="where-the-files-are">Where the files are</h2>
+<div class="table-wrap"><table>
+<tr><th>Path</th><th>Contents</th></tr>
+<tr><td><code>/usr/share/www/&lt;name&gt;/</code></td><td>the public files of the site, the document root</td></tr>
+<tr><td><code>/etc/xtunnel-ddns/sites/&lt;name&gt;/</code></td><td>the <code>.xtunnel-ddns/</code> directory of the archive: the build script and what it needs</td></tr>
+<tr><td><code>/tmp/xtunnel-ddns/sites/&lt;name&gt;/</code></td><td><code>SITE_TMP</code> of the build script</td></tr>
+<tr><td><code>/tmp/xtunnel-ddns/site-&lt;name&gt;.log</code>, <code>.state</code></td><td>the log and the result of the last build</td></tr>
+<tr><td><code>/usr/share/www/default/</code></td><td>this page, shipped with the package</td></tr>
+</table></div>
+<p><code>/usr/share/www/</code> and <code>/etc/xtunnel-ddns/</code> are part of the sysupgrade backup, so uploaded sites survive a firmware upgrade. The backup is built in RAM: keep an eye on the size of the sites, shown in LuCI.</p>
+
+<h2 id="updating-and-deleting">Updating and deleting</h2>
+<ul>
+<li>A new version of a site: upload an archive with the same name and confirm the replacement.</li>
+<li>Deleting: the <strong>Delete</strong> button in the list of sites. Deleting the site being served switches the router to this built-in page.</li>
+<li>Small fixes can be made over ssh right in the files on the router, but the next upload overwrites them: keep the source in the archive.</li>
+</ul>
+<nav class="pager"><a class="prev" href="/login.html"><span>Previous</span>Login page</a></nav>
+<footer>xtunnel-ddns · built-in site · these pages live in /usr/share/www/default/ on the router</footer>
+</main>
+<aside class="toc"><div class="title">On this page</div><ul><li><a href="#the-archive">The archive</a></li><li><a href="#uploading-in-luci">Uploading in LuCI</a></li><li><a href="#what-the-package-changes-on-the-router-while-a-site-is-served">What the package changes on the router while a site is served</a></li><li><a href="#where-the-files-are">Where the files are</a></li><li><a href="#updating-and-deleting">Updating and deleting</a></li></ul></aside>
+</div>
+</body>
+</html>

@@ -255,7 +255,7 @@ return view.extend({
 				E('button', { 'class': 'btn cbi-button', 'click': function() { return copyText(line.value); } }, _('Copy the line'))
 			]),
 			E('p', { 'style': 'color:' + COLOR.dim }, (r.xray_port
-				? _('Ports of this router through %s: %s. The Xray server answers on %s:%s too, so an Xray client can be pointed at it through a local tor.').format(name, r.ports.join(', '), name, r.xray_port)
+				? _('Ports of this router through %s: %s. The Xray server answers on %s:%s too: its page gives the links through Tor, which Tunnel → Client of another router takes with the line above.').format(name, r.ports.join(', '), name, r.xray_port)
 				: _('Ports of this router through %s: %s.').format(name, r.ports.join(', ')))),
 			qrNode(r.auth_line),
 			E('div', { 'class': 'right' }, E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close')))
@@ -431,7 +431,7 @@ return view.extend({
 		};
 
 		o = s.option(form.DynamicList, 'port', _('Ports'),
-			_('Ports of this router reachable through the onion address, each to the same port on the router itself: 22 is SSH, 80 the web interface (or the site), 443 the site over HTTPS and the Xray server in front of it.'));
+			_('Ports of this router reachable through the onion address, each to the same port on the router itself: 22 is SSH, 80 the web interface (or the site), 443 the site over HTTPS and the Xray server in front of it; 8443, the port of the Xray server\'s XHTTP transport, gives that transport a link through Tor too.'));
 		o.datatype = 'port';
 		o.rmempty = false;
 		o.validate = function(section_id, value) {
