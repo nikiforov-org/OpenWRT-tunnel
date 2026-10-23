@@ -62,9 +62,13 @@ after installing.
   request to its test URL, or one byte from the server's site, about 12 KB with the
   handshakes); when it does not answer, the other links get the same request and the one that
   answers first becomes active. By hand or with a single link nothing runs on its own (**Measure
-  now** still works), and no measurement runs on its own while the router's default route goes
-  through an interface of **Metered uplinks**. After xray started with new links they are
-  measured once. Switching goes through xray's API, without a restart. The test target is the
+  now** still works), and the periodic measurement does not run while the router's default
+  route goes through an interface of **Metered uplinks**. After every start of xray (the boot,
+  the client switched on, a changed configuration of the client or of the server that shares
+  the process) all links are measured and the fastest becomes active, on a metered uplink too;
+  without a route to the Internet yet the minute check makes this measurement once one exists,
+  and again every minute while no link answers. Switching goes through xray's API, without a
+  restart. The test target is the
   server's own site through the tunnel, `https://127.0.0.1/cgi-bin/speed?bytes=N`, served by
   the site of [`luci-app-tunnel-ddns`](../luci-app-tunnel-ddns/README.md#bandwidth-test-endpoint)
   on the server (with access to local networks allowed there); a profile may name another URL

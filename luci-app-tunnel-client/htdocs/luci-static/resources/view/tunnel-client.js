@@ -365,7 +365,7 @@ return view.extend({
 		o.placeholder = '15';
 		o.rmempty = false;
 
-		o = s.option(widgets.NetworkSelect, 'metered', _('Metered uplinks'), _('While the router\'s default route goes through one of these interfaces (a mobile modem, for example), no measurement runs on its own; the minute check of the active link stays.'));
+		o = s.option(widgets.NetworkSelect, 'metered', _('Metered uplinks'), _('While the router\'s default route goes through one of these interfaces (a mobile modem, for example), the periodic measurement does not run; the measurement after every start of xray and the minute check of the active link stay.'));
 		o.multiple = true;
 		o.nocreate = true;
 
