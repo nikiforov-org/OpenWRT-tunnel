@@ -5,8 +5,8 @@
 # on free ports unless given with -p, so that it can be opened in a browser here.
 #   stage create NAME [wan|lan] [-p HOST:PORT[/udp] ...]   a fresh router; the Docker network on eth0
 #                                                          as the wan (default) or the lan interface
-#   stage install NAME [PACKAGE ...]                       luci-app-xtunnel from dist/ (PACKAGE xtunnel, the
-#                                                          default), or luci-app-tunnel-PACKAGE
+#   stage install NAME [PACKAGE ...]                       luci-app-xtunnel and xtunnel-core from dist/ (PACKAGE
+#                                                          xtunnel, the default), or luci-app-tunnel-PACKAGE
 #   stage up PROFILE [NAME]                                a router as in profiles/PROFILE.sh
 #   stage url NAME                                         the addresses of its web interface here
 #   stage browser NAME                                     a Chrome window for it: the domains of its
@@ -96,6 +96,12 @@ install() {
 		case "$p" in xtunnel) a=luci-app-xtunnel ;; *) a=luci-app-tunnel-$p ;; esac
 		f=$(ls "$ROOT"/dist/"$a"-[0-9]*.apk 2>/dev/null | head -1)
 		[ -n "$f" ] || die "no dist/$a-*.apk (run utils/build.sh)"
+		docker exec -i "$n" sh -c "cat > /root/$(basename "$f")" < "$f"
+		files="$files /root/$(basename "$f")"
+		[ "$p" = xtunnel ] || continue
+		# its dependency xtunnel-core, built for the stages' architecture by xtunnel-core/build.sh
+		f=$(ls "$ROOT"/dist/x86_64/xtunnel-core-[0-9]*.apk 2>/dev/null | head -1)
+		[ -n "$f" ] || die "no dist/x86_64/xtunnel-core-*.apk (run xtunnel-core/build.sh)"
 		docker exec -i "$n" sh -c "cat > /root/$(basename "$f")" < "$f"
 		files="$files /root/$(basename "$f")"
 	done

@@ -9,9 +9,10 @@
 
 'use strict';
 
-import { access, popen, readfile, writefile, mkdir, unlink, rename, stat } from 'fs';
+import { access, readfile, writefile, mkdir, unlink, rename } from 'fs';
 import { cursor } from 'uci';
-import { tor_instance } from 'xtunnel-tor.common';
+import { shq, exec, log, lock, running } from 'xtunnel.common';
+import { valid_bridge } from 'xtunnel-tor.common';
 
 const CFG     = 'xtunnel-tor';
 const DIR     = '/etc/xtunnel-tor';
@@ -19,33 +20,12 @@ const LIST    = `${DIR}/bridges.txt`;
 const SHIPPED = '/usr/share/xtunnel-tor/bridges.txt';
 const STATE   = `${DIR}/bridges.state`;
 const RUN     = '/tmp/xtunnel-tor';
-const RUNNING = `${RUN}/bridges.running`;
+const LOCK    = `${RUN}/bridges.lock`;          // held while an update runs (the page shows it)
 const SYNC    = '/usr/libexec/xtunnel-tor/sync';
 const FALLBACK = `${DIR}/snowflake.on`;             // the snowflake lines are added (see watch)
 const API     = 'https://bridges.torproject.org/moat/circumvention/settings';
 const MAX     = 12;
-const PLUGINS = { obfs4: '/usr/bin/obfs4proxy', meek_lite: '/usr/bin/obfs4proxy', snowflake: '/usr/bin/snowflake-client' };
-
-function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-}
-
-function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-}
-
-function log(msg) {
-	system(`logger -t ${CFG} ${shq(msg)}`);
-}
-
-function valid_bridge(line) {
-	return match(line, /^(obfs4|snowflake|meek_lite|webtunnel) [^ ]+:[0-9]+ [0-9A-Fa-f]{40}( [^ ]+)*$/) != null
-	    || match(line, /^[^ ]+:[0-9]+ [0-9A-Fa-f]{40}$/) != null;
-}
+const PLUGINS = [ 'obfs4', 'meek_lite', 'snowflake' ];       // the transports of lyrebird (xtunnel-core) tor is given
 
 // "obfs4 1.2.3.4:443 FP cert=…" -> transport obfs4; "1.2.3.4:443 FP" -> vanilla
 function transport(line) {
@@ -74,10 +54,9 @@ function write_state(st) {
 }
 
 function finish(st, code) {
-	unlink(RUNNING);
 	write_state(st);
 	if (st.error) {
-		log(`bridges: ${st.error}`);
+		log(CFG, `bridges: ${st.error}`);
 		warn(`${st.error}\n`);
 	}
 	exit(code);
@@ -86,12 +65,11 @@ function finish(st, code) {
 // ---- main ----
 
 mkdir(RUN, 0o755);
-let s = stat(RUNNING);
-if (s && time() - s.mtime < 600) {
+let held = lock(LOCK);
+if (!held) {
 	warn('a bridge update is already running\n');
 	exit(1);
 }
-writefile(RUNNING, `${time()}\n`);
 
 let uci = cursor();
 uci.load('xtunnel-server');
@@ -99,10 +77,6 @@ let main = uci.get_all('xtunnel-server', 'tor') ?? {};
 let country = lc(trim(main.bridge_country ?? ''));
 let st = { time: time(), country: country, via: '', lines: 0, by: {}, changed: false, applied: false, error: '' };
 
-// whether the stock tor service runs (its SOCKS port is then worth a try)
-function tor_running() {
-	return tor_instance() != null;
-}
 
 if ((main.bridges ?? 'builtin') != 'builtin') {
 	st.error = 'bridge updates apply to the built-in list only (the bridges setting is not "builtin")';
@@ -119,7 +93,7 @@ if (access('/usr/bin/curl', 'x') != true) {
 
 let base = `curl -s -m 40 -X POST -H 'Content-Type: application/json' -d ${shq(`{"country":"${country}"}`)} ${API}`;
 let tries = [];
-if (tor_running())
+if (running('tor'))
 	push(tries, { via: 'tor', cmd: `${base} --socks5-hostname 127.0.0.1:9050` });
 push(tries, { via: 'direct', cmd: base });
 
@@ -148,7 +122,7 @@ for (let set in answer.data.settings) {
 		l = trim(l);
 		if (!valid_bridge(l)) continue;
 		let tr = transport(l);
-		if (tr != 'vanilla' && (!(tr in PLUGINS) || access(PLUGINS[tr], 'x') != true)) { skipped[tr] = true; continue; }
+		if (tr != 'vanilla' && !(tr in PLUGINS)) { skipped[tr] = true; continue; }
 		push(fresh, l);
 	}
 }
@@ -182,13 +156,13 @@ st.applied = st.changed && (answer.via != 'tor');
 if (st.changed && access(FALLBACK) == true) {
 	unlink(FALLBACK);
 	st.applied = true;
-	log('bridges: new list, trying it without the snowflake fallback again');
+	log(CFG, 'bridges: new list, trying it without the snowflake fallback again');
 }
-log(`bridges: ${length(fresh)} lines from bridges.torproject.org (${answer.via}, ${country}), list now ${length(merged)} lines, ` +
+log(CFG, `bridges: ${length(fresh)} lines from bridges.torproject.org (${answer.via}, ${country}), list now ${length(merged)} lines, ` +
     (st.changed ? (st.applied ? 'changed, applied now' : 'changed, used at the next start of tor') : 'unchanged'));
 if (st.applied) {
-	unlink(RUNNING);
 	write_state(st);
+	held.close();
 	system(SYNC);
 	exit(0);
 }

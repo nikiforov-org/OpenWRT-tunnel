@@ -14,8 +14,9 @@
 
 'use strict';
 
-import { readfile, writefile, mkdir, unlink, access, readlink, rename, chmod, stat, popen } from 'fs';
+import { readfile, writefile, mkdir, access, readlink, rename, chmod } from 'fs';
 import { cursor } from 'uci';
+import { shq, exec, log as syslog, valid_sid, stamp } from 'xtunnel.common';
 import { info } from 'xtunnel.x509';
 import { grade, in_effect } from 'xtunnel-ddns.sitecert';
 
@@ -26,9 +27,6 @@ const ACME  = '/etc/xtunnel-ddns';
 const SELF  = '/usr/libexec/xtunnel-ddns/cert';
 const HOOK  = '/usr/libexec/xtunnel-ddns/dns01';
 const SYNC  = '/usr/libexec/xtunnel-ddns/sync';
-
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-function valid_sid(s) { return type(s) == 'string' && match(s, /^[A-Za-z0-9_]{1,64}$/) != null; }
 
 function copy(from, to, mode) {
 	let data = readfile(from);
@@ -72,21 +70,18 @@ let logfile = renew ? `${RUN}/renew.log` : `${RUN}/cert-${sid}.log`;
 let state = `${RUN}/cert-${sid}.state`;
 if (!renew) writefile(logfile, '');
 let log = function(msg) {
-	let f = popen(`date "+%Y-%m-%d %H:%M:%S"`, 'r'), t = trim(f?.read('all') ?? ''); f?.close();
-	writefile(logfile, (readfile(logfile) ?? '') + `== ${t} ${msg}\n`);
+	writefile(logfile, (readfile(logfile) ?? '') + `== ${stamp()} ${msg}\n`);
 };
 let set_state = (word) => writefile(state, `${word} ${time()}${word == 'running' ? ' ' + readlink('/proc/self') : ''} host=${host}\n`);
 let fail = function(msg) {
 	log(msg);
 	set_state('failed');
-	system(`logger -t xtunnel-ddns ${shq(`certificate for ${host}: ${msg}`)}`);
+	syslog(CFG, `certificate for ${host}: ${msg}`);
 	exit(1);
 };
 // uacme's output goes to the log as well
 let uacme = function(args) {
-	let p = popen(`TDD_SECTION=${shq(sid)} uacme -c ${shq(dir)}${staging ? ' -s' : ''} -y ${args} >> ${shq(logfile)} 2>&1`, 'r');
-	p?.read('all');
-	return p ? p.close() : -1;
+	return exec(`TDD_SECTION=${shq(sid)} uacme -c ${shq(dir)}${staging ? ' -s' : ''} -y ${args} >> ${shq(logfile)} 2>&1`).code;
 };
 
 if (!renew) set_state('running');
@@ -111,7 +106,7 @@ if (!access(`${dir}/${host}/cert.pem`) && access(installed) && access(ikey)) {
 		mkdir(`${dir}/private/${host}`, 0o700);
 		copy(installed, `${dir}/${host}/cert.pem`, 0o644);
 		copy(ikey, `${dir}/private/${host}/key.pem`, 0o600);
-		log(`taken over the installed certificate (valid until ${trim(popen(`date -u -d @${c.not_after}`, 'r').read('all'))})`);
+		log(`taken over the installed certificate (valid until ${stamp(c.not_after, true)} UTC)`);
 	}
 }
 
@@ -150,7 +145,7 @@ if (apart) {
 		fail('The certificate could not be installed.');
 	log(`test certificate installed to ${CERTS}/${host}/staging/; the trusted certificate of ${host} stays in use`);
 	set_state('ok');
-	system(`logger -t xtunnel-ddns ${shq(`test certificate for ${host} issued (kept apart from the trusted one)`)}`);
+	syslog(CFG, `test certificate for ${host} issued (kept apart from the trusted one)`);
 	exit(0);
 }
 if (!copy(`${dir}/${host}/cert.pem`, installed, 0o644) || !copy(`${dir}/private/${host}/key.pem`, ikey, 0o600))
@@ -158,16 +153,10 @@ if (!copy(`${dir}/${host}/cert.pem`, installed, 0o644) || !copy(`${dir}/private/
 if (!staging) system(`rm -rf ${shq(`${CERTS}/${host}/staging`)}`);
 log(`certificate installed to ${CERTS}/${host}/`);
 set_state('ok');
-system(`logger -t xtunnel-ddns ${shq(`certificate for ${host} issued`)}`);
+syslog(CFG, `certificate for ${host} issued`);
 // the web server re-reads it when it is the certificate in effect; sync starts the move of the
-// site when the site waits for this one
+// site when the site waits for this one, and the Xray server takes the files when its Hysteria2
+// transport uses this domain
 if (in_effect() == host) system('/etc/init.d/uhttpd reload >/dev/null 2>&1');
 system(`${SYNC} >/dev/null 2>&1`);
-// the Xray server's Hysteria2 transport can take its certificate from this domain: its sync
-// applies the certificate files of the new name (the same files again change nothing)
-let srv = cursor();
-if (access('/etc/init.d/xtunnel-server', 'x') && srv.load('xtunnel-server') &&
-    srv.get('xtunnel-server', 'main', 'enabled') == '1' && srv.get('xtunnel-server', 'main', 'hysteria2_enabled') == '1' &&
-    (srv.get('xtunnel-server', 'main', 'cert_source') ?? 'ddns') == 'ddns' && srv.get('xtunnel-server', 'main', 'cert_domain') == sid)
-	system('/etc/init.d/xtunnel-server reload >/dev/null 2>&1');
 exit(0);

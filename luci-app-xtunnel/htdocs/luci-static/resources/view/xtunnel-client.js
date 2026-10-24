@@ -6,7 +6,7 @@
 'require rpc';
 'require poll';
 'require dom';
-'require tools.widgets as widgets';
+'require xtunnel.common as common';
 
 var CFG = 'xtunnel-client';
 
@@ -17,38 +17,17 @@ var callLog           = rpc.declare({ object: CFG, method: 'log', expect: {} });
 var callConfig        = rpc.declare({ object: CFG, method: 'config', expect: {} });
 var callRestart       = rpc.declare({ object: CFG, method: 'restart', expect: {} });
 
-var COLOR = { ok: '#2a9d4a', warn: '#d08a00', bad: '#d33', dim: '#888' };
+var COLOR = common.COLOR, span = common.span, timeAgo = common.timeAgo;
 var DIRECT = [ 'vision', 'xhttp', 'hysteria2' ];
 var VIA_TOR = [ 'vision_tor', 'xhttp_tor' ];
 var PROTOCOLS = DIRECT.concat(VIA_TOR);
 var TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
-               vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor' };
-
-function span(color, text) {
-	return E('span', { 'style': color ? 'color:' + color : '' }, text);
-}
-
-function timeAgo(ts) {
-	if (!ts) return '';
-	var s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-	if (s < 90)       return _('%d seconds ago').format(s);
-	if (s < 5400)     return _('%d minutes ago').format(Math.round(s / 60));
-	if (s < 172800)   return _('%d hours ago').format(Math.round(s / 3600));
-	return _('%d days ago').format(Math.round(s / 86400));
-}
+               vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'Tor without a server' };
 
 function speedText(bps) {
 	if (!bps) return '—';
 	if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
 	return Math.round(bps / 1024) + ' KB/s';
-}
-
-function textModal(title, text, header) {
-	ui.showModal(title, [
-		header || '',
-		E('textarea', { 'style': 'width:100%; font-family:monospace; font-size:12px', 'rows': 24, 'readonly': 'readonly' }, text),
-		E('div', { 'class': 'right' }, E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close')))
-	]);
 }
 
 /* a link that can be chosen: of an enabled profile, through Tor only with "Through Tor" on */
@@ -57,6 +36,7 @@ function usable(l) {
 }
 
 function linkLabel(l) {
+	if (l.protocol == 'tor') return _('Tor without a server');
 	return (l.profile_name || l.profile) + ': ' + (l.title || TITLES[l.protocol] || l.protocol);
 }
 
@@ -75,8 +55,8 @@ return view.extend({
 	status: {},
 
 	load: function() {
-		return L.resolveDefault(callStatus(), {}).then(L.bind(function(st) {
-			this.status = st || {};
+		return Promise.all([ L.resolveDefault(callStatus(), {}), uci.load('network').catch(function() {}) ]).then(L.bind(function(r) {
+			this.status = r[0] || {};
 		}, this));
 	},
 
@@ -89,7 +69,7 @@ return view.extend({
 	overviewService: function() {
 		var st = this.status;
 		if (!st.installed)
-			return span(COLOR.bad, _('xray is not installed on the router. It is a dependency of this package: run "apk update && apk add xray-core".'));
+			return span(COLOR.bad, _('xray is not installed on the router (/usr/bin/xray of the package xtunnel-core, a dependency of this package).'));
 		if (!st.enabled)
 			return span(COLOR.dim, _('Off: the LAN reaches the Internet as before'));
 		if (st.running)
@@ -98,20 +78,6 @@ return view.extend({
 		if (st.log_last)
 			lines.push(E('pre', { 'style': 'color:' + COLOR.dim + '; white-space:pre-wrap; margin:.3em 0 0; font-size:90%' }, st.log_last));
 		return E('div', {}, lines);
-	},
-
-	/* the on/off button of the overview: sets "enabled" and runs LuCI's Save & Apply, with the rest of the page */
-	switchButton: function() {
-		var on = uci.get(CFG, 'main', 'enabled') == '1';
-		return E('button', {
-			'class': 'btn cbi-button ' + (on ? 'cbi-button-negative' : 'cbi-button-positive'),
-			'click': ui.createHandlerFn(this, 'handleSwitch', !on)
-		}, on ? _('Turn the client off') : _('Turn the client on'));
-	},
-
-	handleSwitch: function(on, ev) {
-		uci.set(CFG, 'main', 'enabled', on ? '1' : '0');
-		return this.handleSaveApply(ev, '0');
 	},
 
 	overviewActive: function() {
@@ -139,7 +105,6 @@ return view.extend({
 
 	overviewLists: function() {
 		var st = this.status, s = st.state || {};
-		if (!st.enabled) return span(COLOR.dim, '—');
 		var own = s.own || {}, parts = [];
 		parts.push(_('own entries: %d domains, %d subnets').format(own.domains || 0, own.ips || 0));
 		(s.sources || []).forEach(function(src) {
@@ -165,7 +130,6 @@ return view.extend({
 
 	overviewMeasure: function() {
 		var st = this.status, m = st.measure || {}, h = m.health;
-		if (!st.enabled) return span(COLOR.dim, '—');
 		if (st.measuring) return span(COLOR.warn, _('Measuring…'));
 		var parts = [ m.time ? _('Last measurement %s').format(timeAgo(m.time)) + (m.decision ? ': ' + m.decision : '') : _('Not measured yet') ];
 		if (h && h.time)
@@ -177,13 +141,7 @@ return view.extend({
 
 	overviewConfig: function() {
 		var st = this.status;
-		if (st.error)
-			return span(COLOR.bad, _('Not applied: %s').format(st.error));
-		if (!st.enabled)
-			return span(COLOR.dim, _('No configuration file while the client is off'));
-		if (st.config_time)
-			return span(COLOR.ok, _('Written %s to /etc/xtunnel-client/config.json').format(timeAgo(st.config_time)));
-		return span(COLOR.warn, _('Not written yet'));
+		return common.fileState(st.error, st.enabled && st.config_time, '/etc/xtunnel-client/config.json', st.enabled ? null : _('No configuration file while the client is off'));
 	},
 
 	clientsTable: function() {
@@ -199,7 +157,7 @@ return view.extend({
 			var hist = (l.history || []).slice(-6).map(function(h) { return h.ok ? speedText(h.speed) : '×'; }).join(', ');
 			rows.push(E('tr', { 'class': 'tr', 'style': l.active ? 'font-weight:bold' : '' }, [
 				E('td', { 'class': 'td' }, linkLabel(l)),
-				E('td', { 'class': 'td' }, l.server_host ? l.server_host + ':' + l.server_port : '—'),
+				E('td', { 'class': 'td' }, l.server_host ? l.server_host + ':' + l.server_port : (l.protocol == 'tor') ? _('exit relays of the Tor network') : '—'),
 				E('td', { 'class': 'td' }, linkState(l)),
 				E('td', { 'class': 'td', 'title': hist }, m ? (m.ok ? speedText(m.speed) : span(COLOR.bad, m.error || _('failed'))) : '—'),
 				E('td', { 'class': 'td' }, (m && m.ok) ? Math.round(m.latency * 1000) + ' ms' : '—'),
@@ -218,11 +176,7 @@ return view.extend({
 			this.status = st;
 			var el;
 			if ((el = document.getElementById('tcl-ov-service'))) dom.content(el, this.overviewService());
-			if ((el = document.getElementById('tcl-ov-active')))  dom.content(el, this.overviewActive());
-			if ((el = document.getElementById('tcl-ov-tor')))     dom.content(el, this.overviewTor());
-			if ((el = document.getElementById('tcl-ov-lists')))   dom.content(el, this.overviewLists());
-			if ((el = document.getElementById('tcl-ov-measure'))) dom.content(el, this.overviewMeasure());
-			if ((el = document.getElementById('tcl-ov-config')))  dom.content(el, this.overviewConfig());
+			common.updateRows();
 			if ((el = document.getElementById('tcl-clients')))    dom.content(el, this.clientsTable());
 			document.querySelectorAll('[data-tcl-links]').forEach(L.bind(function(node) {
 				dom.content(node, this.profileLinks(node.getAttribute('data-tcl-links')));
@@ -265,26 +219,15 @@ return view.extend({
 	},
 
 	showLog: function(ev) {
-		return callLog().then(function(r) {
-			textModal(_('Log'), r.log || _('The log is empty.'));
-		});
+		return common.showLog(callLog, _('Log'));
 	},
 
 	showConfig: function(ev) {
-		return callConfig().then(function(r) {
-			textModal(_('Generated configuration'), r.config || _('There is no configuration file: the client is off or the settings have not been applied yet.'),
-				E('p', { 'style': 'color:' + COLOR.dim }, r.path || ''));
-		});
+		return common.showConfig(callConfig, _('Generated configuration'), _('There is no configuration file: the client is off or the settings have not been applied yet.'));
 	},
 
 	handleRestart: function(ev) {
-		return callRestart().then(L.bind(function(r) {
-			if (r.error || !r.ok)
-				ui.addNotification(null, E('p', r.error || r.log || _('Restart failed.')), 'error');
-			else
-				ui.addTimeLimitedNotification(null, E('p', _('xray restarted; connections of the LAN reconnect by themselves.')), 5000, 'info');
-			return this.refresh();
-		}, this));
+		return common.restarted(callRestart, _('xray restarted; connections of the LAN reconnect by themselves.')).then(L.bind(this.refresh, this));
 	},
 
 	/* ---------- page ---------- */
@@ -295,27 +238,6 @@ return view.extend({
 		var links = this.links();
 		var m, s, o;
 
-		/* Saving a dialog of a table section makes LuCI re-render the whole page from its uci
-		   store, so the form's unsaved edits are put into the store before a dialog opens: for a
-		   new section before it is created (a store save renames new sections), for "Edit" right
-		   before the dialog. */
-		var saveBeforeModal = function(sec) {
-			sec.handleAdd = function(ev, name) {
-				var args = arguments;
-				return this.map.save(null, true).catch(function() {}).then(L.bind(function() {
-					this.parentSaved = true;
-					return form.GridSection.prototype.handleAdd.apply(this, args);
-				}, this));
-			};
-			sec.renderMoreOptionsModal = function(section_id, ev) {
-				var args = arguments, saved = this.parentSaved;
-				this.parentSaved = false;
-				return (saved ? Promise.resolve() : this.map.save(null, true).catch(function() {})).then(L.bind(function() {
-					return form.GridSection.prototype.renderMoreOptionsModal.apply(this, args);
-				}, this));
-			};
-		};
-
 		m = new form.Map(CFG, _('Client'),
 			_('The devices connected to this router reach the Internet through tunnel clients: a profile holds the links of one server (TCP + XTLS-Vision, XHTTP, Hysteria2, and TCP + XTLS-Vision and XHTTP through Tor, as the server page shows them), every link is a client, and one of them is active, by hand or by the measured speed. The traffic of the LAN is split by a list of domains and subnets; nothing of it bypasses the clients (kill switch) and IPv6 is switched off for the LAN while the client is on. Nothing changes on the router until you click "Save & Apply" or the button that turns the client on or off.'));
 		this.map = m;
@@ -325,19 +247,16 @@ return view.extend({
 		o = s.option(form.DummyValue, '_ov_service', _('Service'),
 			_('The button saves and applies the page like "Save & Apply". On: the LAN reaches the Internet only through this router\'s xray, which intercepts every connection of the LAN devices (TPROXY) and sends it to the active link or directly by the list; the lan → wan forwarding is switched off and IPv6 is switched off for the LAN. If xray stops, the LAN has no Internet (kill switch); ping and other protocols besides TCP and UDP do not leave the LAN meanwhile. Off: everything as before.'));
 		o.renderWidget = function() {
-			return E('div', {}, [ E('div', { 'id': 'tcl-ov-service' }, self.overviewService()), E('div', { 'style': 'margin-top:.5em' }, self.switchButton()) ]);
+			return E('div', {}, [ E('div', { 'id': 'tcl-ov-service' }, self.overviewService()), E('div', { 'style': 'margin-top:.5em' }, common.switchButton(self, CFG, 'enabled', _('Turn the client on'), _('Turn the client off'))) ]);
 		};
-		o = s.option(form.DummyValue, '_ov_active', _('Active link'));
-		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-active' }, self.overviewActive()); };
-		o = s.option(form.DummyValue, '_ov_tor', _('Tor'));
-		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-tor' }, self.overviewTor()); };
-		o = s.option(form.DummyValue, '_ov_measure', _('Measurement'));
-		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-measure' }, self.overviewMeasure()); };
-		o = s.option(form.DummyValue, '_ov_lists', _('Lists'));
-		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-lists' }, self.overviewLists()); };
-		o = s.option(form.DummyValue, '_ov_config', _('Configuration'));
-		o.renderWidget = function() { return E('span', { 'id': 'tcl-ov-config' }, self.overviewConfig()); };
-		o = s.option(form.DummyValue, '_tools', _('Tools'));
+		/* while the client is off only what helps to set it up is shown */
+		var on = function() { return !!self.status.enabled; };
+		common.statusRow(s, '_ov_active', _('Active link'), L.bind(this.overviewActive, this), function() { return on() || !self.links().length; });
+		common.statusRow(s, '_ov_tor', _('Tor'), L.bind(this.overviewTor, this), function() { return on() && !!(self.status.tor || {}).used; });
+		common.statusRow(s, '_ov_measure', _('Measurement'), L.bind(this.overviewMeasure, this), on);
+		common.statusRow(s, '_ov_lists', _('Lists'), L.bind(this.overviewLists, this), on);
+		common.statusRow(s, '_ov_config', _('Configuration'), L.bind(this.overviewConfig, this), function() { return on() || !!self.status.error; });
+		o = common.shownWhile(s.option(form.DummyValue, '_tools', _('Tools')), '_tools', on);
 		o.renderWidget = function() {
 			return E('span', {}, [
 				E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleMeasure') }, _('Measure now')), ' ',
@@ -351,142 +270,59 @@ return view.extend({
 		/* Links */
 		s = m.section(form.NamedSection, 'main', CFG, _('Links'),
 			_('Every link of the profiles below. The speed is a download of the test payload through each link, one link after the other (by default from the server\'s own site through the tunnel, https://127.0.0.1/cgi-bin/speed, served by the site of the Dynamic DNS page of the server router; a profile may name another URL, whose download is cut off after the test size); the latency is the time to the first byte.'));
+		common.shownWhile(s, '_links', function() { return self.links().length > 0; });
 		o = s.option(form.DummyValue, '_clients', _('Links'));
 		o.renderWidget = function() { return E('div', { 'id': 'tcl-clients' }, self.clientsTable()); };
 
-		/* Settings */
-		s = m.section(form.NamedSection, 'main', CFG, _('Settings'));
-		this.mainSection = s;
-
-		o = s.option(form.ListValue, 'mode', _('Choice of the link'));
-		o.value('auto', _('Automatic: the fastest of all links by the measurements'));
-		o.value('manual', _('By hand'));
-		o.default = 'auto';
-
-		o = s.option(form.ListValue, 'active', _('Active link'), _('Strictly this one; if it fails the LAN waits for it.'));
-		if (!links.length) o.value('', _('(no links yet)'));
-		links.forEach(function(l) { if (usable(l)) o.value(l.tag, linkLabel(l)); });
-		o.depends('mode', 'manual');
-		o.retain = true;
-
-		o = s.option(form.Value, 'test_interval', _('Measure every, minutes'), _('In the automatic mode with two links or more: the test download through every link, and the fastest one becomes active. The active link also gets a small request every minute (a HEAD request to its test URL, or one byte from the server\'s site); when it does not answer, the other links get the same request and the one that answers first becomes active. By hand or with one link nothing is measured on its own ("Measure now" still works).'));
-		o.datatype = 'range(1,1440)';
-		o.placeholder = '60';
-		o.rmempty = false;
-
-		o = s.option(form.Value, 'test_bytes', _('Test download, bytes'), _('10 000 to 20 000 000, per link and measurement.'));
-		o.datatype = 'range(10000,20000000)';
-		o.placeholder = '2000000';
-		o.rmempty = false;
-
-		o = s.option(form.Value, 'test_threshold', _('Switch when faster by, %'), _('Automatic mode: another link replaces the active one only when it is faster by at least this much; a failed active link is replaced at once.'));
-		o.datatype = 'range(0,1000)';
-		o.placeholder = '20';
-		o.rmempty = false;
-
-		o = s.option(form.Value, 'test_timeout', _('Test timeout, seconds'));
-		o.datatype = 'range(5,300)';
-		o.placeholder = '15';
-		o.rmempty = false;
-
-		o = s.option(widgets.NetworkSelect, 'metered', _('Metered uplinks'), _('While the router\'s default route goes through one of these interfaces (a mobile modem, for example), the periodic measurement does not run; the measurement after every start of xray and the minute check of the active link stay.'));
-		o.multiple = true;
-		o.nocreate = true;
-
-		o = s.option(form.Value, 'resolver', _('DNS through the tunnel'),
-			_('The resolver asked through the active link for the names that go through the tunnel. The other names are resolved through the provider\'s resolvers as before; the names of the servers themselves always are.'));
-		o.datatype = 'ip4addr';
-		o.placeholder = '1.1.1.1';
-		o.rmempty = false;
-
-		/* The list */
-		s = m.section(form.NamedSection, 'main', CFG, _('Split tunnelling'),
-			_('Which traffic of the LAN goes through the client. The list holds domains (with their subdomains), subnets, and sources fetched daily.'));
-
-		o = s.option(form.Flag, 'split', _('Split by the list'), _('Off: everything from the LAN goes through the active link.'));
-		o.rmempty = false;
-		o.default = '1';
-
-		o = s.option(form.ListValue, 'split_mode', _('Through the client goes'));
-		o.value('list', _('only what is in the list'));
-		o.value('except', _('everything except the list'));
-		o.default = 'list';
-		o.depends('split', '1');
-		o.retain = true;
-
-		o = s.option(form.DynamicList, 'rule', _('Entries'),
-			_('A domain (example.com covers its subdomains; names in other alphabets in their punycode form, e.g. xn--p1ai for рф) or a subnet (10.1.2.0/24, a single address as 10.1.2.3).'));
-		o.depends('split', '1');
-		o.retain = true;
-		o.rmempty = true;
-		o.validate = function(section_id, value) {
-			var v = String(value || '').trim().toLowerCase();
-			if (!v) return true;
-			if (/^\d+\.\d+\.\d+\.\d+(\/\d+)?$/.test(v)) return true;
-			v = v.replace(/^\*?\./, '');
-			return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(v) ? true : _('A domain or a subnet');
-		};
-
-		s = m.section(form.GridSection, 'source', _('Sources'),
-			_('Lists fetched once a day, through the active link when one works: a text file with one domain or IPv4 subnet per line (the v2fly domain-list-community format with include: is understood), or a v2fly .dat file with the kind and the tag of the list inside it. Shipped: the IPv4 networks of Russia (ipverse) and the main Russian services (v2fly category-ru).'));
-		s.anonymous = true;
-		s.addremove = true;
-		s.nodescriptions = true;
-		s.addbtntitle = _('Add source…');
-		s.modaltitle = function(sid) { return _('Source') + ' » ' + (uci.get(CFG, sid, 'name') || _('new source')); };
-		saveBeforeModal(s);
-		o = s.option(form.Flag, 'enabled', _('Enabled'));
-		o.rmempty = false;
-		o.default = '1';
-		o.editable = true;
-		o = s.option(form.Value, 'name', _('Name'), _('Letters, digits, dots, dashes; it is the file name on the router.'));
-		o.rmempty = false;
-		o.validate = function(section_id, value) {
-			return /^[A-Za-z0-9._-]{1,64}$/.test(String(value || '').trim()) ? true : _('1 to 64 characters: letters, digits, dots, dashes');
-		};
-		o = s.option(form.Value, 'url', _('URL'));
-		o.rmempty = false;
-		o.validate = function(section_id, value) {
-			return /^https?:\/\/\S+$/.test(String(value || '').trim()) ? true : _('http:// or https:// address');
-		};
-		o = s.option(form.ListValue, 'kind', _('Kind'), _('Only for a v2fly .dat file: whether the list inside it holds addresses (geoip) or domains (geosite).'));
-		o.modalonly = true;
-		o.value('', _('a text list'));
-		o.value('ip', _('addresses (geoip .dat)'));
-		o.value('domain', _('domains (geosite .dat)'));
-		o.rmempty = true;
-		o = s.option(form.Value, 'tag', _('List in the file'), _('The name of the list inside the .dat file, for example "ru" or "category-ru".'));
-		o.modalonly = true;
-		o.rmempty = true;
-		o.depends('kind', 'ip');
-		o.depends('kind', 'domain');
-		o.validate = function(section_id, value) {
-			var v = String(value || '').trim();
-			return (!v || /^[A-Za-z0-9!@._-]+$/.test(v)) ? true : _('Letters, digits, dots, dashes');
-		};
-		o = s.option(form.DummyValue, '_state', _('Fetched'));
-		o.modalonly = false;
-		o.editable = true;
-		o.renderWidget = function(section_id) {
-			var name = uci.get(CFG, section_id, 'name'), src = ((self.status.state || {}).sources || []).filter(function(x) { return x.sid == section_id || x.name == name; })[0];
-			if (!src) return span(COLOR.dim, _('not applied yet'));
-			if (!src.ready) return span(src.error ? COLOR.bad : COLOR.dim, src.error || _('not fetched yet'));
-			var txt = (src.format == 'dat')
-				? _('list "%s" (%s) of a .dat file').format(src.tag, src.kind == 'ip' ? _('addresses') : _('domains'))
-				: _('%d domains, %d subnets').format(src.domains, src.ips);
-			return E('span', {}, [ span(COLOR.ok, txt + ', ' + timeAgo(src.time)),
-				src.error ? E('div', { 'style': 'color:' + COLOR.warn }, _('last update: %s').format(src.error)) : '' ]);
-		};
-
 		/* Profiles */
 		s = m.section(form.GridSection, 'profile', _('Profiles'),
-			_('A profile holds the links of one server: one per transport, and with "Through Tor" the links through the onion address of the server with the key of its onion service. Paste them from "Links" next to a profile on the Server page of the server router (the links through Tor and the Tor key are there too).'));
+			_('A profile holds the links of one server: one per transport, and with "Through Tor" the links through the onion address of the server with the key of its onion service. Paste them from "Links" next to a profile on the Server page of the server router (the links through Tor and the Tor key are there too; its "Copy all" gives every one of them for "All links at once" in the dialog of the profile).'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.nodescriptions = true;
 		s.addbtntitle = _('Add profile…');
 		s.modaltitle = function(sid) { return _('Profile') + ' » ' + (uci.get(CFG, sid, 'name') || _('new profile')); };
-		saveBeforeModal(s);
+		common.saveBeforeModal(s);
+
+		/* "Copy all" of the Links dialog on the Server page gives every link and the Tor key at once: they go
+		   into the fields of their transports here (not saved as such) */
+		o = s.option(form.TextValue, '_paste', _('All links at once'),
+			_('Paste what "Copy all" of the Links dialog on the Server page of the server router gives (every link and the Tor key, one per line), then "Fill in the fields".'));
+		o.modalonly = true;
+		o.rows = 4;
+		o.placeholder = 'vless://…\nhysteria2://…\n…:descriptor:x25519:…';
+		o.cfgvalue = function() { return ''; };
+		o.write = o.remove = function() {};
+		o = s.option(form.Button, '_fill', ' ');
+		o.modalonly = true;
+		o.inputtitle = _('Fill in the fields');
+		o.onclick = function(ev, section_id) {
+			var sec = this.section, get = function(n) { return sec.getUIElement(section_id, n); };
+			var text = String(get('_paste').getValue() || ''), set = {}, name = '';
+			text.split(/\s+/).forEach(function(line) {
+				var v = line.trim(), m;
+				if (!v) return;
+				if (/^[a-z2-7]{56}(\.onion)?:descriptor:x25519:[a-z2-7]{52}$/i.test(v)) { set.tor_key = v; return; }
+				var p = /^([a-z0-9]+):\/\/[^@\/?#]*@([^:\/?#]+|\[[0-9a-fA-F:.]+\]):\d+/.exec(v);
+				if (!p) return;
+				var tor = /\.onion$/i.test(p[2]);
+				var t = (p[1] == 'hysteria2' || p[1] == 'hy2') ? 'hysteria2'
+					: (p[1] != 'vless') ? null : /[?&]type=(xhttp|splithttp)(&|#|$)/.test(v) ? 'xhttp' : 'vision';
+				if (!t || (tor && t == 'hysteria2')) return;
+				set[tor ? t + '_tor' : t] = v;
+				if (!name && (m = /#([^#]+)$/.exec(v))) name = decodeURIComponent(m[1]).replace(/(-xhttp)?(-hysteria2)?(-tor)?$/, '');
+			});
+			if (!Object.keys(set).length) {
+				ui.addTimeLimitedNotification(null, E('p', _('No link and no Tor key found in the text.')), 5000, 'warning');
+				return;
+			}
+			PROTOCOLS.concat([ 'tor_key' ]).forEach(function(n) { var el = get(n); if (el && set[n]) { el.setValue(set[n]); el.triggerValidation(); } });
+			if (set.vision_tor || set.xhttp_tor) { var t = get('tor'); if (t) t.setValue('1'); }
+			var nm = get('name');
+			if (nm && name && !String(nm.getValue() || '').trim()) { nm.setValue(name); nm.triggerValidation(); }
+			get('_paste').setValue('');
+			ui.addTimeLimitedNotification(null, E('p', _('Filled in: %s.').format(Object.keys(set).map(function(n) { return n == 'tor_key' ? _('the Tor key') : TITLES[n]; }).join(', '))), 5000, 'info');
+		};
 
 		o = s.option(form.Flag, 'enabled', _('Enabled'), _('Switch off to leave out all links of this profile without deleting them.'));
 		o.rmempty = false;
@@ -540,7 +376,6 @@ return view.extend({
 
 		o = s.option(form.Flag, 'tor', _('Through Tor'),
 			_('The links through Tor go through this router\'s tor (its SOCKS port 127.0.0.1:9050) to the onion address of the server and take part in the choice like the other links. tor runs while they are in use, with the connection settings of XTunnel → Server (section Tor). Tor carries TCP only, so Hysteria2 has no link through Tor. Off: the links through Tor are kept but not used.'));
-		o.rmempty = false;
 		o.default = '0';
 		o.editable = true;
 
@@ -572,6 +407,152 @@ return view.extend({
 		o.validate = function(section_id, value) {
 			var v = String(value || '').trim();
 			return (!v || /^https?:\/\/\S+$/.test(v)) ? true : _('http:// or https:// address');
+		};
+
+		/* Settings */
+		s = m.section(form.NamedSection, 'main', CFG, _('Settings'));
+		this.mainSection = s;
+		s.tab('choice', _('Choice of the link'));
+		s.tab('dns', _('DNS'));
+		s.tab('tor', _('Tor without a server'));
+
+		o = s.taboption('choice', form.ListValue, 'mode', _('Choice of the link'));
+		o.value('auto', _('Automatic: the fastest of all links by the measurements'));
+		o.value('manual', _('By hand'));
+		o.default = 'auto';
+
+		o = s.taboption('choice', form.ListValue, 'active', _('Active link'), _('Strictly this one; if it fails the LAN waits for it.'));
+		if (!links.length) o.value('', _('(no links yet)'));
+		links.forEach(function(l) { if (usable(l)) o.value(l.tag, linkLabel(l)); });
+		o.depends('mode', 'manual');
+		o.retain = true;
+
+		o = s.taboption('choice', form.Value, 'test_interval', _('Measure every, minutes'), _('In the automatic mode with two links or more: the test download through every link, and the fastest one becomes active. The active link also gets a small request every minute (a HEAD request to its test URL, or one byte from the server\'s site); when it does not answer, the other links get the same request and the one that answers first becomes active. By hand or with one link nothing is measured on its own ("Measure now" still works).'));
+		o.datatype = 'range(1,1440)';
+		o.placeholder = '60';
+		o.rmempty = false;
+
+		o = s.taboption('choice', form.Value, 'test_bytes', _('Test download, bytes'), _('10 000 to 20 000 000, per link and measurement.'));
+		o.datatype = 'range(10000,20000000)';
+		o.placeholder = '2000000';
+		o.rmempty = false;
+
+		o = s.taboption('choice', form.Value, 'test_threshold', _('Switch when faster by, %'), _('Automatic mode: another link replaces the active one only when it is faster by at least this much; a failed active link is replaced at once.'));
+		o.datatype = 'range(0,1000)';
+		o.placeholder = '20';
+		o.rmempty = false;
+
+		o = s.taboption('choice', form.Value, 'test_timeout', _('Test timeout, seconds'));
+		o.datatype = 'range(5,300)';
+		o.placeholder = '15';
+		o.rmempty = false;
+
+		o = s.taboption('choice', form.MultiValue, 'metered', _('Metered uplinks'), _('While the router\'s default route goes through one of these interfaces (a mobile modem, for example), the periodic measurement does not run; the measurement after every start of xray and the minute check of the active link stay.'));
+		/* the interfaces of /etc/config/network (widgets.NetworkSelect loads the whole network model) */
+		uci.sections('network', 'interface').forEach(function(n) {
+			if (n['.name'] != 'loopback') o.value(n['.name'], n['.name']);
+		});
+		o.display_size = 4;
+
+		o = s.taboption('dns', form.Value, 'resolver', _('DNS through the tunnel'),
+			_('The resolver asked through the active link for the names that go through the tunnel. The other names are resolved through the provider\'s resolvers as before; the names of the servers themselves always are.'));
+		o.datatype = 'ip4addr';
+		o.placeholder = '1.1.1.1';
+		o.rmempty = false;
+
+		o = s.taboption('tor', form.Flag, 'tor_exit', _('Enabled'),
+			_('One more link, "Tor without a server": the LAN through the Tor network and out of its exit relays, with this router\'s tor, when no server is at hand. It takes part in the choice like the other links (in the automatic mode it becomes active when it is the fastest, in practice when the servers do not answer). Tor carries TCP only: UDP (QUIC, calls, games) does not pass, and the resolver above is asked over TCP while the link is on.'));
+		o.rmempty = false;
+		o.default = '0';
+
+		o = s.taboption('tor', form.Value, 'tor_test_url', _('URL for the speed test through Tor'),
+			_('What the link "Tor without a server" is measured and checked with, through Tor and out of an exit relay. Empty: cgi-bin/speed of this router\'s own site at its domain (the site of the Dynamic DNS page), https://<domain>/cgi-bin/speed?bytes=20000000. When a router in front forwards another public port to the site, or for another of your sites, enter the URL.'));
+		o.placeholder = _('empty = this router\'s own site');
+		o.rmempty = true;
+		o.retain = true;
+		o.depends('tor_exit', '1');
+		o.validate = function(section_id, value) {
+			var v = String(value || '').trim();
+			return (!v || /^https?:\/\/\S+$/.test(v)) ? true : _('http:// or https:// address');
+		};
+
+		/* The list */
+		s = m.section(form.NamedSection, 'main', CFG, _('Split tunnelling'),
+			_('Which traffic of the LAN goes through the client. The list holds domains (with their subdomains), subnets, and sources fetched daily.'));
+
+		o = s.option(form.Flag, 'split', _('Split by the list'), _('Off: everything from the LAN goes through the active link.'));
+		o.rmempty = false;
+		o.default = '1';
+
+		o = s.option(form.ListValue, 'split_mode', _('Through the client goes'));
+		o.value('list', _('only what is in the list'));
+		o.value('except', _('everything except the list'));
+		o.default = 'list';
+		o.depends('split', '1');
+		o.retain = true;
+
+		o = s.option(form.DynamicList, 'rule', _('Entries'),
+			_('A domain (example.com covers its subdomains; names in other alphabets in their punycode form, e.g. xn--p1ai for рф) or a subnet (10.1.2.0/24, a single address as 10.1.2.3).'));
+		o.depends('split', '1');
+		o.retain = true;
+		o.rmempty = true;
+		o.validate = function(section_id, value) {
+			var v = String(value || '').trim().toLowerCase();
+			if (!v) return true;
+			if (/^\d+\.\d+\.\d+\.\d+(\/\d+)?$/.test(v)) return true;
+			v = v.replace(/^\*?\./, '');
+			return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(v) ? true : _('A domain or a subnet');
+		};
+
+		s = m.section(form.GridSection, 'source', _('Sources'),
+			_('Lists fetched once a day, through the active link when one works: a text file with one domain or IPv4 subnet per line (the v2fly domain-list-community format with include: is understood), or a v2fly .dat file with the kind and the tag of the list inside it. Shipped: the IPv4 networks of Russia (ipverse) and the main Russian services (v2fly category-ru).'));
+		s.anonymous = true;
+		s.addremove = true;
+		s.nodescriptions = true;
+		s.addbtntitle = _('Add source…');
+		s.modaltitle = function(sid) { return _('Source') + ' » ' + (uci.get(CFG, sid, 'name') || _('new source')); };
+		common.saveBeforeModal(s);
+		o = s.option(form.Flag, 'enabled', _('Enabled'));
+		o.rmempty = false;
+		o.default = '1';
+		o.editable = true;
+		o = s.option(form.Value, 'name', _('Name'), _('Letters, digits, dots, dashes; it is the file name on the router.'));
+		o.rmempty = false;
+		o.validate = function(section_id, value) {
+			return /^[A-Za-z0-9._-]{1,64}$/.test(String(value || '').trim()) ? true : _('1 to 64 characters: letters, digits, dots, dashes');
+		};
+		o = s.option(form.Value, 'url', _('URL'));
+		o.rmempty = false;
+		o.validate = function(section_id, value) {
+			return /^https?:\/\/\S+$/.test(String(value || '').trim()) ? true : _('http:// or https:// address');
+		};
+		o = s.option(form.ListValue, 'kind', _('Kind'), _('Only for a v2fly .dat file: whether the list inside it holds addresses (geoip) or domains (geosite).'));
+		o.modalonly = true;
+		o.value('', _('a text list'));
+		o.value('ip', _('addresses (geoip .dat)'));
+		o.value('domain', _('domains (geosite .dat)'));
+		o.rmempty = true;
+		o = s.option(form.Value, 'tag', _('List in the file'), _('The name of the list inside the .dat file, for example "ru" or "category-ru".'));
+		o.modalonly = true;
+		o.rmempty = true;
+		o.depends('kind', 'ip');
+		o.depends('kind', 'domain');
+		o.validate = function(section_id, value) {
+			var v = String(value || '').trim();
+			return (!v || /^[A-Za-z0-9!@._-]+$/.test(v)) ? true : _('Letters, digits, dots, dashes');
+		};
+		o = s.option(form.DummyValue, '_state', _('Fetched'));
+		o.modalonly = false;
+		o.editable = true;
+		o.renderWidget = function(section_id) {
+			var name = uci.get(CFG, section_id, 'name'), src = ((self.status.state || {}).sources || []).filter(function(x) { return x.sid == section_id || x.name == name; })[0];
+			if (!src) return span(COLOR.dim, _('not applied yet'));
+			if (!src.ready) return span(src.error ? COLOR.bad : COLOR.dim, src.error || _('not fetched yet'));
+			var txt = (src.format == 'dat')
+				? _('list "%s" (%s) of a .dat file').format(src.tag, src.kind == 'ip' ? _('addresses') : _('domains'))
+				: _('%d domains, %d subnets').format(src.domains, src.ips);
+			return E('span', {}, [ span(COLOR.ok, txt + ', ' + timeAgo(src.time)),
+				src.error ? E('div', { 'style': 'color:' + COLOR.warn }, _('last update: %s').format(src.error)) : '' ]);
 		};
 
 		return m.render().then(L.bind(function(nodes) {

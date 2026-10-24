@@ -10,23 +10,13 @@
 
 'use strict';
 
-import { popen } from 'fs';
 import { cursor } from 'uci';
+import { shq, exec } from 'xtunnel.common';
 import { provider } from 'xtunnel-ddns.providers';
 import { name_servers } from 'xtunnel-ddns.dns';
 
 const WAIT_MAX = 420;
 const WAIT_BLIND = 120;
-
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-
-function exec(cmd) {
-	let p = popen(cmd, 'r');
-	if (!p) return '';
-	let out = p.read('all') ?? '';
-	p.close();
-	return out;
-}
 
 function say(msg) { print(`dns01: ${msg}\n`); }
 
@@ -34,7 +24,7 @@ function say(msg) { print(`dns01: ${msg}\n`); }
 function lookup_all(fqdn, value, ns) {
 	let all = true, reached = 0;
 	for (let s in ns) {
-		let out = exec(`nslookup -type=txt ${shq(fqdn)} ${shq(s)} 2>&1`);
+		let out = exec(`nslookup -type=txt ${shq(fqdn)} ${shq(s)} 2>&1`).out;
 		if (index(out, 'no servers could be reached') < 0 && index(out, 'timed out') < 0) reached++;
 		if (index(out, value) < 0) all = false;
 	}
@@ -76,10 +66,10 @@ if (method == 'begin') {
 		}
 		if (!r.reached) {
 			say(`none of the name servers answers queries from here; waiting ${WAIT_BLIND} seconds instead`);
-			system(`sleep ${WAIT_BLIND}`);
+			sleep(WAIT_BLIND * 1000);
 			exit(0);
 		}
-		system('sleep 10');
+		sleep(10000);
 	}
 	say(`gave up waiting after ${WAIT_MAX / 60} minutes, continuing anyway`);
 	exit(0);

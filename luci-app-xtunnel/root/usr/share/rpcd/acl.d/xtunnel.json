@@ -8,7 +8,7 @@
 				"xtunnel-client": [ "status", "log", "config" ],
 				"xtunnel-tor": [ "status", "keypair", "pubkey", "config", "log" ]
 			},
-			"uci": [ "xtunnel-ddns", "xtunnel-server", "xtunnel-client" ]
+			"uci": [ "xtunnel-ddns", "xtunnel-server", "xtunnel-client", "network" ]
 		},
 		"write": {
 			"ubus": {

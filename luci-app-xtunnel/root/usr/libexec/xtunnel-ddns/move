@@ -20,8 +20,9 @@
 
 'use strict';
 
-import { readfile, mkdir, open, popen, stat } from 'fs';
+import { readfile, mkdir, stat } from 'fs';
 import { cursor } from 'uci';
+import { shq, exec, log, lock } from 'xtunnel.common';
 import { grade, in_effect, set_in_effect, target, apply_pending, move_state, set_move_state, watchers, confirmed } from 'xtunnel-ddns.sitecert';
 import { lookup, published } from 'xtunnel-ddns.dns';
 
@@ -35,12 +36,9 @@ const DNS_WAIT      = 600;
 const CONFIRM_WAIT  = 90;   // as LuCI's rollback of an apply the browser did not confirm
 const WATCH_AGE     = 15;   // an open page calls status every 5 seconds
 
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-function exec(cmd) { let p = popen(cmd, 'r'); let o = p?.read('all') ?? ''; p?.close(); return o; }
-function log(msg) { system(`logger -t xtunnel-ddns ${shq(msg)}`); }
 
 function wait_apply() {
-	for (let i = 0; i < 150 && apply_pending(); i++) system('sleep 2');
+	for (let i = 0; i < 150 && apply_pending(); i++) sleep(2000);
 }
 
 function site_target() {
@@ -91,8 +89,8 @@ function present(host) {
 }
 
 mkdir(RUN, 0o755);
-let lock = open(`${RUN}/move.lock`, 'we');
-if (!lock?.lock('xn')) exit(0);
+let held = lock(`${RUN}/move.lock`);
+if (!held) exit(0);
 
 wait_apply();
 let t = site_target();
@@ -106,7 +104,7 @@ let saved = (prev?.config != null && prev.config != config_time());   // the con
 
 let fail = function(kind, error) {
 	set_move_state({ state: 'failed', kind: kind, from: from, to: t.host, error: error, attempt: time(), config: config_time() });
-	log(`site: not moved to ${t.host}: ${error}`);
+	log(CFG, `site: not moved to ${t.host}: ${error}`);
 	exit(0);
 };
 
@@ -114,7 +112,7 @@ let fail = function(kind, error) {
 if (g.grade < want) {
 	if (prev?.state == 'failed' && prev.kind == 'cert' && !saved && time() - prev.attempt < RETRY_CERT) exit(0);
 	set_move_state({ state: 'issuing', from: from, to: t.host });
-	log(`site: requesting a certificate for ${t.host}`);
+	log(CFG, `site: requesting a certificate for ${t.host}`);
 	exec(`flock ${shq(`${RUN}/cert-${t.sid}.lock`)} ${CERT} run ${shq(t.sid)} 2>&1`);
 	g = grade(t.host);
 	if (g.grade < 1 || (g.grade < want && g.grade < cur.grade))
@@ -146,7 +144,7 @@ while (true) {
 	if (p.ok) break;
 	set_move_state({ state: 'waiting-dns', from: from, to: t.host, points: join(' ', p.addrs) });
 	if (time() - t0 > DNS_WAIT) exit(0);
-	system('sleep 20');
+	sleep(20000);
 	if (site_target()?.host != t.host) exit(0);
 }
 
@@ -163,7 +161,7 @@ if (check) {
 	let ready = time(), seen = false;
 	set_move_state({ state: 'ready', from: from, to: t.host, confirm_wait: CONFIRM_WAIT });
 	for (let i = 0; i < 8 && !seen; i++) {
-		system('sleep 2');
+		sleep(2000);
 		for (let n, at in watchers(WATCH_AGE)) if (at > ready) seen = true;
 	}
 	if (!seen) {
@@ -185,7 +183,7 @@ if (check) {
 	let until = time() + CONFIRM_WAIT, ok = confirmed(t.host, at);
 	if (!ok && until > at + CONFIRM_WAIT) set_move_state({ state: 'switched', from: from, to: t.host, deadline: until });
 	while (!ok && time() < until) {
-		system('sleep 2');
+		sleep(2000);
 		ok = confirmed(t.host, at);
 		if (!ok && site_target()?.host != t.host) break;
 	}
@@ -195,4 +193,4 @@ if (check) {
 	}
 }
 set_move_state({ state: 'moved', from: from, to: t.host });
-log(`site: moved from ${from || 'the router\'s own certificate'} to ${t.host}`);
+log(CFG, `site: moved from ${from || 'the router\'s own certificate'} to ${t.host}`);

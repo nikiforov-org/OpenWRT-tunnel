@@ -91,6 +91,9 @@ docker run --rm \
 			[ -d /tmp/custom/luci-app-xtunnel ] && cp /out/tunnel-tor-bridges.txt /tmp/custom/luci-app-xtunnel/root/usr/share/xtunnel-tor/bridges.txt
 			[ -d /tmp/custom/luci-app-tunnel-tor ] && cp /out/tunnel-tor-bridges.txt /tmp/custom/luci-app-tunnel-tor/root/usr/share/tunnel-tor/bridges.txt
 		fi
+		find /tmp/custom -name "._*" -delete        # AppleDouble files of an exFAT source tree
+		# the comment lines of the ucode scripts stay in the source tree only
+		[ -d /tmp/custom/luci-app-xtunnel ] && python3 /custom/utils/strip-ucode.py /tmp/custom/luci-app-xtunnel/root
 		find /tmp/custom -type d -exec chmod 755 {} +
 		find /tmp/custom -type f -exec chmod 644 {} +
 		find /tmp/custom \( -path "*/root/etc/init.d/*" -o -path "*/root/usr/libexec/*" \

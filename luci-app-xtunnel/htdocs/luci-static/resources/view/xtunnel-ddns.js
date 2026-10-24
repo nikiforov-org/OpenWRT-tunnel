@@ -6,6 +6,7 @@
 'require rpc';
 'require poll';
 'require dom';
+'require xtunnel.common as common';
 
 var callStatus      = rpc.declare({ object: 'xtunnel-ddns', method: 'status', params: [ 'host' ], expect: {} });
 var callDdnsUpdate  = rpc.declare({ object: 'xtunnel-ddns', method: 'ddns_update', params: [ 'section' ], expect: {} });
@@ -31,24 +32,7 @@ var PROVIDERS = [
 	[ 'cloudflare', 'Cloudflare (cloudflare.com)' ]
 ];
 
-var COLOR = { ok: '#2a9d4a', warn: '#d08a00', bad: '#d33', dim: '#888' };
-
-function span(color, text) {
-	return E('span', { 'style': color ? 'color:' + color : '' }, text);
-}
-
-function timeAgo(ts) {
-	if (!ts) return null;
-	var s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-	if (s < 90)       return _('%d seconds ago').format(s);
-	if (s < 5400)     return _('%d minutes ago').format(Math.round(s / 60));
-	if (s < 172800)   return _('%d hours ago').format(Math.round(s / 3600));
-	return _('%d days ago').format(Math.round(s / 86400));
-}
-
-function daysLeft(expires) {
-	return expires ? Math.floor((expires * 1000 - Date.now()) / 86400000) : null;
-}
+var COLOR = common.COLOR, span = common.span, timeAgo = common.timeAgo, daysLeft = common.daysLeft;
 
 function siteName(fileName) {
 	return String(fileName || '').replace(/\.(tar\.gz|tgz)$/i, '').toLowerCase()
@@ -290,12 +274,8 @@ return view.extend({
 			if (this.trackMove(st) || !st) return;
 			this.status = st;
 			var el;
-			if ((el = document.getElementById('tdd-ov-ip')))      dom.content(el, this.status.public_ip || span(COLOR.warn, _('Could not detect')));
 			if ((el = document.getElementById('tdd-ov-site')))    dom.content(el, this.overviewSite());
-			if ((el = document.getElementById('tdd-ov-access')))  dom.content(el, this.overviewAccess());
-			if ((el = document.getElementById('tdd-ov-renewal'))) dom.content(el, this.overviewRenewal());
-			if ((el = document.getElementById('tdd-ov-content'))) dom.content(el, this.overviewContent());
-			if ((el = document.getElementById('tdd-ov-login')))   dom.content(el, this.overviewLogin());
+			common.updateRows();
 			document.querySelectorAll('[data-tdd-ddns]').forEach(L.bind(function(n) { dom.content(n, this.ddnsCell(n.getAttribute('data-tdd-ddns'))); }, this));
 			document.querySelectorAll('[data-tdd-cert]').forEach(L.bind(function(n) { dom.content(n, this.certCell(n.getAttribute('data-tdd-cert'))); }, this));
 		}, this));
@@ -325,25 +305,8 @@ return view.extend({
 		}, this));
 	},
 
-	ensureSaved: function() {
-		return this.map.save(null, true).then(function() {
-			return uci.changes();
-		}).then(function(changes) {
-			var n = 0;
-			for (var c in (changes || {})) n += changes[c].length;
-			if (n > 0) {
-				ui.addNotification(null, E('p', _('There are unsaved changes. Click "Save & Apply" at the bottom of the page first, then try again.')), 'warning');
-				return false;
-			}
-			return true;
-		}).catch(function(e) {
-			ui.addNotification(null, E('p', String(e.message || e)), 'error');
-			return false;
-		});
-	},
-
 	handleDdnsUpdate: function(sid, ev) {
-		return this.ensureSaved().then(L.bind(function(ok) {
+		return common.ensureSaved(this.map).then(L.bind(function(ok) {
 			if (!ok) return;
 			return callDdnsUpdate(sid).then(L.bind(function(r) {
 				if (r.error)
@@ -356,7 +319,7 @@ return view.extend({
 	},
 
 	handleCertIssue: function(sid, ev) {
-		return this.ensureSaved().then(L.bind(function(ok) {
+		return common.ensureSaved(this.map).then(L.bind(function(ok) {
 			if (!ok) return;
 			return callCertIssue(sid).then(L.bind(function(r) {
 				if (r.error)
@@ -371,14 +334,7 @@ return view.extend({
 	},
 
 	showLog: function(fetch, sid, title) {
-		return fetch(sid).then(function(r) {
-			ui.showModal(title, [
-				E('textarea', { 'style': 'width:100%; font-family:monospace; font-size:12px', 'rows': 24, 'readonly': 'readonly' }, r.log || _('The log is empty.')),
-				E('div', { 'class': 'right' }, [
-					E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close'))
-				])
-			]);
-		});
+		return common.showLog(function() { return fetch(sid); }, title);
 	},
 
 	handleChangePort: function(ev) {
@@ -422,10 +378,7 @@ return view.extend({
 
 	showSiteLog: function(ev) {
 		return callSiteRebuildLog('').then(function(r) {
-			ui.showModal(_('Site rebuild log'), [
-				E('textarea', { 'style': 'width:100%; font-family:monospace; font-size:12px', 'rows': 24, 'readonly': 'readonly' }, r.log || _('No rebuild has run yet.')),
-				E('div', { 'class': 'right' }, [ E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close')) ])
-			]);
+			common.textModal(_('Site rebuild log'), r.log || _('No rebuild has run yet.'));
 		});
 	},
 
@@ -572,25 +525,22 @@ return view.extend({
 		/* Overview */
 		s = m.section(form.NamedSection, 'main', 'xtunnel-ddns', _('Overview'));
 
-		o = s.option(form.DummyValue, '_ov_ip', _('Public IP address'));
-		o.renderWidget = function() { return E('span', { 'id': 'tdd-ov-ip' }, st.public_ip || span(COLOR.warn, _('Could not detect'))); };
+		common.statusRow(s, '_ov_ip', _('Public IP address'), function() { return self.status.public_ip || span(COLOR.warn, _('Could not detect')); });
+
+		o = s.option(form.Value, 'ip_url', _('Public IP detection'),
+			_('A web page that returns the router\'s public IPv4 address as plain text. Used by the address updater.'));
+		o.rmempty = false;
+		o.placeholder = 'https://ipv4-internet.yandex.net/api/v0/ip';
 
 		o = s.option(form.DummyValue, '_ov_site', _('Web site'));
 		o.renderWidget = function() { return E('span', { 'id': 'tdd-ov-site' }, self.overviewSite()); };
 
-		if (st.main && st.main.site_has_build) {
-			o = s.option(form.DummyValue, '_ov_content', _('Content'));
-			o.renderWidget = function() { return E('span', { 'id': 'tdd-ov-content' }, self.overviewContent()); };
-		}
-
-		o = s.option(form.DummyValue, '_ov_login', _('Admin login'));
-		o.renderWidget = function() { return E('span', { 'id': 'tdd-ov-login' }, self.overviewLogin()); };
-
-		o = s.option(form.DummyValue, '_ov_access', _('Access from the Internet'));
-		o.renderWidget = function() { return E('span', { 'id': 'tdd-ov-access' }, self.overviewAccess()); };
-
-		o = s.option(form.DummyValue, '_ov_renewal', _('Certificate renewal'));
-		o.renderWidget = function() { return E('span', { 'id': 'tdd-ov-renewal' }, self.overviewRenewal()); };
+		/* rows with nothing to say in the current state are left out */
+		var main = function() { return self.status.main || {}; };
+		common.statusRow(s, '_ov_content', _('Content'), L.bind(this.overviewContent, this), function() { return !!(main().site_enabled && main().site_has_build); });
+		common.statusRow(s, '_ov_login', _('Admin login'), L.bind(this.overviewLogin, this), function() { return !!(main().site_enabled && main().site_has_login); });
+		common.statusRow(s, '_ov_access', _('Access from the Internet'), L.bind(this.overviewAccess, this));
+		common.statusRow(s, '_ov_renewal', _('Certificate renewal'), L.bind(this.overviewRenewal, this), function() { return !!main().cron || Object.keys(self.status.domains || {}).length > 0; });
 
 		/* Domains */
 		s = m.section(form.GridSection, 'domain', _('Domains'),
@@ -758,22 +708,15 @@ return view.extend({
 				return true;
 			};
 
-			o = s.option(form.Button, '_rebuild', _('Rebuild now'),
-				_('Fetch the latest content and regenerate the page immediately.'));
-			o.inputtitle = _('Rebuild now');
-			o.inputstyle = 'apply';
-			o.onclick = L.bind(this.handleSiteRebuild, this);
-
-			o = s.option(form.Button, '_rebuild_log', _('Rebuild log'),
-				_('Output of the last content rebuild.'));
-			o.inputtitle = _('Show log');
-			o.onclick = L.bind(this.showSiteLog, this);
+			o = s.option(form.DummyValue, '_rebuild', _('Build'),
+				_('"Rebuild now" fetches the latest content and regenerates the pages at once; "Show log" shows the output of the last build.'));
+			o.renderWidget = function() {
+				return E('span', {}, [
+					E('button', { 'class': 'btn cbi-button cbi-button-apply', 'click': ui.createHandlerFn(self, 'handleSiteRebuild') }, _('Rebuild now')), ' ',
+					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(self, 'showSiteLog') }, _('Show log'))
+				]);
+			};
 		}
-
-		o = s.option(form.Value, 'ip_url', _('Public IP detection'),
-			_('A web page that returns the router\'s public IPv4 address as plain text. Used by the address updater.'));
-		o.rmempty = false;
-		o.placeholder = 'https://ipv4-internet.yandex.net/api/v0/ip';
 
 		/* Switch off */
 		s = m.section(form.NamedSection, 'main', 'xtunnel-ddns', _('Switch off'));

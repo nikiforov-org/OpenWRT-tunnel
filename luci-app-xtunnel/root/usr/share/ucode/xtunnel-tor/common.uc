@@ -1,27 +1,14 @@
 'use strict';
-// Shared helpers of the Tor part of luci-app-xtunnel: the client keys (x25519, base32 as tor expects
-// them, made and derived by xray), the running tor of the stock service, and tor's control port as the
-// configuration in effect writes it.
-//   import { tor_instance, control, bootstrap_phase } from 'xtunnel-tor.common';
+// The Tor part's helpers: the client keys (x25519, base32 as tor expects them, made and derived by xray)
+// and tor's control port as the configuration in effect writes it.
+//   import { control, bootstrap_phase } from 'xtunnel-tor.common';
 
-import { popen, readfile } from 'fs';
-import { connect } from 'ubus';
+import { readfile } from 'fs';
+import { shq, exec, list, x25519 } from 'xtunnel.common';
 
 export const CONF = '/etc/xtunnel-tor/torrc';
 export const RUN = '/tmp/xtunnel-tor';
 const STOCK_DATA = '/var/lib/tor';
-
-export function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-};
-
-export function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-};
 
 export function base32(bytes) {
 	const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -48,6 +35,22 @@ export function base32_decode(s) {
 	return out;
 };
 
+// the names a tor client can map to the onion address (MapAddress NAME.onion ADDRESS), of the uci list V
+export function aliases(v) {
+	let out = [];
+	for (let a in list(v)) {
+		a = lc(trim(a));
+		if (match(a, /^[a-z0-9_-]{1,63}$/) && !(a in out)) push(out, a);
+	}
+	return out;
+};
+
+// a bridge line without the "Bridge " prefix: "transport address:port fingerprint …" or "address:port fingerprint"
+export function valid_bridge(line) {
+	return match(line, /^(obfs4|snowflake|meek_lite|webtunnel) [^ ]+:[0-9]+ [0-9A-Fa-f]{40}( [^ ]+)*$/) != null
+	    || match(line, /^[^ ]+:[0-9]+ [0-9A-Fa-f]{40}$/) != null;
+};
+
 export function valid_key(s) {
 	return type(s) == 'string' && match(s, /^[A-Z2-7]{52}$/) != null;
 };
@@ -63,40 +66,20 @@ function b64url_decode(s) {
 	return b64dec(s);
 }
 
-// a key printed by "xray x25519": "PrivateKey: …" and the public key as "Password (PublicKey): …"
-// (26.x), "Password: …" (25.x) or "Public key: …" (older)
-function xray_key(out, priv) {
-	let m = priv ? match(out, /Private ?[Kk]ey *: *([A-Za-z0-9_-]+)/) : match(out, /(Public ?[Kk]ey|Password)( *\([^)]*\))? *: *([A-Za-z0-9_-]+)/);
-	let raw = m ? b64url_decode(m[priv ? 1 : 3]) : null;
-	return (raw != null && length(raw) == 32) ? raw : null;
-}
-
 // the public key of a base32 private key: x25519 is the same curve for tor's client keys and for
 // REALITY, so xray derives it (the same result as openssl's x25519)
 export function public_key(priv) {
-	if (!valid_key(priv)) return '';
-	let raw = base32_decode(priv);
-	if (raw == null || length(raw) != 32) return '';
-	let pub = xray_key(exec(`/usr/bin/xray x25519 -i ${shq(b64url(raw))} 2>/dev/null`).out, false);
-	return pub ? base32(pub) : '';
+	let raw = valid_key(priv) ? base32_decode(priv) : null;
+	let k = (raw != null && length(raw) == 32) ? x25519(b64url(raw)) : null;
+	let pub = k ? b64url_decode(k.public_key) : null;
+	return (pub != null && length(pub) == 32) ? base32(pub) : '';
 };
 
 // a new client key pair from xray: { private_key, public_key } in base32, or null
 export function keypair() {
-	let out = exec('/usr/bin/xray x25519 2>/dev/null').out;
-	let priv = xray_key(out, true), pub = xray_key(out, false);
-	return (priv && pub) ? { private_key: base32(priv), public_key: base32(pub) } : null;
-};
-
-let bus = null;
-
-// the running tor of the stock service (procd service "tor"), or null; another tor process on the
-// router (a second service, a test client) does not count
-export function tor_instance() {
-	bus ??= connect();
-	for (let n, i in bus?.call('service', 'list', { name: 'tor' })?.tor?.instances ?? {})
-		if (i.running && i.pid) return i;
-	return null;
+	let k = x25519();
+	let priv = k ? b64url_decode(k.private_key) : null, pub = k ? b64url_decode(k.public_key) : null;
+	return (priv != null && pub != null && length(priv) == 32 && length(pub) == 32) ? { private_key: base32(priv), public_key: base32(pub) } : null;
 };
 
 function hexstr(bin) {
@@ -107,8 +90,9 @@ function hexstr(bin) {
 
 // the commands sent to tor's control port (127.0.0.1, the port file and the cookie of the
 // configuration in effect) after AUTHENTICATE; tor's answer, or null without a port or cookie.
-// busybox nc has no timeout option: it is killed after 10 seconds when tor does not close.
-export function control(commands) {
+// busybox nc has no timeout option: it is killed after TIMEOUT seconds (default 10) when tor does
+// not close.
+export function control(commands, timeout) {
 	let conf = readfile(CONF) ?? '';
 	let dd = match(conf, /\nDataDirectory ([^\n]+)/), pf = match(conf, /\nControlPortWriteToFile ([^\n]+)/);
 	let datadir = dd ? dd[1] : STOCK_DATA;
@@ -116,11 +100,12 @@ export function control(commands) {
 	let cookie = readfile(`${datadir}/control_auth_cookie`);
 	if (!m || cookie == null || length(cookie) != 32) return null;
 	let req = `AUTHENTICATE ${hexstr(cookie)}\r\n` + join('', map(commands, c => `${c}\r\n`)) + 'QUIT\r\n';
-	return exec(`printf %s ${shq(req)} | nc 127.0.0.1 ${m[1]} 2>/dev/null & n=$!; ( sleep 10; kill $n ) >/dev/null 2>&1 & k=$!; wait $n 2>/dev/null; kill $k 2>/dev/null`).out;
+	return exec(`printf %s ${shq(req)} | nc 127.0.0.1 ${m[1]} 2>/dev/null & n=$!; ( sleep ${int(timeout ?? 10)}; kill $n ) >/dev/null 2>&1 & k=$!; wait $n 2>/dev/null; kill $k 2>/dev/null`).out;
 };
 
-// { percent, text } of tor's bootstrap (text: what it does while not done), or null
-export function bootstrap_phase() {
-	let m = match(control([ 'GETINFO status/bootstrap-phase' ]) ?? '', /PROGRESS=([0-9]+) TAG=([a-z_]+) SUMMARY="([^"]*)"/);
+// { percent, text } of tor's bootstrap (text: what it does while not done), or null; tor's answer is
+// waited for at most TIMEOUT seconds (it can take seconds while tor loads its directory)
+export function bootstrap_phase(timeout) {
+	let m = match(control([ 'GETINFO status/bootstrap-phase' ], timeout) ?? '', /PROGRESS=([0-9]+) TAG=([a-z_]+) SUMMARY="([^"]*)"/);
 	return m ? { percent: int(m[1]), text: (m[2] == 'done') ? '' : m[3] } : null;
 };

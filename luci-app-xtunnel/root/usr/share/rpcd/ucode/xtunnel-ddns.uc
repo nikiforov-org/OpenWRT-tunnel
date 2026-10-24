@@ -2,12 +2,11 @@
 
 'use strict';
 
-import { access, popen, readfile, writefile, lsdir, stat, mkdir, unlink, readlink, open } from 'fs';
+import { access, readfile, writefile, lsdir, stat, mkdir, unlink, readlink } from 'fs';
 import { cursor } from 'uci';
-import { connect } from 'ubus';
-import { info } from 'xtunnel.x509';
+import { shq, exec, tail, valid_sid, locked, running, read_json } from 'xtunnel.common';
+import { file_status } from 'xtunnel.x509';
 import { grade, in_effect, target, move_state, note_watch, confirm } from 'xtunnel-ddns.sitecert';
-import { request } from 'xtunnel-ddns.http';
 
 const CFG       = 'xtunnel-ddns';
 const SITES     = '/usr/share/www';            // document roots, one directory per site
@@ -23,94 +22,49 @@ const SITEBUILD = '/usr/libexec/xtunnel-ddns/sitebuild';
 const UPDATE    = '/usr/libexec/xtunnel-ddns/update';
 const MOVE      = '/usr/libexec/xtunnel-ddns/move';
 
-function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-}
-
-function shq(s) {
-	if (s == null || s == '') return "''";
-	return "'" + replace(`${s}`, "'", "'\\''") + "'";
-}
-
-function valid_sid(s) {
-	return type(s) == 'string' && match(s, /^[A-Za-z0-9_]{1,64}$/) != null;
-}
-
 function valid_site(s) {
 	return type(s) == 'string' && match(s, /^[a-z0-9][a-z0-9._-]{0,31}$/) != null;
 }
 
-function tail(text, n) {
-	let lines = split(rtrim(text ?? '', '\n'), '\n');
-	if (length(lines) > n)
-		lines = slice(lines, length(lines) - n);
-	return join('\n', lines);
-}
-
-function cached(name, ttl, fn) {
+// the output of CMD, kept in RUN/NAME for TTL seconds. With BG a stale value is returned at once and
+// replaced in the background, one run at a time ('' before the first one), so that a lookup over the
+// network never holds up rpcd and the page
+function cached(name, ttl, cmd, bg) {
 	mkdir(RUN, 0o755);
-	let path = `${RUN}/${name}`;
-	let st = stat(path);
-	if (st && st.size > 0 && (time() - st.mtime) < ttl)
-		return readfile(path);
-	let value = fn() ?? '';
-	writefile(path, value);
-	return value;
-}
-
-// the public address: written by update at each of its runs, looked up here when older than 2 minutes
-function public_ip(url) {
-	if (!url) return '';
-	return cached('public_ip', 120, function() {
-		let r = request('GET', url, { ipv4: true, timeout: 5 });
-		let m = r.ok ? match(r.body, /([0-9]{1,3}(\.[0-9]{1,3}){3})/) : null;
-		return m ? m[1] : '';
-	});
-}
-
-function resolve(host) {
-	if (!host) return '';
-	return cached(`resolve-${host}`, 60, function() {
-		let r = exec(`nslookup ${shq(host)} 2>/dev/null`);
-		let out = [], seen = false;
-		for (let l in split(r.out, '\n')) {
-			if (index(l, 'Name:') >= 0) { seen = true; continue; }
-			if (!seen) continue;
-			let m = match(l, /Address[^:]*:[ \t]*([0-9.]+)/);
-			if (m) push(out, m[1]);
-		}
-		return join(',', out);
-	});
-}
-
-// the installed certificate: read once per change of the file (rpcd keeps this plugin loaded)
-let cert_cache = {};
-function cert_info(host) {
-	let crt = `${CERTS}/${host}/fullchain.pem`;
-	let st = host ? stat(crt) : null;
-	if (!st)
-		return null;
-	let key = `${st.mtime}/${st.size}`, c = cert_cache[host];
-	if (c?.key != key) {
-		let i = info(readfile(crt));
-		c = cert_cache[host] = { key: key, info: i };
+	let path = `${RUN}/${name}`, st = stat(path), run = stat(`${path}.run`);
+	if (st && time() - st.mtime < ttl) return readfile(path);
+	let job = `${cmd} > ${shq(path + '.new')} 2>/dev/null; mv -f ${shq(path + '.new')} ${shq(path)}`;
+	if (!bg) system(job);
+	else if (!run || time() - run.mtime > 30) {
+		writefile(`${path}.run`, '');
+		system(`(${job}; rm -f ${shq(path + '.run')}) >/dev/null 2>&1 </dev/null &`);
 	}
-	let i = c.info;
-	if (!i || !i.not_after)
-		return { error: 'cannot read certificate' };
-	return {
-		cn: i.subject_cn ?? host,
-		expires: i.not_after,
-		valid: time() < i.not_after,
-		staging: index(i.issuer_cn ?? '', 'STAGING') >= 0,
-		// a test certificate issued while this trusted one is in use: kept apart (see cert)
-		staging_apart: access(`${CERTS}/${host}/staging/fullchain.pem`) == true,
-		path: crt
-	};
+	return readfile(path) ?? '';
+}
+
+// a function of a module of this package in a ucode process of its own, with one argument
+function module_call(code, arg) {
+	return `ucode -e ${shq(code)} ${shq(arg)}`;
+}
+
+// the public address: written by update at each of its runs, looked up again when older than 2 minutes
+function public_ip(url) {
+	return url ? trim(cached('public_ip', 120, module_call("import { public_ip } from 'xtunnel-ddns.http'; print(public_ip(ARGV[0], 5).ip);", url), true)) : '';
+}
+
+// the addresses a name resolves to through the router's resolver, comma-separated
+function resolve(host) {
+	return host ? trim(cached(`resolve-${host}`, 60, module_call("import { lookup } from 'xtunnel-ddns.dns'; print(join(',', lookup(ARGV[0]) ?? []));", host), true)) : '';
+}
+
+// the installed certificate of a name, and a test certificate kept apart while this trusted one is in use (see cert)
+function cert_info(host) {
+	let c = host ? file_status(`${CERTS}/${host}/fullchain.pem`) : null;
+	if (c && !c.error) {
+		c.cn ||= host;
+		c.staging_apart = access(`${CERTS}/${host}/staging/fullchain.pem`) == true;
+	}
+	return c;
 }
 
 function parse_state(path, timeout) {
@@ -135,14 +89,6 @@ function job_state(sid, host) {
 }
 function site_job_state(name) { return parse_state(`${STATE}/site-${name}.state`, 120); }
 
-let ubus = null;
-function svc_running(name) {
-	ubus ??= connect();
-	let inst = ubus?.call('service', 'list', { name: name })?.[name]?.instances;
-	for (let k, v in inst ?? {}) if (v.running) return true;
-	return false;
-}
-
 // ---- sites ----
 
 function site_has_build(name) { return access(`${BACKENDS}/${name}/build`, 'x') == true; }
@@ -151,7 +97,7 @@ function site_has_login(name) { return access(`${SITES}/${name}/cgi-bin/login`) 
 function site_list() {
 	let out = [];
 	let sizes = {};
-	let r = { out: cached('sizes', 60, () => exec(`du -sk ${SITES}/* 2>/dev/null`).out) };
+	let r = { out: cached('sizes', 60, `du -sk ${SITES}/*`) };
 	for (let l in split(r.out, '\n')) {
 		let m = match(l, /^([0-9]+)[ \t]+(.+)$/);
 		if (m) sizes[rtrim(m[2], '/')] = int(m[1]);
@@ -180,7 +126,7 @@ function start_build(name) {
 }
 
 function overlay_free_kb(fresh) {
-	let r = { out: fresh ? exec('df -k /overlay 2>/dev/null').out : cached('df', 60, () => exec('df -k /overlay 2>/dev/null').out) };
+	let r = { out: fresh ? exec('df -k /overlay 2>/dev/null').out : cached('df', 60, 'df -k /overlay') };
 	let lines = split(rtrim(r.out, '\n'), '\n');
 	let m = match(lines[length(lines) - 1] ?? '', /\s([0-9]+)\s+[0-9]+%/);
 	return m ? int(m[1]) : null;
@@ -188,9 +134,8 @@ function overlay_free_kb(fresh) {
 
 // the address updates of a domain: update keeps their state (see there)
 function ddns_status(sid) {
-	let s = null;
-	try { s = json(readfile(`${RUN}/ddns-${sid}.json`) ?? ''); } catch (e) { s = null; }
-	return { last_update: s?.sent ?? null, last_check: s?.checked ?? null, ip: s?.ip ?? '', error: s?.error ?? '' };
+	let s = read_json(`${RUN}/ddns-${sid}.json`, {});
+	return { last_update: s.sent ?? null, last_check: s.checked ?? null, ip: s.ip ?? '', error: s.error ?? '' };
 }
 
 // a move of the site waits for an open page (see move): started from the page's status calls,
@@ -199,10 +144,7 @@ let move_kicked = 0;
 function move_kick(mv, to) {
 	if (!to || time() - move_kicked < 20) return;
 	if (mv?.state == 'failed' && mv.to == to && time() - (mv.attempt ?? 0) < ((mv.kind == 'confirm') ? 600 : 3600)) return;
-	let f = open(`${RUN}/move.lock`, 'r');
-	let idle = !f || f.lock('xn');
-	f?.close();
-	if (!idle) return;
+	if (locked(`${RUN}/move.lock`)) return;
 	move_kicked = time();
 	exec(`setsid ${MOVE} >/dev/null 2>&1 </dev/null &`);
 }
@@ -263,7 +205,7 @@ methods.status = {
 				login_replaced: (readlink(`${SITES}/${site}/cgi-bin/luci`) == LUCI_GATE),
 				uhttpd_home: home,
 				uhttpd_cert: uci.get('uhttpd', 'main', 'cert') ?? '',
-				uhttpd_running: svc_running('uhttpd'),
+				uhttpd_running: (running('uhttpd') != null),
 				serving: (home == `${SITES}/${site}`),
 				firewall_rule: (uci.get('firewall', 'xtunnel_ddns_https') == 'rule'),
 				xray_front: (index(`${uci.get('uhttpd', 'main', 'listen_https') ?? ''}`, '127.0.0.1:4443') >= 0),

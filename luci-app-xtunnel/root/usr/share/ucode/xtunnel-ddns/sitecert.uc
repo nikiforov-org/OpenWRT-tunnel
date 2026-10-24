@@ -11,7 +11,8 @@
 'use strict';
 
 import { readfile, writefile, mkdir, rename, access, stat, lsdir, unlink } from 'fs';
-import { info } from 'xtunnel.x509';
+import { read_json } from 'xtunnel.common';
+import { file_info } from 'xtunnel.x509';
 
 const CERTS     = '/etc/ssl/xtunnel-ddns';
 const SITE_CERT = '/etc/xtunnel-ddns/site.cert';
@@ -28,7 +29,7 @@ function grade(host) {
 	host = lc(host ?? '');
 	let out = { host: host, grade: 0, cert: `${CERTS}/${host}/fullchain.pem`, key: `${CERTS}/${host}/key.pem` };
 	if (!valid_host(host) || !access(out.cert) || !access(out.key)) return out;
-	let i = info(readfile(out.cert));
+	let i = file_info(out.cert);
 	if (!i) return out;
 	out.cn = lc(i.subject_cn ?? '');
 	out.expires = i.not_after;
@@ -66,9 +67,7 @@ function apply_pending() {
 }
 
 function move_state() {
-	let m = null;
-	try { m = json(readfile(MOVE) ?? ''); } catch (e) { m = null; }
-	return (type(m) == 'object') ? m : null;
+	return read_json(MOVE, null);
 }
 
 function set_move_state(m) {

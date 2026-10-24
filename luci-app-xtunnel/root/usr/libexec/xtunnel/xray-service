@@ -9,28 +9,27 @@
 // when the joined file changed, removed when no file is left. A joined file of two files replaces the
 // one in effect only after "xray run -test" accepts it (a single file was tested by its part's sync).
 // After xray started with the client's file, the client's active link is applied again through
-// xray's API and the links are measured (measure started).
+// xray's control socket (select) and the links are measured (measure started).
 
 'use strict';
 
-import { access, readfile, writefile, mkdir, rename, unlink, chmod, popen, open } from 'fs';
-import { connect } from 'ubus';
+import { access, readfile, writefile, mkdir, unlink, chmod } from 'fs';
+import { XRAY, log, lock, read_json, ubus, instances, replace_checked, xray_test } from 'xtunnel.common';
 
 const SERVICE = 'xtunnel-xray';
-const XRAY    = '/usr/bin/xray';
 const DIR     = '/tmp/xtunnel-xray';
 const CONF    = `${DIR}/config.json`;
 const ERROR   = `${DIR}/error`;
 const STARTED = `${DIR}/started`;    // the files of the started packages
 const LIST    = `${DIR}/parts`;      // the files in the joined file in effect, for the status pages
+const ASSETS  = '/etc/xtunnel-client/sources';   // the .dat files of the client's lists (ext: rules)
+const CONTROL = `${DIR}/control.sock`;           // the client's active link: xray control bo|bi (select)
 const LOCK    = '/var/lock/xtunnel-xray';
 const PARTS   = [
 	{ conf: '/etc/xtunnel-server/config.json' },
 	{ conf: '/etc/xtunnel-client/config.json', after: '/usr/libexec/xtunnel-client/measure started' }
 ];
 
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-function log(msg) { system(`logger -t xtunnel-xray ${shq(msg)}`); }
 
 // the configurations joined, or { error }
 function join_configs(configs) {
@@ -61,9 +60,8 @@ if (!(op in [ 'start', 'stop' ]) || !length(filter(PARTS, p => p.conf == arg))) 
 	exit(2);
 }
 mkdir(DIR, 0o700);
-// 'e': the processes started from here (the command after a start) do not hold the lock
-let lock = open(LOCK, 'we');
-lock?.lock('x');
+// the processes started from here (the command after a start) do not hold the lock
+let held = lock(LOCK, true);
 
 let started = filter(split(readfile(STARTED) ?? '', '\n'), c => length(filter(PARTS, p => p.conf == c)));
 if (op == 'start' && !(arg in started)) push(started, arg);
@@ -72,45 +70,29 @@ writefile(STARTED, length(started) ? join('\n', started) + '\n' : '');
 
 let configs = [], used = [];
 for (let p in PARTS) {
-	if (!(p.conf in started)) continue;
-	let c = null;
-	try { c = json(readfile(p.conf) ?? ''); } catch (e) { c = null; }
-	if (type(c) == 'object') { push(configs, c); push(used, p); }
+	let c = (p.conf in started) ? read_json(p.conf, null) : null;
+	if (c) { push(configs, c); push(used, p); }
 }
-let ubus = connect();
-let before = ubus.call('service', 'list', { name: SERVICE })?.[SERVICE]?.instances?.xray;
+let before = instances(SERVICE).xray;
 let command = [ XRAY, 'run', '-config', CONF ];
 
 if (!length(configs) || !access(XRAY, 'x')) {
-	if (before) ubus.call('service', 'delete', { name: SERVICE });
+	if (before) ubus().call('service', 'delete', { name: SERVICE });
 	unlink(CONF);
 	unlink(ERROR);
 	unlink(LIST);
 	exit(0);
 }
-let j = join_configs(configs);
-let text = j.config ? sprintf('%J\n', j.config) : null, replaced = false;
+let j = join_configs(configs), replaced = false;
+if (!j.error) {
+	// a joined file of two parts replaces the one in effect after xray accepts it (one part was tested by its sync)
+	let r = replace_checked(CONF, sprintf('%J\n', j.config), 0o600, (length(configs) > 1) ? (f => xray_test(f, `XRAY_LOCATION_ASSET=${ASSETS}`)) : null);
+	if (r == 'written') replaced = true;
+	else if (r != 'same') j.error = `xray rejected the joined configuration: ${r}`;
+}
 if (j.error) {
 	writefile(ERROR, `${j.error}\n`);
-	log(`not applied: ${j.error}`);
-}
-else if (readfile(CONF) != text) {
-	writefile(`${CONF}.new`, text);
-	chmod(`${CONF}.new`, 0o600);
-	let test = (length(configs) > 1);
-	let p = test ? popen(`${XRAY} run -test -format json -c ${shq(`${CONF}.new`)} 2>&1`, 'r') : null;
-	let out = p?.read('all') ?? '';
-	if (!test || p?.close() == 0) {
-		rename(`${CONF}.new`, CONF);
-		replaced = true;
-	}
-	else {
-		unlink(`${CONF}.new`);
-		let lines = split(rtrim(out, '\n'), '\n'), last = split(lines[length(lines) - 1] ?? '', ' > ');
-		j.error = `xray rejected the joined configuration: ${trim(last[length(last) - 1])}`;
-		writefile(ERROR, `${j.error}\n`);
-		log(`not applied: ${j.error}`);
-	}
+	log('xtunnel-xray', `not applied: ${j.error}`);
 }
 if (!j.error) {
 	writefile(LIST, join('\n', map(used, p => p.conf)) + '\n');
@@ -118,12 +100,12 @@ if (!j.error) {
 }
 if (!access(CONF)) exit(1);
 
-ubus.call('service', 'set', {
+ubus().call('service', 'set', {
 	name: SERVICE,
 	instances: {
 		xray: {
 			command: command,
-			env: { XRAY_LOCATION_ASSET: '/etc/xtunnel-client/sources' },
+			env: { XRAY_LOCATION_ASSET: ASSETS, XTUNNEL_CONTROL: CONTROL },
 			file: [ CONF ],
 			respawn: [ '3600', '5', '5' ],
 			limits: { nofile: '16384 16384' },

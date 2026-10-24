@@ -10,18 +10,17 @@
 
 'use strict';
 
-import { access, popen, readfile, writefile, mkdir, unlink, chmod, rename, open } from 'fs';
+import { access, readfile, mkdir, unlink, chmod } from 'fs';
 import { cursor } from 'uci';
+import { log, list, flag, read_json, lock, not_applied, fw_rule, write_xray } from 'xtunnel.common';
+import { certificate } from 'xtunnel-server.common';
 
 const CFG   = 'xtunnel-server';
 const DIR   = '/etc/xtunnel-server';
 const CONF  = `${DIR}/config.json`;
-const NEW   = `${DIR}/config.new.json`;      // xray takes the format from the extension
 const RUN   = '/tmp/xtunnel-server';
 const ERROR = `${RUN}/error`;
-const XRAY  = '/usr/bin/xray';
 const DDNS_INIT   = '/etc/init.d/xtunnel-ddns';   // the part that runs the router's own site (uhttpd)
-const DDNS_CERTS  = '/etc/ssl/xtunnel-ddns';
 const BEHIND_PORT = 4443;                        // where that site listens while this server holds its port
 const RULES = {
 	vision:    { section: 'xtunnel_server_vision',    proto: 'tcp', name: 'xtunnel-server: TCP + Vision from WAN' },
@@ -33,60 +32,9 @@ const PRIVATE = [ '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '16
 
 const mode = ARGV[0] ?? 'apply';
 
-function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-}
-
-function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-}
-
-function log(msg) {
-	system(`logger -t ${CFG} ${shq(msg)}`);
-}
-
-function list(v) {
-	if (type(v) == 'array') return v;
-	return (v == null || v == '') ? [] : [ v ];
-}
-
-function flag(v, dflt) {
-	return (v == null || v == '') ? dflt : (v == '1');
-}
-
 function port(v) {
 	let n = int(v);
 	return (n >= 1 && n <= 65535) ? n : 0;
-}
-
-function uset(uci, cfg, sec, opt, val) {
-	if (uci.get(cfg, sec, opt) == val) return false;
-	uci.set(cfg, sec, opt, val);
-	return true;
-}
-
-// ---- the Hysteria2 certificate: a domain of the Dynamic DNS page or files on the router ----
-
-function certificate(main, uci) {
-	if ((main.cert_source ?? 'ddns') == 'files') {
-		if (!main.cert_path || !main.key_path) return { error: 'the certificate and key paths are empty' };
-		if (!main.cert_name) return { error: 'the TLS server name of the certificate is empty' };
-		if (access(main.cert_path) != true || access(main.key_path) != true)
-			return { error: `the certificate or key file is missing (${main.cert_path}, ${main.key_path})` };
-		return { cert: main.cert_path, key: main.key_path, server_name: main.cert_name };
-	}
-	if (!main.cert_domain) return { error: 'no domain is selected for the Hysteria2 certificate' };
-	if (!uci.load('xtunnel-ddns')) return { error: 'the Dynamic DNS settings (/etc/config/xtunnel-ddns) are missing' };
-	let host = uci.get('xtunnel-ddns', main.cert_domain, 'hostname');
-	if (!host) return { error: 'the domain selected for the Hysteria2 certificate no longer exists on the Dynamic DNS page' };
-	let cert = `${DDNS_CERTS}/${host}/fullchain.pem`, key = `${DDNS_CERTS}/${host}/key.pem`;
-	if (access(cert) != true || access(key) != true)
-		return { error: `no certificate for ${host} yet: issue it on the Dynamic DNS page` };
-	return { cert: cert, key: key, server_name: host };
 }
 
 // what a plain HTTP/3 visitor without a profile password gets from the Hysteria2 transport
@@ -239,70 +187,24 @@ function sync_firewall(ports) {
 	let changed = false, opened = [];
 	for (let key, rule in RULES) {
 		let p = ports[key];
-		let exists = (uci.get('firewall', rule.section) == 'rule');
-		if (p) {
-			if (!exists) { uci.set('firewall', rule.section, 'rule'); changed = true; }
-			changed = uset(uci, 'firewall', rule.section, 'name', rule.name) || changed;
-			changed = uset(uci, 'firewall', rule.section, 'src', 'wan') || changed;
-			changed = uset(uci, 'firewall', rule.section, 'proto', rule.proto) || changed;
-			changed = uset(uci, 'firewall', rule.section, 'dest_port', `${p}`) || changed;
-			changed = uset(uci, 'firewall', rule.section, 'target', 'ACCEPT') || changed;
-			changed = uset(uci, 'firewall', rule.section, 'enabled', '1') || changed;
-			push(opened, `${p}/${rule.proto}`);
-		}
-		else if (exists) {
-			uci.delete('firewall', rule.section);
-			changed = true;
-		}
+		changed = fw_rule(uci, rule.section, p ? { name: rule.name, proto: rule.proto, port: p } : null) || changed;
+		if (p) push(opened, `${p}/${rule.proto}`);
 	}
 	if (!changed) return;
 	uci.commit('firewall');
 	system('/etc/init.d/firewall reload >/dev/null 2>&1');
-	log(`firewall: ${length(opened) ? 'open from WAN ' + join(', ', opened) : 'rules removed'}`);
+	log(CFG, `firewall: ${length(opened) ? 'open from WAN ' + join(', ', opened) : 'rules removed'}`);
 }
 
 // ---- the configuration file ----
 
-function set_error(msg) {
-	mkdir(RUN, 0o755);
-	writefile(ERROR, msg);
-	log(`not applied: ${msg}`);
-}
-
 // true when a configuration file was removed
 function remove_config() {
-	unlink(NEW);
+	unlink(`${CONF}.new`);
 	if (access(CONF) != true) return false;
 	unlink(CONF);
-	log('configuration removed, xray stops');
+	log(CFG, 'configuration removed, xray stops');
 	return true;
-}
-
-// 'same' when CONF already holds this configuration, 'written' after a successful test, false otherwise
-function write_config(config) {
-	mkdir(DIR, 0o700);
-	let text = sprintf('%.2J\n', config);
-	if (readfile(CONF) == text) {
-		chmod(CONF, 0o600);
-		return 'same';
-	}
-	if (access(XRAY, 'x') != true) {
-		set_error('xray-core is not installed (/usr/bin/xray is missing)');
-		return false;
-	}
-	writefile(NEW, text);
-	chmod(NEW, 0o600);
-	let r = exec(`${XRAY} run -test -format json -c ${shq(NEW)} 2>&1`);
-	if (r.code != 0) {
-		unlink(NEW);
-		let lines = split(rtrim(r.out, '\n'), '\n');
-		let reason = split(lines[length(lines) - 1] ?? '', ' > ');
-		set_error('xray rejected the configuration: ' + trim(reason[length(reason) - 1]));
-		return false;
-	}
-	rename(NEW, CONF);
-	log('configuration written');
-	return 'written';
 }
 
 // The site package decides from the TCP ports of the VLESS inbounds of the configuration file in
@@ -311,9 +213,7 @@ function write_config(config) {
 // only after this script (xray-service from the init script, which waits for the lock this script
 // holds), so the port is free for whichever of the two has to take it.
 function vless_ports() {
-	let cfg;
-	try { cfg = json(readfile(CONF) ?? ''); } catch (e) { cfg = null; }
-	return join(' ', sort(map(filter(cfg?.inbounds ?? [], ib => ib.protocol == 'vless'), ib => `${ib.port}`)));
+	return join(' ', sort(map(filter(read_json(CONF, {}).inbounds ?? [], ib => ib.protocol == 'vless'), ib => `${ib.port}`)));
 }
 
 function hand_over(before) {
@@ -326,9 +226,7 @@ function hand_over(before) {
 // the transport ports of the configuration file in effect (kept when a new one is rejected)
 function ports_of_file() {
 	let ports = { vision: 0, xhttp: 0, hysteria2: 0 };
-	let cfg;
-	try { cfg = json(readfile(CONF) ?? ''); } catch (e) { return ports; }
-	for (let ib in (cfg?.inbounds ?? []))
+	for (let ib in (read_json(CONF, {}).inbounds ?? []))
 		if (ib.tag in ports) ports[ib.tag] = port(ib.port);
 	return ports;
 }
@@ -346,23 +244,22 @@ uci.foreach(CFG, 'profile', function(s) {
 chmod(`/etc/config/${CFG}`, 0o600);
 unlink(ERROR);
 // the lock of xray-service: the joined process is not rebuilt while the file and the port change
-let lock = open('/var/lock/xtunnel-xray', 'we');
-lock?.lock('x');
+let xray_lock = lock('/var/lock/xtunnel-xray', true);
 let vless_before = vless_ports();
 
 let ports = { vision: 0, xhttp: 0, hysteria2: 0 }, changed = false;
 if (mode == 'apply' && flag(main.enabled, false)) {
 	let b = build(main, profiles, uci);
 	if (b.errors) {
-		set_error(join('; ', b.errors));
+		not_applied(CFG, ERROR, join('; ', b.errors));
 		ports = ports_of_file();
 	}
 	else {
-		let w = write_config(b.config);
+		let w = write_xray(CFG, ERROR, CONF, b.config);
 		if (w) {
 			ports = b.ports;
 			changed = (w == 'written');
-			if (changed && b.behind) log(`target ${main.target} is this router's site: served behind the server on 127.0.0.1:${BEHIND_PORT}`);
+			if (changed && b.behind) log(CFG, `target ${main.target} is this router's site: served behind the server on 127.0.0.1:${BEHIND_PORT}`);
 		}
 		else
 			ports = ports_of_file();

@@ -11,46 +11,34 @@
 
 'use strict';
 
-import { readfile, writefile, mkdir, unlink, stat, popen } from 'fs';
+import { readfile, writefile, mkdir } from 'fs';
 import { cursor } from 'uci';
-import { request } from 'xtunnel-ddns.http';
+import { log as syslog, read_json, lock, stamp } from 'xtunnel.common';
+import { public_ip } from 'xtunnel-ddns.http';
 import { provider } from 'xtunnel-ddns.providers';
 import { grade, in_effect, target } from 'xtunnel-ddns.sitecert';
 import { lookup, published } from 'xtunnel-ddns.dns';
 
 const CFG     = 'xtunnel-ddns';
 const RUN     = '/tmp/xtunnel-ddns';
-const LOCK    = `${RUN}/update.lock`;
+const LOCK    = `${RUN}/update.lock`;     // one run at a time; a forced one waits for the one running
 const REFRESH = 72 * 3600;      // an update even without a change, like ddns-scripts' force_interval
 const SETTLE  = 15 * 60;        // after an update the resolver may still answer the old address
 const LOG_MAX = 200;
 
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-
-function exec(cmd) {
-	let p = popen(cmd, 'r');
-	if (!p) return '';
-	let out = p.read('all') ?? '';
-	p.close();
-	return out;
-}
-
-function stamp() { return trim(exec('date "+%Y-%m-%d %H:%M:%S"')); }
-
-function log(sid, msg, syslog) {
+// a line in the log of the domain SID (the page shows it), and with SYSTEM in the system log too
+function log(sid, msg, system_log) {
 	let path = `${RUN}/ddns-${sid}.log`;
 	let lines = split(rtrim(readfile(path) ?? '', '\n'), '\n');
 	if (lines[0] == '') lines = [];
 	push(lines, `${stamp()} ${msg}`);
 	if (length(lines) > LOG_MAX) lines = slice(lines, length(lines) - LOG_MAX);
 	writefile(path, join('\n', lines) + '\n');
-	if (syslog) system(`logger -t xtunnel-ddns ${shq(msg)}`);
+	if (system_log) syslog(CFG, msg);
 }
 
 function load_state(sid) {
-	let s = null;
-	try { s = json(readfile(`${RUN}/ddns-${sid}.json`) ?? ''); } catch (e) { s = null; }
-	return (type(s) == 'object') ? s : {};
+	return read_json(`${RUN}/ddns-${sid}.json`, {});
 }
 
 function save_state(sid, s) { writefile(`${RUN}/ddns-${sid}.json`, sprintf('%J\n', s)); }
@@ -77,14 +65,11 @@ uci.foreach(CFG, 'domain', function(s) {
 if (!length(domains)) exit(0);
 
 mkdir(RUN, 0o755);
-let l = stat(LOCK);
-if (l && time() - l.mtime < 120 && !force) exit(0);
-writefile(LOCK, `${time()}\n`);
+let held = lock(LOCK, force);
+if (!held) exit(0);
 
 let url = uci.get(CFG, 'main', 'ip_url') || 'https://ipv4-internet.yandex.net/api/v0/ip';
-let r = request('GET', url, { ipv4: true, timeout: 15 });
-let m = r.ok ? match(r.body, /([0-9]{1,3}(\.[0-9]{1,3}){3})/) : null;
-let ip = m ? m[1] : '';
+let pub = public_ip(url), ip = pub.ip;
 if (ip) writefile(`${RUN}/public_ip`, ip);
 
 let now = time();
@@ -94,7 +79,7 @@ for (let s in domains) {
 	if (st.host != host) st = { host: host };
 	st.checked = now;
 	if (!ip) {
-		st.error = `the public address is unknown (${url}: ${r.error || 'no address in the answer'})`;
+		st.error = `the public address is unknown (${url}: ${pub.error})`;
 		log(sid, st.error);
 		save_state(sid, st);
 		continue;
@@ -123,7 +108,7 @@ for (let s in domains) {
 	}
 	save_state(sid, st);
 }
-unlink(LOCK);
+held.close();
 
 // a move of the web site to another name waits for this name's record or certificate: the move job
 // carries on (it repeats a failed certificate request at most once an hour)

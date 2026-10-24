@@ -1,7 +1,7 @@
 // xtunnel-ddns http: HTTP(S) requests through uclient-fetch (part of the stock image), so the
 // package needs neither curl nor wget.
 //
-//   import { request, urlencode } from 'xtunnel-ddns.http';
+//   import { request, urlencode, public_ip } from 'xtunnel-ddns.http';
 //
 //   let r = request('GET', url, { headers: { Authorization: 'Bearer …' }, timeout: 20 });
 //   r.ok      true for a 2xx answer
@@ -14,14 +14,11 @@
 
 'use strict';
 
-import { popen, readfile, unlink, mkdir } from 'fs';
+import { readfile, unlink, mkdir } from 'fs';
+import { shq, exec } from 'xtunnel.common';
 
 const RUN = '/tmp/xtunnel-ddns';
 let counter = 0;
-
-function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-}
 
 function urlencode(s) {
 	let out = '';
@@ -54,9 +51,7 @@ function request(method, url, opts) {
 		if (opts.body != null) cmd += ' --body-data=' + shq(opts.body);
 	}
 	cmd += ` ${shq(url)} 2>${shq(err)}`;
-	let p = popen(cmd, 'r');
-	let body = p ? (p.read('all') ?? '') : '';
-	let code = p ? p.close() : -1;
+	let r = exec(cmd), body = r.out, code = r.code;
 	let msgs = split(trim(readfile(err) ?? ''), '\n');
 	unlink(err);
 	let last = trim(msgs[length(msgs) - 1] ?? '');
@@ -73,4 +68,11 @@ function request_json(method, url, opts) {
 	return r;
 }
 
-export { urlencode, form, request, request_json };
+// the router's public IPv4 address as the service at URL sees it: { ip, error }
+function public_ip(url, timeout) {
+	let r = request('GET', url, { ipv4: true, timeout: timeout ?? 15 });
+	let m = r.ok ? match(r.body, /([0-9]{1,3}(\.[0-9]{1,3}){3})/) : null;
+	return { ip: m ? m[1] : '', error: m ? '' : (r.error || 'no address in the answer') };
+}
+
+export { urlencode, form, request, request_json, public_ip };

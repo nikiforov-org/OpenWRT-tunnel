@@ -1,12 +1,17 @@
-// xtunnel-ddns x509: the names and the validity of a PEM certificate, read from its DER
-// encoding here (no openssl process).
+// xtunnel x509: the names and the validity of a PEM certificate, read from its DER encoding here (no
+// openssl process).
 //
-//   import { info } from 'xtunnel.x509';
+//   import { info, file_info, file_status } from 'xtunnel.x509';
 //
-//   info(pem_text)   // { subject_cn, issuer_cn, issuer_o, not_before, not_after } (epoch
-//                    // seconds) of the first certificate, or null if it cannot be read
+//   info(pem_text)     // { subject_cn, issuer_cn, issuer_o, not_before, not_after } (epoch
+//                      // seconds) of the first certificate, or null if it cannot be read
+//   file_info(path)    // the same of a file, read again only when the file changed (rpcd keeps its
+//                      // plugins loaded), or null without the file
+//   file_status(path)  // { cn, expires, valid, staging, path } of a file for a page, { error }, or null
 
 'use strict';
+
+import { readfile, stat } from 'fs';
 
 // one DER element at position i: { tag, start (of the content), len, end }
 function element(d, i) {
@@ -95,4 +100,23 @@ function info(pem) {
 	};
 }
 
-export { info };
+let cache = {};
+function file_info(path) {
+	let st = path ? stat(path) : null;
+	if (!st) return null;
+	let key = `${st.mtime}/${st.size}`;
+	if (cache[path]?.key != key) cache[path] = { key: key, info: info(readfile(path)) };
+	return cache[path].info;
+}
+
+// the certificate in PATH as a page shows it: { cn, expires, valid, staging, path }, { error }, or null
+// without the file
+function file_status(path) {
+	let i = file_info(path);
+	if (i == null && !stat(path ?? '')) return null;
+	if (!i || !i.not_after) return { error: 'cannot read the certificate' };
+	return { cn: i.subject_cn ?? '', expires: i.not_after, valid: time() < i.not_after,
+	         staging: index(i.issuer_cn ?? '', 'STAGING') >= 0, path: path };
+}
+
+export { info, file_info, file_status };

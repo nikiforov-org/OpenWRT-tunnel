@@ -26,7 +26,8 @@
 
 import { access, readfile, writefile, mkdir, unlink } from 'fs';
 import { cursor } from 'uci';
-import { RUN, shq, exec, lock, instance, active_link, uplink } from 'xtunnel-client.common';
+import { shq, exec, log, list, read_json, lock, url_parts } from 'xtunnel.common';
+import { RUN, instance, active_link, uplink } from 'xtunnel-client.common';
 
 const CFG    = 'xtunnel-client';
 const STATE  = `${RUN}/state.json`;
@@ -38,19 +39,6 @@ const AUTO   = '/etc/xtunnel-client/auto.json';
 const SELECT = '/usr/libexec/xtunnel-client/select';
 const HISTORY = 24;
 const FMT    = '%{http_code} %{size_download} %{time_total} %{time_starttransfer} %{speed_download} %{errormsg}';
-
-function log(msg) { system(`logger -t ${CFG} ${shq(msg)}`); }
-
-function read_json(path, dflt) {
-	let v = null;
-	try { v = json(readfile(path) ?? ''); } catch (e) { v = null; }
-	return (type(v) == type(dflt)) ? v : dflt;
-}
-
-function list(v) {
-	if (type(v) == 'array') return v;
-	return (v == null || v == '') ? [] : [ v ];
-}
 
 // whether the route to the Internet goes through an interface of the "metered" list
 function metered_uplink(main) {
@@ -67,9 +55,8 @@ function curl_cmd(c, bytes, timeout, small, out) {
 	if (small && c.tor && timeout < TOR_SMALL) timeout = TOR_SMALL;
 	if (!length(c.test_url))
 		return `curl -sk -m ${timeout} -o /dev/null -w '${FMT}' 'https://127.0.0.1:${c.tap_port}/cgi-bin/speed?bytes=${small ? 1 : bytes}' > ${shq(out)} 2>/dev/null`;
-	let m = match(c.test_url, /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
-	let port = (m && m[4]) ? m[4] : ((m && m[1] == 'http') ? '80' : '443');
-	let to = `--connect-to ${shq((m ? m[2] : '') + ':' + port + ':127.0.0.1:' + c.tap_port)}`;
+	let u = url_parts(c.test_url);
+	let to = `--connect-to ${shq(`${u?.host ?? ''}:${u?.port ?? 443}:127.0.0.1:${c.tap_port}`)}`;
 	if (small)
 		return `curl -sk -m ${timeout} -I ${to} -o /dev/null -w '${FMT}' ${shq(c.test_url)} > ${shq(out)} 2>/dev/null`;
 	// a server may ignore Range: head ends the download after the given bytes (curl reports a write error)
@@ -164,7 +151,7 @@ if (what == 'health') {
 			if (res[c.tag].ok && (best == null || res[c.tag].latency < res[best].latency)) best = c.tag;
 		health.decision = best ? `${name(best)} answers first and becomes active` : 'no other link answers; nothing changed';
 		if (best && !switch_to(best, `${name(active)} did not answer, ${name(best)} answers first`)) health.decision += ' (switching failed)';
-		log(`health check of ${name(active)} failed (${r.error}): ${health.decision}`);
+		log(CFG, `health check of ${name(active)} failed (${r.error}): ${health.decision}`);
 	}
 	let m = read_json(OUT, {});
 	m.health = health;
@@ -204,4 +191,4 @@ if (auto) {
 }
 writefile(OUT, sprintf('%J\n', { time: time(), bytes: bytes, mode: main.mode ?? 'auto', active_before: active, active_after: switched || active,
                                  decision: decision, clients: results, health: read_json(OUT, {}).health ?? null }));
-log(`${what == 'pending' ? 'after a start: ' : ''}measured ${length(clients)} links: ` + join(', ', map(clients, c => `${name(c.tag)} ${results[c.tag].ok ? int(results[c.tag].speed / 1024) + ' KB/s' : 'failed'}`)) + (decision ? `; ${decision}` : ''));
+log(CFG, `${what == 'pending' ? 'after a start: ' : ''}measured ${length(clients)} links: ` + join(', ', map(clients, c => `${name(c.tag)} ${results[c.tag].ok ? int(results[c.tag].speed / 1024) + ' KB/s' : 'failed'}`)) + (decision ? `; ${decision}` : ''));

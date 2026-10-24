@@ -2,7 +2,8 @@
 
 import { access, readfile, stat, lsdir } from 'fs';
 import { cursor } from 'uci';
-import { RUN, exec, instance, active_link, locked, uplink, tor_running, TOR_SOCKS } from 'xtunnel-client.common';
+import { XRAY, exec, read_json, locked, running, xray_version, syslog_tail, restart } from 'xtunnel.common';
+import { RUN, instance, active_link, uplink, TOR_OUTBOUND } from 'xtunnel-client.common';
 
 const CFG     = 'xtunnel-client';
 const CONF    = '/etc/xtunnel-client/config.json';
@@ -11,30 +12,7 @@ const ERROR   = `${RUN}/error`;
 const STATE   = `${RUN}/state.json`;
 const MEASURE = `${RUN}/measure.json`;
 const HISTORY = `${RUN}/history.json`;
-const XRAY    = '/usr/bin/xray';
-
-function tail(text, n) {
-	let lines = split(rtrim(text ?? '', '\n'), '\n');
-	if (length(lines) > n) lines = slice(lines, length(lines) - n);
-	return join('\n', lines);
-}
-
-function read_json(path, dflt) {
-	let v = null;
-	try { v = json(readfile(path) ?? ''); } catch (e) { v = null; }
-	return (type(v) == type(dflt)) ? v : dflt;
-}
-
-// the xray version, read again only when the binary changed (rpcd keeps this plugin loaded)
-let version = { key: null, value: '' };
-function xray_version() {
-	let st = stat(XRAY), key = st ? `${st.mtime}/${st.size}` : null;
-	if (key != version.key) {
-		let m = key ? match(exec(`${XRAY} version 2>/dev/null`).out, /Xray ([0-9.]+)/) : null;
-		version = { key: key, value: m ? m[1] : '' };
-	}
-	return version.value;
-}
+const LOG     = 'xtunnel-client|xray\\[';           // its lines in the system log
 
 const methods = {};
 
@@ -44,7 +22,7 @@ methods.status = {
 		uci.load(CFG);
 		let main = uci.get_all(CFG, 'main') ?? {};
 		let inst = instance();
-		let running = (inst != null);
+		let up = (inst != null);
 		let state = read_json(STATE, {});
 		let now = active_link(inst, state);
 		let measure = read_json(MEASURE, {}), history = read_json(HISTORY, {});
@@ -52,13 +30,13 @@ methods.status = {
 		for (let c in (state.clients ?? [])) in_config[c.tag] = true;
 		// the router's tor, while links through it are in the configuration
 		let tor_used = (length(filter(state.clients ?? [], c => c.tor)) > 0);
-		let tor = { used: tor_used, running: tor_used && tor_running(), socks: `${TOR_SOCKS.address}:${TOR_SOCKS.port}`,
+		let tor = { used: tor_used, running: tor_used && running('tor') != null, socks: `${TOR_OUTBOUND.settings.address}:${TOR_OUTBOUND.settings.port}`,
 		            keys: length(filter(lsdir('/etc/tor/xtunnel-client') ?? [], f => match(f, /\.auth_private$/))) };
 		// every link of the profiles as sync saw it, with what the router knows about it now
 		let links = [];
 		for (let l in (state.links ?? [])) {
 			push(links, { ...l,
-				ready: (running && l.enabled && !l.error && in_config[l.tag] == true && (!l.tor || tor.running)),
+				ready: (up && l.enabled && !l.error && in_config[l.tag] == true && (!l.tor || tor.running)),
 				tor_down: (l.tor && in_config[l.tag] == true && !tor.running),
 				active: (l.tag == now),
 				measure: measure.clients?.[l.tag] ?? null,
@@ -74,7 +52,7 @@ methods.status = {
 			active_config: main.active ?? '',
 			active_now: now,
 			auto: read_json(AUTO, {}),
-			running: running,
+			running: up,
 			pid: inst?.pid ?? 0,
 			config_time: st ? st.mtime : null,
 			state: state,
@@ -85,7 +63,7 @@ methods.status = {
 			measuring: locked(`${RUN}/measure.lock`),
 			updating: locked(`${RUN}/sources.lock`),
 			error: trim(readfile(ERROR) ?? '') || trim(readfile('/tmp/xtunnel-xray/error') ?? ''),
-			log_last: (main.enabled == '1' && !running) ? tail(exec(`logread 2>/dev/null | grep -E '${CFG}|xray\\['`).out, 3) : ''
+			log_last: (main.enabled == '1' && !up) ? syslog_tail(LOG, 3) : ''
 		};
 	}
 };
@@ -108,7 +86,7 @@ methods.update_sources = {
 
 methods.log = {
 	call: function() {
-		return { log: tail(exec(`logread 2>/dev/null | grep -E 'xtunnel-client|xray\\['`).out, 200) };
+		return { log: syslog_tail(LOG, 200) };
 	}
 };
 
@@ -120,8 +98,7 @@ methods.config = {
 
 methods.restart = {
 	call: function() {
-		let r = exec(`/etc/init.d/${CFG} restart 2>&1`);
-		return { ok: (r.code == 0), log: trim(r.out) };
+		return restart(`/etc/init.d/${CFG}`);
 	}
 };
 

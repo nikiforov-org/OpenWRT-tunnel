@@ -3,8 +3,8 @@
 # (TPROXY) and sends it to the active link or directly by the list (the links of the profiles are
 # the clients), then xray-service runs xray with it and with the configuration of
 # the server while the server is started, as one process (the procd service
-# "xtunnel-xray"), and applies the active link through xray's API (select) after every start of
-# xray. LuCI's apply triggers a reload: procd restarts xray only when a file changed; with the
+# "xtunnel-xray"), and applies the active link through xray's control socket (select) after every
+# start of xray. LuCI's apply triggers a reload: procd restarts xray only when a file changed; with the
 # client off its file is removed.
 
 START=97

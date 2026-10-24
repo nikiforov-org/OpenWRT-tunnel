@@ -22,7 +22,8 @@
 
 import { access, readfile, writefile, mkdir, unlink, stat } from 'fs';
 import { cursor } from 'uci';
-import { shq, exec, control, tor_instance } from 'xtunnel-tor.common';
+import { exec, log, read_json, locked, running } from 'xtunnel.common';
+import { control } from 'xtunnel-tor.common';
 
 const CFG       = 'xtunnel-tor';
 const DIR       = '/etc/xtunnel-tor';
@@ -34,14 +35,12 @@ const FALLBACK  = `${DIR}/snowflake.on`;
 const SYNC      = '/usr/libexec/xtunnel-tor/sync';
 const LIST      = `${DIR}/bridges.txt`;
 const BSTATE    = `${DIR}/bridges.state`;
-const RUNNING   = `${RUN}/bridges.running`;
+const BLOCK     = `${RUN}/bridges.lock`;         // held while bridges-update runs
 const UPDATE    = '/usr/libexec/xtunnel-tor/bridges-update';
 const DOWN_MINUTES   = 6;
 const RETURN_MINUTES = 30;
 const RETRY_HOURS    = 24;
 const FIRST_RETRY    = 30;
-
-function log(msg) { system(`logger -t ${CFG} ${shq(msg)}`); }
 
 // a default route in the kernel's tables (busybox ip does not filter by "default"); IPv6 unreachable
 // routes are on lo
@@ -73,7 +72,7 @@ function ask_tor() {
 }
 
 // the interface and source address of the route to the Internet in effect ("" without one)
-function uplink() {
+function route_key() {
 	let out = exec('ip route get 192.0.2.1 2>/dev/null').out;
 	let d = match(out, /dev ([^ \n]+)/), s = match(out, /src ([^ \n]+)/);
 	return d ? d[1] + (s ? ' ' + s[1] : '') : '';
@@ -89,11 +88,11 @@ let conf = readfile(CONF) ?? '';
 
 if (ARGV[0] == 'reconnect') {
 	mkdir(RUN, 0o755);
-	let now = uplink(), before = trim(readfile(UPLINK) ?? '');
+	let now = route_key(), before = trim(readfile(UPLINK) ?? '');
 	writefile(UPLINK, `${now}\n`);
-	if (now == before || !tor_instance()) exit(0);
+	if (now == before || !running('tor')) exit(0);
 	let out = control([ 'SETCONF DisableNetwork=1', 'SETCONF DisableNetwork=0', 'GETCONF DisableNetwork' ]);
-	log(`${ARGV[1] ?? 'uplink'}: the route to the Internet leaves through ${now || 'no interface'}` + (length(before) ? ` (was ${before})` : '') +
+	log(CFG, `${ARGV[1] ?? 'uplink'}: the route to the Internet leaves through ${now || 'no interface'}` + (length(before) ? ` (was ${before})` : '') +
 	    ((out != null && index(out, '250 DisableNetwork=0') >= 0) ? ', tor closed its connections and connects again' : ', tor did not answer on its control port'));
 	exit(0);
 }
@@ -104,17 +103,15 @@ function first_update(t) {
 	if ((main.bridges ?? 'builtin') != 'builtin' || match(lc(trim(main.bridge_country ?? '')), /^[a-z][a-z]$/) == null) return;
 	if (length(trim(readfile(LIST) ?? ''))) return;
 	if (t == null || !t.established || t.built == 0) return;
-	let last = null;
-	try { last = json(readfile(BSTATE) ?? '')?.time; } catch (e) { last = null; }
+	let last = read_json(BSTATE, {}).time;
 	let age = time() - (last ?? 0);
 	if (last && age >= 0 && age < FIRST_RETRY * 60) return;
-	let r = stat(RUNNING);
-	if (r && time() - r.mtime < 600) return;
-	log('bridges: tor runs on the list shipped with the package and has a circuit: the bridge update runs now');
+	if (locked(BLOCK)) return;
+	log(CFG, 'bridges: tor runs on the list shipped with the package and has a circuit: the bridge update runs now');
 	system(`setsid ${UPDATE} </dev/null >/dev/null 2>&1 &`);
 }
 
-if (!tor_instance()) exit(0);
+if (!running('tor')) exit(0);
 let t = ask_tor();
 first_update(t);
 if ((main.snowflake ?? 'fallback') != 'fallback') exit(0);
@@ -125,9 +122,7 @@ for (let l in split(conf, '\n')) {
 }
 
 mkdir(RUN, 0o755);
-let st = null;
-try { st = json(readfile(STATE) ?? ''); } catch (e) { st = null; }
-if (type(st) != 'object') st = {};
+let st = read_json(STATE, {});
 let now = time();
 let prev = (type(st.tor) == 'object') ? st.tor.bootstrap : null;
 // working: a completed circuit, the network live (tor saw cells recently) and built circuits (an onion
@@ -144,7 +139,7 @@ st.via_other = via_other;
 function save() { writefile(STATE, sprintf('%J\n', st)); }
 
 function apply(msg) {
-	log(msg);
+	log(CFG, msg);
 	delete st.down_since;
 	delete st.other_since;
 	save();

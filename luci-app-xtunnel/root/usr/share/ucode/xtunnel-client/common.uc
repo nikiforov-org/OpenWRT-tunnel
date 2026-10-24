@@ -1,11 +1,12 @@
 'use strict';
 // Shared helpers of the client part of luci-app-xtunnel: the links of a profile (one per transport of the
 // server page: TCP + XTLS-Vision, XHTTP, Hysteria2, and the VLESS ones through Tor) into xray
-// outbounds, the running xray and its active link, the router's tor, locks, IPv4 subnets.
+// outbounds, the running xray and its active link, the uplink, IPv4 subnets.
 //   import { PROTOCOLS, link_outbound } from 'xtunnel-client.common';
 
-import { popen, readfile, open, access } from 'fs';
-import { connect } from 'ubus';
+import { readfile, access } from 'fs';
+import { ubus, xray_instance } from 'xtunnel.common';
+import { target } from 'xtunnel-ddns.sitecert';
 
 const CFG = 'xtunnel-client';
 const TOR = '/usr/sbin/tor';
@@ -14,47 +15,15 @@ export const RUN = '/tmp/xtunnel-client';
 export const ACTIVE = `${RUN}/active`;          // "TAG PID": the link select applied to that xray process
 export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2', 'vision_tor', 'xhttp_tor' ];
 export const TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
-                        vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor' };
-// the links through Tor go to the SOCKS port of the router's tor (tor's default: the stock torrc sets none)
-export const TOR_SOCKS = { address: '127.0.0.1', port: 9050 };
+                        vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'Tor without a server' };
+// the outbound "tor": the SOCKS port of the router's tor (tor's default: the stock torrc sets none). The links
+// through Tor are dialed through it (sockopt.dialerProxy); the link "Tor without a server" (main.tor_exit) is
+// this outbound itself, the LAN out of the exit relays of the Tor network
+export const TOR_OUTBOUND = { tag: 'tor', protocol: 'socks', settings: { address: '127.0.0.1', port: 9050 } };
 
-export function shq(s) {
-	return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'";
-};
-
-export function exec(command) {
-	let p = popen(command, 'r');
-	if (p == null)
-		return { code: -1, out: '' };
-	let out = p.read('all') ?? '';
-	return { code: p.close(), out: out };
-};
-
-// an exclusive lock held until the process exits (flock: a clock change cannot make it look stale;
-// not inherited by the processes it starts); null when another process holds it
-export function lock(path) {
-	let f = open(path, 'we');
-	return f?.lock('xn') ? f : null;
-};
-
-// whether another process holds the lock of lock()
-export function locked(path) {
-	let f = open(path, 'r');
-	if (!f) return false;
-	let free = f.lock('sn');
-	f.close();
-	return !free;
-};
-
-let bus = null;
-
-// the running xray of the tunnel packages (procd service "xtunnel-xray") while its joined
-// configuration holds this client's file, else null
+// the running xray while it has this client's configuration, else null
 export function instance() {
-	if (index(split(readfile('/tmp/xtunnel-xray/parts') ?? '', '\n'), '/etc/xtunnel-client/config.json') < 0) return null;
-	bus ??= connect();
-	let inst = bus?.call('service', 'list', { name: 'xtunnel-xray' })?.['xtunnel-xray']?.instances?.xray;
-	return (inst?.running == true) ? inst : null;
+	return xray_instance('/etc/xtunnel-client/config.json');
 };
 
 // the active link of that xray: the one select applied to this process, else the one of the
@@ -63,14 +32,6 @@ export function active_link(inst, state) {
 	if (!inst) return '';
 	let f = split(trim(readfile(ACTIVE) ?? ''), ' ');
 	return (length(f[0]) && int(f[1]) == inst.pid) ? f[0] : `${state?.active ?? ''}`;
-};
-
-// whether the stock tor service runs (the links through Tor use its SOCKS port)
-export function tor_running() {
-	bus ??= connect();
-	for (let n, i in bus?.call('service', 'list', { name: 'tor' })?.tor?.instances ?? {})
-		if (i?.running == true) return true;
-	return false;
 };
 
 // the client authorization key of an onion service: the line of the Tor key of a server profile
@@ -93,9 +54,8 @@ export function is_onion(host) {
 // that are up, as netifd reports them; routes of other tables or types, such as this client's
 // local route in table 2222, do not count), or null
 export function uplink() {
-	bus ??= connect();
 	let best = null, metric = null;
-	for (let i in bus?.call('network.interface', 'dump')?.interface ?? []) {
+	for (let i in ubus()?.call('network.interface', 'dump')?.interface ?? []) {
 		if (!i.up) continue;
 		for (let r in i.route ?? [])
 			if (r.target == '0.0.0.0' && r.mask == 0 && r.table == null && r.type == null && (metric == null || (r.metric ?? 0) < metric)) {
@@ -244,7 +204,9 @@ export function link_outbound(protocol, link) {
 // ---- the profiles of /etc/config/xtunnel-client (sync, and the Tor part for the client keys) ----
 
 // every link of the profiles: { tag, profile, profile_name, protocol, title, enabled, tor, tor_on,
-// server_host, server_port, test_url, outbound | error }; the tag is "<profile section>-<protocol>".
+// server_host, server_port, test_url, outbound | error }; the tag is "<profile section>-<protocol>", for
+// a link through Tor "<profile section>-tor_<transport>": the balancer of the active link selects every
+// outbound whose tag starts with its selector, so no tag may start with another.
 // A link through Tor (tor) is used while its profile has "Through Tor" on (tor_on); without tor on
 // the router such a link is marked with the reason.
 export function profile_links(uci) {
@@ -256,12 +218,24 @@ export function profile_links(uci) {
 			if (!length(link)) continue;
 			let o = link_outbound(proto, link), tor = (index(proto, '_tor') > 0);
 			if (tor && on && tor_on && !o.error && !have_tor)
-				o.error = 'tor is not installed on this router (the package tor)';
-			push(out, { tag: `${sid}-${proto}`, profile: sid, profile_name: name, protocol: proto, title: TITLES[proto],
+				o.error = 'tor is not installed on this router (/usr/sbin/tor of the package xtunnel-core)';
+			push(out, { tag: tor ? `${sid}-tor_${replace(proto, /_tor$/, '')}` : `${sid}-${proto}`, profile: sid, profile_name: name, protocol: proto, title: TITLES[proto],
 			            enabled: on, tor: tor, tor_on: tor_on, server_host: o.host ?? '', server_port: o.port ?? 0,
 			            test_url: trim(s.test_url ?? ''), outbound: o.outbound, error: o.error ?? '' });
 		}
 	});
+	// measured through Tor with cgi-bin/speed of the site this router serves (the Dynamic DNS page), or main.tor_test_url
+	if (uci.get(CFG, 'main', 'tor_exit') == '1') {
+		let url = trim(uci.get(CFG, 'main', 'tor_test_url') ?? ''), site = (!url && uci.load('xtunnel-ddns')) ? target(uci, 'xtunnel-ddns') : null;
+		if (site) {
+			let port = int(uci.get('xtunnel-ddns', 'main', 'site_port') ?? 443) || 443;
+			url = `https://${site.host}${port == 443 ? '' : ':' + port}/cgi-bin/speed?bytes=20000000`;
+		}
+		push(out, { tag: TOR_OUTBOUND.tag, profile: '', profile_name: 'Tor', protocol: 'tor', title: TITLES.tor,
+		            enabled: true, tor: true, tor_on: true, server_host: '', server_port: 0, test_url: url, outbound: TOR_OUTBOUND,
+		            error: !have_tor ? 'tor is not installed on this router (/usr/sbin/tor of the package xtunnel-core)'
+		                : !url ? 'no URL for its speed test: serve a site with a domain on the Dynamic DNS page, or enter the URL of cgi-bin/speed of one of your sites' : '' });
+	}
 	return out;
 };
 

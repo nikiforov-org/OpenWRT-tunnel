@@ -6,7 +6,8 @@
 
 import { access, readfile, stat, lsdir } from 'fs';
 import { cursor } from 'uci';
-import { RUN, CONF, exec, valid_key, public_key, keypair, tor_instance, bootstrap_phase } from 'xtunnel-tor.common';
+import { exec, list, read_json, locked, running, syslog_tail, restart, version_of } from 'xtunnel.common';
+import { RUN, CONF, valid_key, public_key, keypair, aliases, bootstrap_phase } from 'xtunnel-tor.common';
 
 const SRV     = 'xtunnel-server';
 const DIR     = '/etc/xtunnel-tor';
@@ -17,25 +18,9 @@ const TOR     = '/usr/sbin/tor';
 const SHIPPED = '/usr/share/xtunnel-tor/bridges.txt';
 const LIST    = `${DIR}/bridges.txt`;
 const BSTATE  = `${DIR}/bridges.state`;
-const BRUN    = `${RUN}/bridges.running`;
+const BLOCK   = `${RUN}/bridges.lock`;            // held while bridges-update runs
 const UPDATE  = '/usr/libexec/xtunnel-tor/bridges-update';
-
-function tail(text, n) {
-	let lines = split(rtrim(text ?? '', '\n'), '\n');
-	if (length(lines) > n)
-		lines = slice(lines, length(lines) - n);
-	return join('\n', lines);
-}
-
-// the names a tor client can map to the onion address (MapAddress NAME.onion ADDRESS)
-function aliases(main) {
-	let out = [];
-	for (let a in ((type(main.alias) == 'array') ? main.alias : (main.alias ? [ main.alias ] : []))) {
-		a = lc(trim(a));
-		if (match(a, /^[a-z0-9_-]{1,63}$/) && !(a in out)) push(out, a);
-	}
-	return out;
-}
+const LOG     = 'xtunnel-tor|Tor\\[';               // its lines in the system log
 
 function onion() {
 	return trim(readfile(`${HS}/hostname`) ?? '');
@@ -43,29 +28,19 @@ function onion() {
 
 // tor's bootstrap: asked on its control port (the log lines are gone once the log buffer wrapped),
 // kept once done for that process (rpcd keeps this plugin loaded); in the first seconds of a start,
-// before the control port is there, the last log line of that process
+// before the control port is there, or when tor does not answer within 2 seconds (rpcd serves no other
+// call meanwhile), the last log line of that process
 let boot = { pid: null, value: null };
 function bootstrap(inst) {
 	if (boot.pid == inst.pid && boot.value?.percent == 100) return boot.value;
-	let v = bootstrap_phase();
+	let v = bootstrap_phase(2);
 	if (v == null) {
-		let m = match(exec(`logread 2>/dev/null | grep -E 'Tor\\[${inst.pid}\\]: Bootstrapped [0-9]+%' | tail -1`).out,
+		let m = match(syslog_tail(`Tor\\[${inst.pid}\\]: Bootstrapped [0-9]+%`, 1),
 		              /Bootstrapped ([0-9]+)% \(([a-z_]+)\): ?(.*)$/);
 		v = m ? { percent: int(m[1]), text: (m[2] == 'done') ? '' : trim(m[3]) } : null;
 	}
 	if (v) boot = { pid: inst.pid, value: v };
 	return v;
-}
-
-// the tor version, read again only when the binary changed
-let version = { key: null, value: '' };
-function tor_version() {
-	let st = stat(TOR), key = st ? `${st.mtime}/${st.size}` : null;
-	if (key != version.key) {
-		let m = key ? match(exec(`${TOR} --version 2>/dev/null`).out, /Tor version ([0-9]+(\.[0-9]+)*)/) : null;
-		version = { key: key, value: m ? m[1] : '' };
-	}
-	return version.value;
 }
 
 // the snowflake bridges: the mode, how many snowflake and other lines the configured list has,
@@ -78,15 +53,14 @@ function snowflake_info(main) {
 		lines = split(text, '\n');
 	}
 	else if (main.bridges == 'custom')
-		lines = (type(main.bridge) == 'array') ? main.bridge : (main.bridge ? [ main.bridge ] : []);
+		lines = list(main.bridge);
 	let listed = 0, others = 0;
 	for (let l in lines) {
 		l = trim(replace(trim(l), /^Bridge +/, ''));
 		if (!length(l)) continue;
 		if (index(l, 'snowflake ') == 0) listed++; else others++;
 	}
-	let w = null;
-	try { w = json(readfile(`${RUN}/watch.json`) ?? ''); } catch (e) { w = null; }
+	let w = read_json(`${RUN}/watch.json`, null);
 	let since = int(trim(readfile(`${DIR}/snowflake.on`) ?? ''));
 	return {
 		mode: main.snowflake ?? 'fallback',
@@ -94,7 +68,7 @@ function snowflake_info(main) {
 		others: others,
 		in_use: (index(readfile(CONF) ?? '', '\nBridge snowflake ') >= 0),
 		fallback_since: (since > 0) ? since : null,
-		watch: (type(w) == 'object') ? w : null
+		watch: w
 	};
 }
 
@@ -111,15 +85,12 @@ function bridges_info(main) {
 		by[t] = (by[t] ?? 0) + 1;
 		n++;
 	}
-	let state = null;
-	try { state = json(readfile(BSTATE) ?? ''); } catch (e) { state = null; }
-	let r = stat(BRUN);
 	return {
 		mode: main.bridges ?? 'builtin',
 		country: lc(trim(main.bridge_country ?? '')),
 		source: source, lines: n, by: by,
-		state: (type(state) == 'object') ? state : null,
-		running: (r != null && time() - r.mtime < 600)
+		state: read_json(BSTATE, null),
+		running: locked(BLOCK)
 	};
 }
 
@@ -131,8 +102,7 @@ methods.status = {
 		uci.load(SRV);
 		let main = uci.get_all(SRV, 'tor') ?? {};
 		let enabled = (main.enabled == '1');
-		let inst = tor_instance();
-		let running = (inst != null);
+		let inst = running('tor'), up = (inst != null);
 		// the server profiles and whether the onion service lets their Tor key in
 		let profiles = [];
 		uci.foreach(SRV, 'profile', function(s) {
@@ -140,29 +110,29 @@ methods.status = {
 				authorized: (access(`${CLIENTS}/${s['.name']}.auth`) == true) });
 		});
 		let st = stat(CONF);
-		let bs = running ? bootstrap(inst) : null;
+		let bs = up ? bootstrap(inst) : null;
 		return {
 			installed: (access(TOR, 'x') == true),
-			version: tor_version(),
+			version: version_of(TOR, '--version', /Tor version ([0-9]+(\.[0-9]+)*)/),
 			enabled: enabled,
 			in_effect: (st != null),
 			// the onion service in the configuration in effect; sync leaves it out without an authorized client
 			published: (index(readfile(CONF) ?? '', '\nHiddenServiceDir ') >= 0),
 			no_profile: enabled && !length(filter(profiles, p => p.enabled && p.key)),
 			client_keys: length(filter(lsdir('/etc/tor/xtunnel-client') ?? [], f => match(f, /\.auth_private$/))),
-			running: running,
-			bootstrap: bs ? bs.percent : (running ? 0 : null),
+			running: up,
+			bootstrap: bs ? bs.percent : (up ? 0 : null),
 			bootstrap_text: bs ? bs.text : '',
 			onion: onion(),
-			aliases: aliases(main),
-			ports: (type(main.port) == 'array') ? main.port : (main.port ? [ main.port ] : []),
+			aliases: aliases(main.alias),
+			ports: list(main.port),
 			bridges: main.bridges ?? 'builtin',
 			bridges_info: bridges_info(main),
 			snowflake: snowflake_info(main),
 			profiles: profiles,
 			config_time: st ? st.mtime : null,
 			error: trim(readfile(ERROR) ?? ''),
-			log_last: (st != null && !running) ? tail(exec(`logread 2>/dev/null | grep -E 'xtunnel-tor|Tor\\['`).out, 3) : ''
+			log_last: (st != null && !up) ? syslog_tail(LOG, 3) : ''
 		};
 	}
 };
@@ -193,8 +163,7 @@ methods.config = {
 
 methods.update_bridges = {
 	call: function() {
-		let r = stat(BRUN);
-		if (r != null && time() - r.mtime < 600)
+		if (locked(BLOCK))
 			return { running: true };
 		exec(`setsid ${UPDATE} >/dev/null 2>&1 </dev/null &`);
 		return { started: true };
@@ -203,14 +172,13 @@ methods.update_bridges = {
 
 methods.log = {
 	call: function() {
-		return { log: tail(exec(`logread 2>/dev/null | grep -E 'xtunnel-tor|Tor\\['`).out, 200) };
+		return { log: syslog_tail(LOG, 200) };
 	}
 };
 
 methods.restart = {
 	call: function() {
-		let r = exec('/etc/init.d/tor restart 2>&1');
-		return { ok: (r.code == 0), log: trim(r.out) };
+		return restart('/etc/init.d/tor');
 	}
 };
 

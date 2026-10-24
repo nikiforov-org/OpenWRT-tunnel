@@ -13,20 +13,10 @@
 
 'use strict';
 
-import { popen } from 'fs';
-
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-
-function exec(cmd) {
-	let p = popen(cmd, 'r');
-	if (!p) return '';
-	let out = p.read('all') ?? '';
-	p.close();
-	return out;
-}
+import { shq, exec } from 'xtunnel.common';
 
 function lookup(host, server) {
-	let out = exec(`nslookup ${shq(host)}${server ? ' ' + shq(server) : ''} 2>&1`), addrs = [], seen = false;
+	let out = exec(`nslookup ${shq(host)}${server ? ' ' + shq(server) : ''} 2>&1`).out, addrs = [], seen = false;
 	if (index(out, 'no servers could be reached') >= 0 || index(out, 'timed out') >= 0) return null;
 	for (let l in split(out, '\n')) {
 		if (index(l, 'Name:') >= 0) { seen = true; continue; }
@@ -40,7 +30,7 @@ function name_servers(host) {
 	let parts = split(lc(host ?? ''), '.');
 	for (let i = 0; i < length(parts) - 1; i++) {
 		let zone = join('.', slice(parts, i)), ns = [];
-		for (let l in split(exec(`nslookup -type=ns ${shq(zone)} 2>/dev/null`), '\n')) {
+		for (let l in split(exec(`nslookup -type=ns ${shq(zone)} 2>/dev/null`).out, '\n')) {
 			let m = match(l, /nameserver = ([^ \t]+)/);
 			if (m) push(ns, rtrim(m[1], '.'));
 		}

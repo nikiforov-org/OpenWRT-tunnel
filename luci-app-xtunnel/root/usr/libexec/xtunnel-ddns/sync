@@ -5,9 +5,10 @@
 
 'use strict';
 
-import { readfile, writefile, mkdir, unlink, rmdir, lsdir, lstat, readlink, symlink, rename, access, popen, glob, open } from 'fs';
+import { readfile, writefile, mkdir, unlink, rmdir, lsdir, lstat, readlink, symlink, access, glob } from 'fs';
 import { cursor } from 'uci';
-import { grade, in_effect, set_in_effect, target } from 'xtunnel-ddns.sitecert';
+import { log, read_json, lock, uset, fw_rule, set_cron } from 'xtunnel.common';
+import { grade, in_effect, target } from 'xtunnel-ddns.sitecert';
 
 const CFG        = 'xtunnel-ddns';
 const SITES      = '/usr/share/www';                // document roots, one directory per site
@@ -23,33 +24,21 @@ const UPDATE     = '/usr/libexec/xtunnel-ddns/update';
 const MOVE       = '/usr/libexec/xtunnel-ddns/move';
 const XRAY_CONF  = '/etc/xtunnel-server/config.json';   // the xray server's configuration in effect
 const BEHIND_PORT = 4443;                               // where uhttpd serves HTTPS while Xray holds its port
-const CRONTAB    = '/etc/crontabs/root';
 
 const mode = ARGV[0] ?? 'apply';
 // one run at a time (the apply, the server's hand-over of the port, cert, move)
-let sync_lock = open('/var/lock/xtunnel-ddns-sync', 'we');
-sync_lock?.lock('x');
+let sync_lock = lock('/var/lock/xtunnel-ddns-sync', true);
 let uci = cursor();
-for (let c in [ CFG, 'uhttpd', 'luci', 'firewall', 'ddns', 'xtunnel-server' ]) uci.load(c);
+for (let c in [ CFG, 'uhttpd', 'luci', 'firewall', 'xtunnel-server' ]) uci.load(c);
 let changed = {};
 
-function shq(s) { return "'" + replace(`${s ?? ''}`, "'", "'\\''") + "'"; }
-function log(msg) { system(`logger -t xtunnel-ddns ${shq(msg)}`); }
 function is_file(p) { return lstat(p)?.type == 'file'; }
 function is_dir(p) { return lstat(p)?.type == 'directory'; }
 function is_link(p) { return lstat(p)?.type == 'link'; }
 
-// set an option only when its value differs (a list as a space-separated string); remember the config
-function uset(c, sec, opt, val, as_list) {
-	let cur = uci.get(c, sec, opt);
-	if (type(cur) == 'array') cur = join(' ', cur);
-	if (!length(val)) {
-		if (cur != null) { uci.delete(c, sec, opt); changed[c] = true; }
-		return;
-	}
-	if (cur == val) return;
-	uci.set(c, sec, opt, as_list ? split(val, ' ') : val);
-	changed[c] = true;
+// an option set only when its value differs; the config is remembered for the commit
+function set(c, sec, opt, val) {
+	if (uset(uci, c, sec, opt, val)) changed[c] = true;
 }
 
 let main = uci.get_all(CFG, 'main') ?? {};
@@ -102,7 +91,7 @@ if (!serving) {
 }
 let xray_front = false, xray = null;
 if (uci.get('xtunnel-server', 'main', 'enabled') == '1') {
-	try { xray = json(readfile(XRAY_CONF) ?? ''); } catch (e) { xray = null; }
+	xray = read_json(XRAY_CONF, null);
 	for (let ib in xray?.inbounds ?? [])
 		if (ib?.protocol == 'vless' && `${ib.port}` == https_port) xray_front = true;
 }
@@ -118,36 +107,14 @@ uci.foreach(CFG, 'domain', function(s) {
 	if (access(`${CERTS}/${host}/fullchain.pem`) || access(`${dir}/${host}/cert.pem`)) want_renewal = true;
 });
 
-// sections an earlier version kept in ddns-scripts
-let old = [];
-uci.foreach('ddns', 'service', function(s) { if (index(s['.name'], 'xtunnel_ddns_') == 0) push(old, s['.name']); });
-if (length(old)) {
-	for (let s in old) uci.delete('ddns', s);
-	uci.commit('ddns');
-	system('[ -x /etc/init.d/ddns ] && /etc/init.d/ddns restart >/dev/null 2>&1');
-	log(`ddns-scripts sections of an earlier version removed: ${join(' ', old)}`);
-}
-for (let f in [ ...(glob('/var/run/ddns/xtunnel_ddns_*') ?? []), ...(glob('/var/log/ddns/xtunnel_ddns_*') ?? []) ]) unlink(f);
-
 // ---------- firewall ----------
 
-if (serving && !xray_front) {
-	if (uci.get('firewall', 'xtunnel_ddns_https') != 'rule') { uci.set('firewall', 'xtunnel_ddns_https', 'rule'); changed.firewall = true; }
-	uset('firewall', 'xtunnel_ddns_https', 'name', 'xtunnel-ddns: HTTPS from WAN');
-	uset('firewall', 'xtunnel_ddns_https', 'src', 'wan');
-	uset('firewall', 'xtunnel_ddns_https', 'proto', 'tcp');
-	uset('firewall', 'xtunnel_ddns_https', 'dest_port', site_port);
-	uset('firewall', 'xtunnel_ddns_https', 'target', 'ACCEPT');
-	uset('firewall', 'xtunnel_ddns_https', 'enabled', '1');
-}
-else if (uci.get('firewall', 'xtunnel_ddns_https') == 'rule') {
-	uci.delete('firewall', 'xtunnel_ddns_https');
+if (fw_rule(uci, 'xtunnel_ddns_https', (serving && !xray_front) ? { name: 'xtunnel-ddns: HTTPS from WAN', proto: 'tcp', port: site_port } : null))
 	changed.firewall = true;
-}
 if (changed.firewall) {
 	uci.commit('firewall');
 	system('/etc/init.d/firewall reload >/dev/null 2>&1');
-	log(`firewall rule xtunnel_ddns_https: ${(serving && !xray_front) ? 'port ' + site_port : 'removed'}`);
+	log(CFG, `firewall rule xtunnel_ddns_https: ${(serving && !xray_front) ? 'port ' + site_port : 'removed'}`);
 }
 
 // ---------- LuCI entry points inside a site's document root ----------
@@ -187,7 +154,6 @@ function link_remove(path) {
 
 function site_links(add, dir) {
 	if (!is_dir(dir)) return;
-	if (is_link(`${dir}/cgi-bin`)) unlink(`${dir}/cgi-bin`);       // one link for the whole directory: package 1.0.0-r1
 	let name = add ? static_name() : null;
 	if (add) {
 		mkdir(`${dir}/cgi-bin`, 0o755);
@@ -215,11 +181,6 @@ function site_links(add, dir) {
 // is off, the router's pages keep that certificate too. The router's own (self-signed) certificate
 // is used only while there is no certificate of this package in effect.
 let eff = in_effect();
-if (!eff) {
-	// an installation of an earlier version: the certificate uhttpd presents now, when it is one of these
-	let m = match(`${uci.get('uhttpd', 'main', 'cert') ?? ''}`, /^\/etc\/ssl\/xtunnel-ddns\/([^\/]+)\/fullchain\.pem$/);
-	if (m && grade(m[1]).grade > 0) { eff = lc(m[1]); set_in_effect(eff); }
-}
 let served = (mode == 'apply' && eff) ? grade(eff) : null;
 if (served && served.grade < 1) served = null;
 let tgt = serving ? target(uci, CFG) : null;
@@ -270,16 +231,16 @@ else if (access(BACKUP) || xray_front) {
 }
 if (w) {
 	if (xray_front) w.https = `127.0.0.1:${BEHIND_PORT} [::1]:${BEHIND_PORT}`;
-	uset('uhttpd', 'main', 'home', w.home);
-	uset('uhttpd', 'main', 'cert', w.cert);
-	uset('uhttpd', 'main', 'key', w.key);
-	uset('uhttpd', 'main', 'listen_https', w.https, true);
-	uset('uhttpd', 'main', 'ubus_prefix', w.ubus);
-	uset('uhttpd', 'main', 'no_dirlists', w.dirlists);
-	uset('uhttpd', 'main', 'error_page', w.errorpage);
-	uset('luci', 'main', 'resourcebase', w.resources);
-	uset('luci', 'main', 'mediaurlbase', w.media);
-	uset('luci', 'main', 'ubuspath', w.ubuspath);
+	set('uhttpd', 'main', 'home', w.home);
+	set('uhttpd', 'main', 'cert', w.cert);
+	set('uhttpd', 'main', 'key', w.key);
+	set('uhttpd', 'main', 'listen_https', split(w.https, ' '));
+	set('uhttpd', 'main', 'ubus_prefix', w.ubus);
+	set('uhttpd', 'main', 'no_dirlists', w.dirlists);
+	set('uhttpd', 'main', 'error_page', w.errorpage);
+	set('luci', 'main', 'resourcebase', w.resources);
+	set('luci', 'main', 'mediaurlbase', w.media);
+	set('luci', 'main', 'ubuspath', w.ubuspath);
 	if (changed.luci) {
 		uci.commit('luci');
 		for (let f in glob('/tmp/luci-indexcache*') ?? []) unlink(f);
@@ -289,7 +250,7 @@ if (w) {
 		uci.commit('uhttpd');
 		system('sleep 2');       // let LuCI confirm its apply before the web server goes away for a moment
 		system('/etc/init.d/uhttpd restart >/dev/null 2>&1');
-		log(`uhttpd: home=${w.home} https=${w.https} cert=${w.cert || 'none'} login_page=${login_page ? 1 : 0} behind_xray=${xray_front ? 1 : 0}`);
+		log(CFG, `uhttpd: home=${w.home} https=${w.https} cert=${w.cert || 'none'} login_page=${login_page ? 1 : 0} behind_xray=${xray_front ? 1 : 0}`);
 	}
 }
 
@@ -306,36 +267,26 @@ if (want_update) push(wanted, `*/10 * * * * ${UPDATE} # xtunnel-ddns-update`);
 if (want_renewal) push(wanted, '17 3 * * * /usr/libexec/xtunnel-ddns/cert renew-all # xtunnel-ddns-cert');
 if (serving && access(`${BACKENDS}/${site}/build`, 'x') && length(schedule)) {
 	if (valid_schedule(schedule)) push(wanted, `${trim(schedule)} ${SITEBUILD} ${site} # xtunnel-ddns-site`);
-	else log(`site schedule '${schedule}' is not a valid cron time, not scheduled`);
+	else log(CFG, `site schedule '${schedule}' is not a valid cron time, not scheduled`);
 }
-let lines = filter(split(readfile(CRONTAB) ?? '', '\n'), l => length(l));
-let ours = filter(lines, l => index(l, '# xtunnel-ddns-') >= 0);
-if (join('\n', ours) != join('\n', wanted)) {
-	let rest = [ ...filter(lines, l => index(l, '# xtunnel-ddns-') < 0), ...wanted ];
-	if (length(rest)) {
-		mkdir('/etc/crontabs', 0o755);
-		writefile(`${CRONTAB}.tdd`, join('\n', rest) + '\n');
-		rename(`${CRONTAB}.tdd`, CRONTAB);
-	}
-	else unlink(CRONTAB);
-	system('/etc/init.d/cron restart >/dev/null 2>&1');
-	log(`cron: update=${want_update ? 'yes' : 'no'} cert=${want_renewal ? 'yes' : 'no'} site=${length(filter(wanted, l => index(l, 'xtunnel-ddns-site') >= 0)) ? 'yes' : 'no'}`);
-}
+if (set_cron('# xtunnel-ddns-', wanted))
+	log(CFG, `cron: update=${want_update ? 'yes' : 'no'} cert=${want_renewal ? 'yes' : 'no'} site=${length(filter(wanted, l => index(l, 'xtunnel-ddns-site') >= 0)) ? 'yes' : 'no'}`);
 
 // a domain switched on gets its address at once
 if (want_update) system(`setsid ${UPDATE} >/dev/null 2>&1 </dev/null &`);
 
 // The Xray server's Hysteria2 transport can take the certificate of a domain of this package: when
-// the hostname of that domain was edited and the new name has a certificate already, the server
-// applies its files now (without one yet, cert does that once it is installed)
+// the certificate files of that domain are not the ones of the server's configuration in effect (the
+// hostname was edited, the first certificate was installed: cert runs this sync) and they exist, the
+// server applies them
 let srv = uci.get_all('xtunnel-server', 'main') ?? {};
-if (mode == 'apply' && xray && srv.hysteria2_enabled == '1' && (srv.cert_source ?? 'ddns') == 'ddns' && srv.cert_domain) {
+if (mode == 'apply' && srv.enabled == '1' && srv.hysteria2_enabled == '1' && (srv.cert_source ?? 'ddns') == 'ddns' && srv.cert_domain) {
 	let h = lc(uci.get(CFG, srv.cert_domain, 'hostname') ?? '');
-	let hy2 = filter(xray.inbounds ?? [], ib => ib?.tag == 'hysteria2')[0];
+	let hy2 = filter(xray?.inbounds ?? [], ib => ib?.tag == 'hysteria2')[0];
 	let file = hy2?.streamSettings?.tlsSettings?.certificates?.[0]?.certificateFile;
 	if (h && file != `${CERTS}/${h}/fullchain.pem` && access(`${CERTS}/${h}/fullchain.pem`) && access(`${CERTS}/${h}/key.pem`) &&
 	    access('/etc/init.d/xtunnel-server', 'x')) {
-		log(`the Xray server's Hysteria2 certificate follows its domain to ${h}`);
+		log(CFG, `the Xray server's Hysteria2 certificate follows its domain to ${h}`);
 		// in the background: the server's sync can be the one that runs this sync (the port hand-over)
 		system('setsid /etc/init.d/xtunnel-server reload >/dev/null 2>&1 </dev/null &');
 	}

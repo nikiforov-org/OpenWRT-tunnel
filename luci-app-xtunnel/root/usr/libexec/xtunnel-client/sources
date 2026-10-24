@@ -13,22 +13,14 @@
 
 import { access, readfile, writefile, mkdir, unlink, rename, stat } from 'fs';
 import { cursor } from 'uci';
-import { RUN, shq, exec, lock, cidr } from 'xtunnel-client.common';
+import { shq, exec, log, lock, url_parts, read_json, xray_test } from 'xtunnel.common';
+import { RUN, cidr, instance } from 'xtunnel-client.common';
 
 const CFG   = 'xtunnel-client';
 const DIR   = '/etc/xtunnel-client/sources';
 const STATE = `${RUN}/state.json`;
 const LOCK  = `${RUN}/sources.lock`;
 const MAX_FILES = 300;                           // include: files per source
-
-function log(msg) { system(`logger -t ${CFG} ${shq(msg)}`); }
-
-function url_parts(url) {
-	let m = match(url ?? '', /^(https?):\/\/(\[[0-9a-fA-F:.]+\]|[^:\/?#]+)(:([0-9]+))?/);
-	if (!m) return null;
-	let port = m[4] ? int(m[4]) : (m[1] == 'https' ? 443 : 80);
-	return { host: m[2], port: port, hostport: `${m[2]}:${port}` };
-}
 
 // downloads url into dest: through the list host's tap when there is one, else directly
 function fetch(url, dest, taps) {
@@ -109,11 +101,9 @@ mkdir(RUN, 0o755);
 mkdir(DIR, 0o755);
 let held = lock(LOCK);
 if (!held) exit(0);
-let st = null;
-try { st = json(readfile(STATE) ?? ''); } catch (e) { st = null; }
+let st = read_json(STATE, {});
 // the taps exist while the shared xray runs with the client's file (xray-service)
-let joined = index(split(readfile('/tmp/xtunnel-xray/parts') ?? '', '\n'), '/etc/xtunnel-client/config.json') >= 0;
-let taps = (type(st?.src_taps) == 'object' && joined && exec("pidof xray >/dev/null").code == 0) ? st.src_taps : {};
+let taps = (type(st.src_taps) == 'object' && instance()) ? st.src_taps : {};
 let uci = cursor();
 uci.load(CFG);
 let changed = false, report = [];
@@ -135,9 +125,9 @@ uci.foreach(CFG, 'source', function(sec) {
 				let test = `${DIR}/.${name}.test.json`, field = (kind == 'ip') ? 'ip' : 'domain';
 				writefile(test, sprintf('%J', { outbounds: [ { protocol: 'freedom', tag: 'd' } ],
 					routing: { rules: [ { type: 'field', [field]: [ `ext:.${name}.tmp:${tag}` ], outboundTag: 'd' } ] } }));
-				let r = exec(`XRAY_LOCATION_ASSET=${shq(DIR)} xray run -test -c ${shq(test)} 2>&1`);
+				let error = xray_test(test, `XRAY_LOCATION_ASSET=${shq(DIR)}`);
 				unlink(test);
-				if (r.code != 0) meta.error = `xray cannot read the list "${tag}" from this file`;
+				if (error) meta.error = `xray cannot read the list "${tag}" from this file`;
 				else {
 					meta.format = 'dat'; meta.kind = kind; meta.tag = tag; meta.file = `${name}.dat`;
 					if (store(`${DIR}/${name}.dat`, data)) changed = true;
@@ -161,14 +151,13 @@ uci.foreach(CFG, 'source', function(sec) {
 	}
 	unlink(tmp);
 	// a failed download keeps the list fetched before
-	let old = null;
-	try { old = json(readfile(`${DIR}/${name}.meta`) ?? ''); } catch (e) { old = null; }
-	if (meta.error && !meta.format && type(old) == 'object' && old.format) {
+	let old = read_json(`${DIR}/${name}.meta`, {});
+	if (meta.error && !meta.format && old.format) {
 		meta = { ...old, error: meta.error, failed: time() };
 	}
 	writefile(`${DIR}/${name}.meta`, sprintf('%J\n', meta));
 	push(report, `${name}: ` + (meta.format ? `${meta.domains} domains, ${meta.ips} subnets` : '') + (meta.error ? ` (${meta.error})` : ''));
 });
-log('sources: ' + join('; ', report) + (changed ? ' (changed, routing reloaded)' : ''));
+log(CFG, 'sources: ' + join('; ', report) + (changed ? ' (changed, routing reloaded)' : ''));
 held.close();
 if (changed) system('/etc/init.d/xtunnel-client reload >/dev/null 2>&1');
