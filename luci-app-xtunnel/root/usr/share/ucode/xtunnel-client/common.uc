@@ -15,9 +15,9 @@ export const RUN = '/tmp/xtunnel-client';
 export const ACTIVE = `${RUN}/active`;          // "TAG PID": the link select applied to that xray process
 export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2', 'vision_tor', 'xhttp_tor' ];
 export const TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
-                        vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'Tor without a server' };
+                        vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'through Tor' };
 // the outbound "tor": the SOCKS port of the router's tor (tor's default: the stock torrc sets none). The links
-// through Tor are dialed through it (sockopt.dialerProxy); the link "Tor without a server" (main.tor_exit) is
+// through Tor are dialed through it (sockopt.dialerProxy); the link "through Tor" (main.tor_exit) is
 // this outbound itself, the LAN out of the exit relays of the Tor network
 export const TOR_OUTBOUND = { tag: 'tor', protocol: 'socks', settings: { address: '127.0.0.1', port: 9050 } };
 

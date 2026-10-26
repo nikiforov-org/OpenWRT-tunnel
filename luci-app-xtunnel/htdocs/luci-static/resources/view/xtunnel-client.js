@@ -22,7 +22,7 @@ var DIRECT = [ 'vision', 'xhttp', 'hysteria2' ];
 var VIA_TOR = [ 'vision_tor', 'xhttp_tor' ];
 var PROTOCOLS = DIRECT.concat(VIA_TOR);
 var TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
-               vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'Tor without a server' };
+               vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'through Tor' };
 
 function speedText(bps) {
 	if (!bps) return '—';
@@ -36,7 +36,7 @@ function usable(l) {
 }
 
 function linkLabel(l) {
-	if (l.protocol == 'tor') return _('Tor without a server');
+	if (l.protocol == 'tor') return _('through Tor');
 	return (l.profile_name || l.profile) + ': ' + (l.title || TITLES[l.protocol] || l.protocol);
 }
 
@@ -414,7 +414,7 @@ return view.extend({
 		this.mainSection = s;
 		s.tab('choice', _('Choice of the link'));
 		s.tab('dns', _('DNS'));
-		s.tab('tor', _('Tor without a server'));
+		s.tab('tor', _('through Tor'));
 
 		o = s.taboption('choice', form.ListValue, 'mode', _('Choice of the link'));
 		o.value('auto', _('Automatic: the fastest link'));
@@ -461,12 +461,12 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.taboption('tor', form.Flag, 'tor_exit', _('Enabled'),
-			_('One more link, "Tor without a server": the LAN through the Tor network and out of its exit relays, with this router\'s tor, when no server is at hand. It takes part in the choice like the other links (in the automatic mode it becomes active when it is the fastest, in practice when the servers do not answer). Tor carries TCP only: UDP (QUIC, calls, games) does not pass, and the resolver above is asked over TCP while the link is on.'));
+			_('One more link, \"through Tor\": the LAN through the Tor network and out of its exit relays, with this router\'s tor, instead of a server. It takes part in the choice like the other links (in the automatic mode it becomes active when it is the fastest, in practice when the servers do not answer). Tor carries TCP only: UDP (QUIC, calls, games) does not pass, and the resolver above is asked over TCP while the link is on.'));
 		o.rmempty = false;
 		o.default = '0';
 
 		o = s.taboption('tor', form.Value, 'tor_test_url', _('URL for the speed test through Tor'),
-			_('What the link "Tor without a server" is measured and checked with, through Tor and out of an exit relay. Empty: cgi-bin/speed of this router\'s own site at its domain (the site of the Dynamic DNS page), https://<domain>/cgi-bin/speed?bytes=20000000. When a router in front forwards another public port to the site, or for another of your sites, enter the URL.'));
+			_('What the link "through Tor" is measured and checked with, through Tor and out of an exit relay. Empty: cgi-bin/speed of this router\'s own site at its domain (the site of the Dynamic DNS page), https://<domain>/cgi-bin/speed?bytes=20000000. When a router in front forwards another public port to the site, or for another of your sites, enter the URL.'));
 		o.placeholder = _('empty = this router\'s own site');
 		o.rmempty = true;
 		o.retain = true;

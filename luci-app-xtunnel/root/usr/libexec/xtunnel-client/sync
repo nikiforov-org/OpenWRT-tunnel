@@ -229,7 +229,7 @@ function build(main, clients, sources, resolvers) {
 	for (let c in clients)
 		if (!c.tor && c.server_host && !match(c.server_host, /^[0-9.]+$/) && index(names, `full:${c.server_host}`) < 0) push(names, `full:${c.server_host}`);
 	if (length(names)) push(servers, { address: isp[0], domains: names, skipFallback: true });
-	// Tor carries TCP only: with the link "Tor without a server" the resolver of the tunnel is asked over TCP
+	// Tor carries TCP only: with the link "through Tor" the resolver of the tunnel is asked over TCP
 	let tunnel_dns = length(filter(clients, c => c.tag == TOR_OUTBOUND.tag)) ? `tcp://${resolver}` : resolver;
 	if (have && by_list && !except) {
 		if (length(domains)) push(servers, { address: tunnel_dns, domains: domains, skipFallback: true });

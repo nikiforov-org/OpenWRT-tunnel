@@ -516,9 +516,9 @@ line of the profile's key: the onion service lets in only clients with a key.
 - Tor carries TCP only, so there is no Hysteria2 link through Tor. The names of the servers
   of the links through Tor are resolved by tor, not at the provider.
 
-### Tor without a server
+### through Tor
 
-**Settings**, tab **Tor without a server**, **Enabled** adds one more link: the outbound `tor` itself (the SOCKS
+**Settings**, tab **through Tor**, **Enabled** adds one more link: the outbound `tor` itself (the SOCKS
 port of this router's tor), so the LAN goes through the Tor network and out of its exit relays,
 without a server. It is measured, checked and chosen like the other links. Its test target is
 `cgi-bin/speed` of the site this router serves (the Dynamic DNS page), at the site's domain and
