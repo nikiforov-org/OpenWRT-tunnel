@@ -1,0 +1,26 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Announce the router's network shares, so it turns up by itself in the places
+  people actually look: the Network section of macOS Finder and of a Linux file
+  manager. Without this the shares are perfectly reachable and completely
+  invisible - you have to know the address and type it in by hand, which is what
+  "I can't see the flash drive anywhere" turns out to mean.
+
+  Windows does not use this protocol at all any more; wsdd2 covers it, and is a
+  separate package with its own daemon.
+
+  _device-info is what makes Finder draw a server rather than a generic box.
+-->
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_smb._tcp</type>
+    <port>445</port>
+  </service>
+  <service>
+    <type>_device-info._tcp</type>
+    <port>0</port>
+    <txt-record>model=RackMac</txt-record>
+  </service>
+</service-group>

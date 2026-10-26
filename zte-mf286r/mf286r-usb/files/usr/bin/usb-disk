@@ -1,0 +1,263 @@
+#!/bin/sh
+# Everything the Storage page needs from a USB drive: what is plugged in, and
+# the three destructive-ish operations on it.
+#
+#   usb-disk list                        one JSON object describing every disk
+#   usb-disk mount   <part>              mount one partition under /mnt
+#   usb-disk umount  <part>              unmount it
+#   usb-disk format  <part> <fs> [label] make a fresh filesystem on a partition
+#   usb-disk wipe    <disk> <fs> [label] throw the partition table away, make
+#                                        one partition spanning the disk, format
+#
+# <part> and <disk> are bare kernel names (sda, sda1) — never a path, so a
+# crafted argument from the web page cannot point the tools at, say, the NAND
+# holding the firmware. Only /dev/sd* is accepted at all.
+#
+# "wipe" exists because the partition-level format is not enough in practice:
+# a stick that arrives as a Ventoy or an installer medium carries several
+# partitions and a boot loader, and the only sane answer to "make it a normal
+# stick again" is to throw the whole layout away. Measured on this hardware
+# 2026-09-05: exactly that case.
+. /usr/share/libubox/jshn.sh
+
+fail() { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 1; }
+
+# sda / sda1 and nothing else
+valid() { case "$1" in sd[a-z]|sd[a-z][0-9]|sd[a-z][0-9][0-9]) return 0 ;; *) return 1 ;; esac; }
+
+sizeof() {  # bytes, from the kernel's 512-byte sector count
+	s=$(cat "/sys/class/block/$1/size" 2>/dev/null) || s=0
+	echo $((s * 512))
+}
+
+human() {
+	b="$1"
+	awk -v b="$b" 'BEGIN{
+		split("B KB MB GB TB",u," "); i=1
+		while (b >= 1024 && i < 5) { b /= 1024; i++ }
+		printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i]
+	}'
+}
+
+info_field() {  # <dev> <FIELD> — LABEL, TYPE, UUID of a partition
+	# blkid rather than `block info`, because the latter loses the last
+	# character of any label that is not plain latin. Measured 2026-09-05: a
+	# partition labelled "МЕТКА" reads back as "МЕТКА" from blkid and "МЕТК"
+	# from block info, on the same device, at the same moment - so the label on
+	# the disk is right and the OpenWrt tool's conversion from UTF-16 is not.
+	if command -v blkid >/dev/null 2>&1; then
+		blkid -s "$2" -o value "/dev/$1" 2>/dev/null | head -1
+	else
+		# the value is read out of the quotes rather than by splitting on
+		# spaces: LABEL="MY DISK" is legal and splitting loses the second word
+		block info "/dev/$1" 2>/dev/null | sed -n "s/.* $2=\"\([^\"]*\)\".*/\1/p" | head -1
+	fi
+}
+
+mountpoint_of() { awk -v d="/dev/$1" '$1 == d { print $2; exit }' /proc/mounts; }
+
+do_list() {
+	json_init
+	json_add_boolean ok 1
+	json_add_array disks
+	for d in /sys/block/sd*; do
+		[ -e "$d" ] || continue
+		disk=$(basename "$d")
+		json_add_object
+		json_add_string name "$disk"
+		json_add_string size "$(human "$(sizeof "$disk")")"
+		json_add_string model "$(cat "$d/device/model" 2>/dev/null | sed 's/ *$//')"
+		json_add_array parts
+		for p in "$d"/"$disk"*; do
+			[ -e "$p/partition" ] || continue
+			part=$(basename "$p")
+			json_add_object
+			json_add_string name "$part"
+			json_add_string size "$(human "$(sizeof "$part")")"
+			json_add_string fs "$(info_field "$part" TYPE)"
+			json_add_string label "$(info_field "$part" LABEL)"
+			json_add_string mount "$(mountpoint_of "$part")"
+			json_close_object
+		done
+		json_close_array
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+# unmount a partition, or every partition of a disk
+unmount_all() {
+	for p in /sys/class/block/"$1"*; do
+		[ -e "$p" ] || continue
+		n=$(basename "$p")
+		m=$(mountpoint_of "$n")
+		[ -n "$m" ] && { umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null; }
+	done
+	sync
+}
+
+# Writing to a partition makes the kernel re-read it, blockd sees the change and
+# mounts the thing straight back - and then mkfs and sfdisk both refuse with
+# "Resource busy" / "This disk is currently in use". Measured here 2026-09-05:
+# a format that unmounts first still failed, because the dd that clears the old
+# superblock is itself what triggers the remount. So automounting is held off
+# for the duration instead of racing against it.
+#
+# The share and media servers have to go down for the same reason, and this one
+# is not obvious at all: they keep the shared directory open, an unmount of a
+# busy mount point falls back to the lazy kind, and a lazily unmounted
+# filesystem keeps the device claimed for as long as anything still references
+# it. The symptom is mkfs failing with "Resource busy" on a partition that
+# /proc/mounts swears is not mounted, and no process visibly holding the device.
+HOLDERS="blockd ksmbd minidlna"
+
+automount_off() {
+	for s in $HOLDERS; do [ -x "/etc/init.d/$s" ] && /etc/init.d/$s stop >/dev/null 2>&1; done
+	unmount_all "$1"
+	sleep 1
+}
+automount_on() {
+	for s in $HOLDERS; do
+		[ -x "/etc/init.d/$s" ] || continue
+		/etc/init.d/$s enabled 2>/dev/null && /etc/init.d/$s start >/dev/null 2>&1
+	done
+	block mount >/dev/null 2>&1
+}
+
+# Every filesystem has its own limit and mkfs.fat simply refuses a label of more
+# than 11 characters instead of shortening it, which surfaced in the page as a
+# bare "mkfs failed". The label is cut to fit rather than thrown away.
+#
+# The cut is by bytes, so a label in a non-latin alphabet is cut to fewer
+# letters than the limit suggests. That only ever applies to exFAT and ext4:
+# FAT32 refuses a non-latin label outright, see below.
+cut_label() { printf '%.*s' "$2" "$1"; }
+
+# mkfs.fat validates the label itself and answers "Labels with characters
+# *?.,;:/\|+=<>[]\" are not allowed" - which it also says for anything outside
+# ASCII, because the bytes of a Cyrillic letter land in that set. Measured
+# 2026-09-05 with the label "МЕТКА". Left to itself the page would show a bare
+# "mkfs failed" for what is really "this filesystem cannot hold this name", so
+# the case is caught here and named.
+fat_label_ok() {
+	case "$1" in
+		*[!A-Za-z0-9_\ -]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+mkfs_on() {  # <part> <fs> <label>
+	# The label is passed as its own argument or not at all - the tempting
+	# ${3:+-L "$3"} is unquoted as a whole, so a label with a space in it turns
+	# into two arguments and mkfs takes the second one for a device name.
+	case "$2" in
+		fat32)
+			command -v mkfs.fat >/dev/null || fail "mkfs.fat is not installed"
+			fat_label_ok "$3" || fail "a FAT32 label takes latin letters, digits, space, - and _ only"
+			set -- "$1" "$2" "$(cut_label "$3" 11)"
+			if [ -n "$3" ]; then mkfs.fat -F32 -n "$3" "/dev/$1" >/dev/null 2>&1
+			else mkfs.fat -F32 "/dev/$1" >/dev/null 2>&1; fi ;;
+		exfat)
+			command -v mkfs.exfat >/dev/null || fail "mkfs.exfat is not installed"
+			set -- "$1" "$2" "$(cut_label "$3" 15)"
+			if [ -n "$3" ]; then mkfs.exfat -L "$3" "/dev/$1" >/dev/null 2>&1
+			else mkfs.exfat "/dev/$1" >/dev/null 2>&1; fi ;;
+		apfs)
+			# Deliberately not offered. mkapfs produced volumes that this
+			# board could mount once and never again - after a single
+			# unmount the space manager was unreadable and the volume went
+			# read-only - and macOS itself showed such a volume as 24.6 KB
+			# and refused to open it. Reading and writing a volume that a
+			# Mac created works; making one here does not, so it is not a
+			# choice the page offers.
+			fail "APFS volumes have to be created on a Mac; the router can read and write them, not make them" ;;
+		ext4)
+			command -v mkfs.ext4 >/dev/null || fail "mkfs.ext4 is not installed"
+			set -- "$1" "$2" "$(cut_label "$3" 16)"
+			if [ -n "$3" ]; then mkfs.ext4 -F -q -L "$3" "/dev/$1" >/dev/null 2>&1
+			else mkfs.ext4 -F -q "/dev/$1" >/dev/null 2>&1; fi ;;
+		*) fail "unknown filesystem: $2" ;;
+	esac
+}
+
+# A mkfs that exits 0 is not proof of anything: mkapfs did exactly that while
+# writing a container the kernel then refused, because the tool wrote every
+# on-disk field in host byte order (fixed in our patch, but the lesson stands).
+# Reporting "done" for a drive that is now unreadable is worse than reporting
+# the failure, so the result is read back before it is called a success.
+check_result() {
+	t=$(info_field "$1" TYPE)
+	[ -n "$t" ] || fail "the filesystem was created but the system does not recognise it"
+	m=$(mountpoint_of "$1")
+	[ -n "$m" ] || fail "$t was created but it did not mount"
+	printf '{"ok":true,"fs":"%s","mount":"%s"}\n' "$t" "$m"
+}
+
+case "$1" in
+list)
+	do_list
+	;;
+mount)
+	valid "$2" || fail "bad device"
+	block mount >/dev/null 2>&1
+	sleep 1
+	m=$(mountpoint_of "$2")
+	[ -n "$m" ] && printf '{"ok":true,"mount":"%s"}\n' "$m" || fail "the system did not mount it"
+	;;
+umount)
+	valid "$2" || fail "bad device"
+	m=$(mountpoint_of "$2")
+	[ -z "$m" ] && { printf '{"ok":true}\n'; exit 0; }
+	umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || fail "busy"
+	printf '{"ok":true}\n'
+	;;
+format)
+	valid "$2" || fail "bad device"
+	[ -b "/dev/$2" ] || fail "no such device"
+	automount_off "$2"
+	# the old superblock has to go, or block/mkfs can still see the previous
+	# filesystem afterwards - hit on this device with an exFAT stick
+	dd if=/dev/zero of="/dev/$2" bs=1M count=8 conv=fsync >/dev/null 2>&1
+	unmount_all "$2"
+	if ! mkfs_on "$2" "$3" "$4"; then automount_on "$2"; fail "mkfs failed"; fi
+	sync
+	automount_on "$2"
+	check_result "$2"
+	;;
+wipe)
+	valid "$2" || fail "bad device"
+	[ -b "/dev/$2" ] || fail "no such device"
+	command -v sfdisk >/dev/null || fail "sfdisk is not installed"
+	automount_off "$2"
+	dd if=/dev/zero of="/dev/$2" bs=1M count=8 conv=fsync >/dev/null 2>&1
+	# and the tail, where a GPT keeps its backup copy
+	sec=$(cat "/sys/class/block/$2/size" 2>/dev/null || echo 0)
+	[ "$sec" -gt 2048 ] && dd if=/dev/zero of="/dev/$2" bs=512 seek=$((sec - 34)) count=34 conv=fsync >/dev/null 2>&1
+	sync
+	unmount_all "$2"
+	# MBR, which is what a plain stick is expected to have and what Windows is
+	# happiest with. Nothing here creates APFS - see mkfs_on.
+	case "$3" in
+		ext4) layout='label: dos
+start=2048, type=83' ;;
+		*)    layout='label: dos
+start=2048, type=c' ;;
+	esac
+	if ! printf '%s\n' "$layout" | sfdisk -q --force --no-reread "/dev/$2" >/dev/null 2>&1; then
+		automount_on "$2"; fail "could not write the partition table"
+	fi
+	sync
+	partx -u "/dev/$2" >/dev/null 2>&1 || true
+	sleep 2
+	[ -b "/dev/${2}1" ] || { automount_on "$2"; fail "the partition did not appear"; }
+	unmount_all "$2"
+	if ! mkfs_on "${2}1" "$3" "$4"; then automount_on "$2"; fail "mkfs failed"; fi
+	sync
+	automount_on "$2"
+	check_result "${2}1"
+	;;
+*)
+	fail "usage: usb-disk list|mount|umount|format|wipe"
+	;;
+esac

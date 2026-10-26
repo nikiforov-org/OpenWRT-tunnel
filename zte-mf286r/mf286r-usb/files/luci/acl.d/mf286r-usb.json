@@ -1,0 +1,7 @@
+{
+	"mf286r-usb": {
+		"description": "USB storage: list drives, mount, unmount, format",
+		"read": { "file": { "/usr/bin/usb-disk": [ "exec" ] } },
+		"write": { "file": { "/usr/bin/usb-disk": [ "exec" ] } }
+	}
+}

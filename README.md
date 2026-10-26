@@ -16,13 +16,15 @@ OpenWrt 25.12 into `dist/` with the official OpenWrt SDK:
 ```sh
 ./utils/build.sh            # 25.12.6 by default
 ./utils/build.sh 25.12.6
-./xtunnel-core/build.sh     # xtunnel-core into dist/ARCH/ (x86_64, aarch64_cortex-a53, aarch64_generic)
+./xtunnel-core/build.sh     # xtunnel-core into dist/ARCH/ (x86_64, aarch64_cortex-a53, aarch64_generic, mips_24kc)
+./zte-mf286r/build.sh       # the ZTE MF286R's own packages into dist/zte-mf286r/ (the SDK of ath79/nand)
 ```
 
 Every package is a directory (`luci-app-xtunnel/`, `luci-app-tunnel-<name>/`) with a `Makefile` based on `luci.mk`. The last
 line of the Makefile must be `# call BuildPackage - OpenWrt buildroot signature`: the SDK's
 feed scanner selects Makefiles by this text, and without it the package is left out of the
-build (`No feed for package ... found`).
+build (`No feed for package ... found`). The directories of `zte-mf286r/` are the packages of the ZTE MF286R's
+firmware (see the next section).
 
 ## Firmware with the packages
 
@@ -43,6 +45,25 @@ The images, their package list (`.manifest`) and `sha256sums` go to `firmware/PR
 sysupgrade image is written over an installed OpenWrt (System → Backup / Flash Firmware, or
 `sysupgrade -n` to drop the settings); the packages start with everything off, as after `apk add`.
 
+A device with packages of its own has a directory named after its profile with hyphens. `zte-mf286r/` holds the
+ZTE MF286R's: `mf286r-modem` (the internal LTE module as the interface `wwan`: the `ncm` protocol over AT on
+`/dev/ttyACM0` with the data on the module's RNDIS interface, the socket printed WAN/LAN1 as the interface `wan`,
+a lock for the one AT port that netifd and the pages share, `modem-info`), `luci-app-ic` (Status → Cellular
+Network: the module's status), `luci-app-sms` (Services → SMS: messages and USSD through `sms_tool`), `mf286r-usb`
+(Services → USB: the Storage page for the drives on the socket of the case, with the Printer, Shares and Media
+pages of p910nd, ksmbd and minidlna under it) and `kmod-fs-apfs` (APFS, read and write, the out-of-tree module
+linux-apfs-rw built against the release's kernel). `zte-mf286r/build.sh` builds them with the SDK of ath79/nand
+into `dist/zte-mf286r/`; `zte-mf286r/packages` lists the packages of the release for the image (the module's
+drivers and `sms-tool`, the file systems and tools of the drives, `ksmbd-server` with avahi and wsdd2, `minidlna`,
+`p910nd`, `luci-app-commands`, `dnsmasq-full`, `zram-swap` with `kmod-zram`: a compressed swap in RAM for the
+120 MB of the box, sized by `system.@system[0].zram_size_mb`):
+
+```sh
+./zte-mf286r/build.sh
+./xtunnel-core/build.sh mips_24kc
+./utils/firmware.sh zte_mf286r
+```
+
 ## Installing on the router
 
 OpenWrt 25.12 (the `apk` package manager). The packages are unsigned, so they are installed
@@ -56,7 +77,7 @@ alternative is `scp -O`, the old protocol).
 
 ```sh
 # ROUTER is the router's address, e.g. 192.168.1.1; ARCH its package architecture
-# (aarch64_cortex-a53, aarch64_generic, x86_64: DISTRIB_ARCH in /etc/openwrt_release)
+# (aarch64_cortex-a53, aarch64_generic, mips_24kc, x86_64: DISTRIB_ARCH in /etc/openwrt_release)
 ssh root@ROUTER 'cat > /tmp/luci-app-xtunnel.apk' < dist/luci-app-xtunnel-1.0.0-r1.apk
 ssh root@ROUTER 'cat > /tmp/xtunnel-core.apk' < dist/ARCH/xtunnel-core-1.0.0-r1.apk
 ssh root@ROUTER 'apk update'
@@ -91,7 +112,9 @@ The rows after the first are the earlier packages that `luci-app-xtunnel` replac
 
 `luci-app-xtunnel` depends on `xtunnel-core`, built from pinned upstream sources by `xtunnel-core/build.sh`
 (Go and the toolchains of the OpenWrt SDK images, in Docker) into `dist/ARCH/xtunnel-core-VERSION.apk` for
-`x86_64`, `aarch64_cortex-a53` and `aarch64_generic`. It replaces the packages `xray-core`, `obfs4proxy`,
+`x86_64`, `aarch64_cortex-a53`, `aarch64_generic` and `mips_24kc` (MIPS32r2 big-endian without an FPU, the ZTE
+MF286R: Go builds with `GOMIPS=softfloat`, tor with the toolchain of the ath79/nand SDK; xray and lyrebird 27.5 MB,
+tor 5.3 MB). It replaces the packages `xray-core`, `obfs4proxy`,
 `snowflake-client` and `tor` with `libopenssl3` and `libevent2`:
 
 - `/usr/bin/xray`: one Go executable for xray (Xray-core v26.3.27, the version of the `xray-core` package
@@ -108,6 +131,11 @@ The rows after the first are the earlier packages that `luci-app-xtunnel` replac
   relay module like `tor-basic`), linked statically with LibreSSL 4.3, libevent and zlib, with the other
   files of OpenWrt's `tor` package of that version taken from it at build time (the init script,
   `/etc/config/tor`, `/etc/tor/torrc`, the user tor).
+  One change to tor's source (`tor.sh`): a client keeps a copy of every microdescriptor it downloads in its
+  own memory while the descriptor sits in the journal `cached-microdescs.new`, and rebuilds the cache file
+  (which it maps instead) only every 30 minutes; the build rebuilds the cache as soon as the journal exceeds
+  8 MB. A first fill of an empty cache then peaks at 33 MB of tor's own memory instead of 58 MB and settles at
+  18 MB (measured on x86_64 stages; the ZTE MF286R has 120 MB of RAM).
 
 Measured for aarch64: 23.8 MB for xray and lyrebird against 51.7 MB of the three packages; tor 5.0 MB
 against 8.9 MB with libopenssl3 and libevent2. The images of `utils/firmware.sh` are about 34 % smaller than

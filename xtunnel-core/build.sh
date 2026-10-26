@@ -1,6 +1,6 @@
 #!/bin/sh
 # xtunnel-core/build.sh [ARCH…]: the package xtunnel-core for the OpenWrt package architectures given
-# (default: x86_64 for the Docker stages, aarch64_cortex-a53 and aarch64_generic), into
+# (default: x86_64 for the Docker stages, aarch64_cortex-a53, aarch64_generic and mips_24kc of the ZTE MF286R), into
 # dist/ARCH/xtunnel-core-VERSION.apk (unsigned, packed with the apk of the OpenWrt SDK image as the SDK packs
 # packages). It replaces the packages xray-core, obfs4proxy, snowflake-client and tor with libopenssl3 and
 # libevent2:
@@ -23,13 +23,14 @@ SNOWFLAKE=v2.14.1
 GO_IMAGE=golang:1.26-bookworm
 SDK_IMAGE=openwrt/sdk:x86-64-25.12.6               # packing, and tor for x86_64
 SDK_ARM=openwrt/sdk:mediatek-filogic-25.12.6        # tor for aarch64 (built for armv8-a, any aarch64 target)
+SDK_MIPS=openwrt/sdk:ath79-nand-25.12.6             # tor for mips_24kc (MIPS32r2 big-endian without an FPU: the ZTE MF286R)
 TOR_APK=tor-0.4.9.13-r1.apk                         # the files around /usr/sbin/tor, of the version tor.sh builds
 FEED=https://downloads.openwrt.org/releases/25.12.6/packages
-ARCHES=${*:-x86_64 aarch64_cortex-a53 aarch64_generic}
+ARCHES=${*:-x86_64 aarch64_cortex-a53 aarch64_generic mips_24kc}
 OUT=/tmp/xtunnel-core-build
 NAME=xtunnel-core-build
 
-goarch() { case $1 in x86_64) echo amd64 ;; aarch64_*) echo arm64 ;; *) echo "unsupported architecture $1" >&2; exit 1 ;; esac; }
+goarch() { case $1 in x86_64) echo amd64 ;; aarch64_*) echo arm64 ;; mips_24kc) echo mips ;; *) echo "unsupported architecture $1" >&2; exit 1 ;; esac; }
 GOARCHES=$(for a in $ARCHES; do goarch "$a"; done | sort -u | tr '\n' ' ')
 
 rm -rf "$OUT" && mkdir -p "$OUT"
@@ -115,8 +116,9 @@ for f, lines in drop.items():
 	open(f, 'w').write('\n'.join(l for n, l in enumerate(src, 1) if n not in lines))
 EOF
 done
+# GOMIPS=softfloat for mips (the 24Kc has no FPU); the other architectures ignore it
 for a in $GOARCHES; do
-	CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -tags grpcnotrace -trimpath -ldflags "-s -w -buildid=" -o $W/out/$a/xray .
+	CGO_ENABLED=0 GOOS=linux GOARCH=$a GOMIPS=softfloat go build -tags grpcnotrace -trimpath -ldflags "-s -w -buildid=" -o $W/out/$a/xray .
 	echo "built $a: $(stat -c %s $W/out/$a/xray) bytes"
 done
 EOS
@@ -127,7 +129,7 @@ for a in $GOARCHES; do mkdir -p "$OUT/$a" && docker cp "$NAME:/work/out/$a/xray"
 # /tmp/xtunnel-core-tor by tor.sh and the image, so that a change of the Go part does not build it again
 chmod 777 "$OUT"
 for g in $GOARCHES; do
-	case $g in amd64) img=$SDK_IMAGE ;; arm64) img=$SDK_ARM ;; esac
+	case $g in amd64) img=$SDK_IMAGE ;; arm64) img=$SDK_ARM ;; mips) img=$SDK_MIPS ;; esac
 	cache=/tmp/xtunnel-core-tor/$( (echo "$img"; cat "$ROOT/xtunnel-core/tor.sh") | shasum -a 256 | cut -c1-16)-$g
 	if [ ! -s "$cache/tor" ]; then
 		docker run --rm -v "$ROOT/xtunnel-core/tor.sh:/tor.sh:ro" -v "$OUT:/out" "$img" sh /tor.sh /out/tor-$g
@@ -150,7 +152,7 @@ docker run --rm --user 0:0 -v "$OUT:/out" "$SDK_IMAGE" sh -c '
 	APK=$PWD/staging_dir/host/bin/apk
 	for o in /out/pkg-*; do
 		a=${o#/out/pkg-}
-		case $a in x86_64) g=amd64 ;; *) g=arm64 ;; esac
+		case $a in x86_64) g=amd64 ;; mips_24kc) g=mips ;; *) g=arm64 ;; esac
 		d=/tmp/pkg-$a; rm -rf $d; cp -a $o $d
 		$APK extract --allow-untrusted --no-chown --destination $d /out/tor-$a.apk
 		cp /out/tor-$g/tor $d/usr/sbin/tor; chmod 755 $d/usr/sbin/tor

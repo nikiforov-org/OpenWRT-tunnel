@@ -1,0 +1,25 @@
+--- a/key.c	2026-09-05 20:49:52
++++ b/key.c	2026-09-05 20:49:52
+@@ -324,12 +324,21 @@
+ 
+ 	while (1) {
+ 		unicode_t utf32;
++		__le32 utf32_le;
+ 
+ 		utf32 = apfs_normalize_next(&cursor, case_fold);
+ 		if (!utf32)
+ 			break;
+ 
+-		hash = crc32c(hash, &utf32, sizeof(utf32));
++		/*
++		 * Apple hashes the little-endian representation of each code
++		 * point. Feeding the raw bytes of a host-order variable gives
++		 * the same answer only on a little-endian machine; on a
++		 * big-endian one every hash comes out different, so a lookup of
++		 * any name macOS wrote fails while readdir still lists it.
++		 */
++		utf32_le = cpu_to_le32(utf32);
++		hash = crc32c(hash, &utf32_le, sizeof(utf32_le));
+ 	}
+ 
+ 	/* The filename length doesn't matter, so it's left as zero */

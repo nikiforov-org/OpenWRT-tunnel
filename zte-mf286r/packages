@@ -1,0 +1,63 @@
+# zte-mf286r/packages: the packages of the release that utils/firmware.sh zte_mf286r puts into the image of
+# the ZTE MF286R besides luci-app-xtunnel, xtunnel-core and the packages of this directory (dist/zte-mf286r/,
+# made by zte-mf286r/build.sh). The profile's own packages come with it: kmod-usb2, kmod-ath10k-ct,
+# ath10k-firmware-qca9888-ct, kmod-usb-net-rndis, kmod-usb-acm, comgt-ncm.
+
+# the internal LTE module (19d2:1489): AT on /dev/ttyACM0, the data on its RNDIS interface (mf286r-modem),
+# messages and USSD through sms_tool (luci-app-sms)
+luci-proto-ncm
+kmod-usb-net-cdc-ether
+kmod-usb-serial
+kmod-usb-serial-option
+kmod-usb-serial-wwan
+sms-tool
+chat
+
+# the USB socket on the case: drives (the Storage page of mf286r-usb), their file systems, their tools
+kmod-usb-storage
+kmod-scsi-core
+block-mount
+kmod-fs-vfat
+kmod-fs-exfat
+kmod-fs-ext4
+kmod-fs-ntfs3
+kmod-fs-hfsplus
+kmod-fs-hfs
+kmod-nls-cp437
+kmod-nls-cp866
+kmod-nls-iso8859-1
+kmod-nls-utf8
+dosfstools
+e2fsprogs
+exfat-mkfs
+exfat-fsck
+fdisk
+sfdisk
+partx-utils
+lsblk
+blkid
+usbutils
+# the drive as a network share, found by mDNS (avahi) and WS-Discovery (wsdd2)
+kmod-fs-ksmbd
+ksmbd-server
+luci-app-ksmbd
+avahi-nodbus-daemon
+wsdd2
+# the drive's media streamed by DLNA
+minidlna
+luci-app-minidlna
+# a printer on the socket, raw on TCP 9100
+kmod-usb-printer
+p910nd
+luci-app-p910nd
+
+# as in the firmware before: LuCI's Commands page, and dnsmasq with its full feature set (DHCPv6, DNSSEC,
+# nftsets) in place of the release's dnsmasq
+luci-app-commands
+-dnsmasq
+dnsmasq-full
+
+# a compressed swap in RAM (lzo): the box has 120 MB, tor's directory of the Tor network and the parsed
+# relays take 16-33 MB of it; the size is a setting of the device (system.@system[0].zram_size_mb 48)
+zram-swap
+kmod-zram

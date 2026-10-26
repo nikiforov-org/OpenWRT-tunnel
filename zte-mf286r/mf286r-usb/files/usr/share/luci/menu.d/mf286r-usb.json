@@ -1,0 +1,22 @@
+{
+	"admin/services/usb": {
+		"title": "USB",
+		"order": 55,
+		"action": {
+			"type": "firstchild",
+			"recurse": true
+		}
+	},
+	"admin/services/usb/storage": {
+		"title": "Storage",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "usb/storage"
+		},
+		"depends": {
+			"acl": [ "mf286r-usb" ],
+			"fs": { "/usr/bin/usb-disk": "executable" }
+		}
+	}
+}

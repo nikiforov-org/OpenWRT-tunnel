@@ -1,0 +1,20 @@
+#!/bin/sh
+# Make a plugged-in drive actually mount, without configuring it first.
+#
+# block-mount ships anon_mount='0': a partition that has no section of its own
+# in /etc/config/fstab is deliberately left alone. So on a stock image the whole
+# experience of plugging a stick in is that nothing happens — the kernel creates
+# /dev/sda1 and stops there, LuCI shows the drive as "unmounted", and the
+# network share pointing at /mnt/sda1 serves an empty directory. Measured on the
+# device 2026-09-05 with a Ventoy stick: enumerated, partitions read, not
+# mounted.
+#
+# The socket on the case exists so that something can be plugged into it and
+# used, so anonymous mounts are turned on here: every partition the kernel can
+# read appears under /mnt/<device> by itself. Nothing is exported anywhere by
+# this alone — sharing is per directory and is configured in Services -> USB.
+[ -f /etc/config/fstab ] || exit 0
+uci -q get fstab.@global[0] >/dev/null 2>&1 || exit 0
+uci set fstab.@global[0].anon_mount='1'
+uci commit fstab
+exit 0

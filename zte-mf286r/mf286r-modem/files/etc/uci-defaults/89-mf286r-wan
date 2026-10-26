@@ -1,0 +1,96 @@
+#!/bin/sh
+# Give the board the two uplinks it actually has, and stop the WAN socket from
+# being just another LAN port.
+#
+# The switch has four sockets wired to ports 1, 2, 3 and 5 (port 4 goes
+# nowhere; the numbering is the chip's, not the case's). Port 5 is the socket
+# labelled WAN/LAN1 - established on the device by watching which port gains
+# link. OpenWrt's ath79 board.d has no wan section for the MF286R at all, so the
+# stock config drops all four into one VLAN, and the consequence is not subtle:
+# with the provider's cable in WAN/LAN1 their DHCP server reaches the LAN
+# directly, a client takes an address from it instead of from us, and the router
+# is then unreachable at 192.168.1.1 from its own LAN. Measured 2026-09-05.
+#
+# So VLAN 1 keeps LAN2-LAN4 and VLAN 2 takes WAN/LAN1 alone.
+#
+# The names are the OpenWrt ones and they matter here: **wan is the cable**,
+# **wwan is the LTE module**. Before this, "wan" meant the modem while the
+# socket labelled WAN meant nothing at all, which is exactly the sort of thing
+# that costs an evening.
+#
+# Two settings on the modem side are not guessable and were measured:
+#
+#  * ifname=usb1 — the module presents TWO USB network functions: RNDIS (usb1)
+#    and CDC-Ethernet (usb0). Only RNDIS carries the PDP session. After
+#    AT+ZGACT=1,1 a DHCP request on usb1 is answered in about three seconds and
+#    the address matches AT+CGPADDR, while usb0 never gets a lease at all.
+#    ncm.sh's own ifname guess takes the first net device under the USB device,
+#    so the choice is pinned here rather than left to chance.
+#
+#  * the modem is driven by the "zte" profile in /etc/gcom/ncm.json
+#    (AT+ZGDCONT / AT+ZGACT), which ncm.sh selects from AT+CGMI — this module
+#    answers "ZTE CORPORATION" even though its chipset says Marvell.
+#
+# Idempotent: sections that already exist are left alone.
+
+# ----- the switch: WAN/LAN1 out of the LAN VLAN -----------------------------
+lanvlan=""; wanvlan=""
+for i in $(seq 0 9); do
+	v=$(uci -q get network.@switch_vlan[$i].vlan) || break
+	[ "$v" = 1 ] && lanvlan=$i
+	[ "$v" = 2 ] && wanvlan=$i
+done
+if [ -n "$lanvlan" ]; then
+	uci set network.@switch_vlan[$lanvlan].ports='1 2 3 0t'
+fi
+if [ -z "$wanvlan" ]; then
+	uci add network switch_vlan >/dev/null
+	uci set network.@switch_vlan[-1].device='switch0'
+	uci set network.@switch_vlan[-1].vlan='2'
+	uci set network.@switch_vlan[-1].ports='5 0t'
+fi
+
+# ----- the cable: the primary uplink ----------------------------------------
+if ! uci -q get network.wan >/dev/null; then
+	uci -q batch <<-UCI
+		set network.wan=interface
+		set network.wan.device='eth0.2'
+		set network.wan.proto='dhcp'
+		set network.wan.metric='10'
+	UCI
+fi
+
+# ----- the modem: the fallback ----------------------------------------------
+[ -c /dev/ttyACM0 ] && if ! uci -q get network.wwan >/dev/null; then
+	uci -q batch <<-UCI
+		set network.wwan=interface
+		set network.wwan.proto='ncm'
+		set network.wwan.device='/dev/ttyACM0'
+		set network.wwan.ifname='usb1'
+		set network.wwan.apn='internet'
+		set network.wwan.pdptype='IP'
+		set network.wwan.metric='20'
+	UCI
+fi
+
+# ----- both belong to the wan firewall zone ---------------------------------
+for i in $(seq 0 9); do
+	n=$(uci -q get firewall.@zone[$i].name) || break
+	[ "$n" = wan ] || continue
+	nets=$(uci -q get firewall.@zone[$i].network)
+	case " $nets " in *" wwan "*) ;; *) uci set firewall.@zone[$i].network="$nets wwan" ;; esac
+	case " $nets " in *" wan "*) ;; *) uci set firewall.@zone[$i].network="$(uci -q get firewall.@zone[$i].network) wan" ;; esac
+	break
+done
+
+# The DHCP server inside the module drops, without any reply, every DISCOVER
+# that carries an RFC 4361 client identifier (0xff + IAID + DUID), which netifd
+# builds whenever network.globals.dhcp_default_duid is set - and OpenWrt sets
+# that global by default. The result is a wwan that is correctly configured,
+# reports "up", and never gets an address. Removing the global makes netifd omit
+# option 61 entirely, which the module answers in about three seconds.
+uci -q delete network.globals.dhcp_default_duid
+
+uci commit network
+uci commit firewall
+exit 0

@@ -1,0 +1,7 @@
+{
+	"luci-app-sms": {
+		"description": "Modem SMS, archive and USSD",
+		"read":  { "uci": [ "sms" ], "file": { "/usr/bin/smsctl": [ "exec" ] } },
+		"write": { "uci": [ "sms" ], "file": { "/usr/bin/smsctl": [ "exec" ] } }
+	}
+}

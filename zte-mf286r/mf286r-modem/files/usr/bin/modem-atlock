@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run a command holding the modem's AT control-port lock.
+#
+# The companion to /usr/bin/modem-at, for the tools that drive /dev/ttyACM0 themselves
+# instead of going through it — sms_tool, above all. Same lock, same reason: this
+# device has exactly one control port and netifd dials on it.
+#
+# Usage: modem-atlock <command> [args...]
+#
+# The descriptor is deliberately left open across the exec, so the lock lives
+# exactly as long as the command does and is released by the kernel when it exits,
+# however it exits.
+LOCK=/var/lock/at-modem.lock
+LOCKWAIT="${AT_LOCKWAIT:-25}"
+
+[ $# -gt 0 ] || { echo "usage: modem-atlock <command> [args...]" >&2; exit 3; }
+
+mkdir -p /var/lock
+exec 9>"$LOCK"
+# busybox flock has no -w, so the bounded wait is a loop over the -n form.
+i=0
+until flock -n 9; do
+	i=$((i + 1))
+	[ "$i" -ge "$LOCKWAIT" ] && { echo "modem control port busy" >&2; exit 2; }
+	sleep 1
+done
+exec "$@"

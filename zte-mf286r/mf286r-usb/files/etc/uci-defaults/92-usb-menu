@@ -1,0 +1,56 @@
+#!/bin/sh
+# Put everything that belongs to the USB socket on the case under one menu
+# entry: Services -> USB, with the individual pages as its tabs.
+#
+# Stock OpenWrt scatters them by which package happens to provide them: the
+# print server lands in Services under the name of the program that implements
+# it ("p910nd - Printer server"), and a plugged-in flash drive is configured in
+# System -> Mount Points, which is not where anyone looks for a USB stick.
+# Nothing about either page tells you it is about the socket on the case.
+#
+# Both entries live in JSON files owned by other packages (luci-app-p910nd and
+# luci-mod-system), so they are rewritten in place on first boot the same way
+# 91-liberty-menu does it — shipping our own copy of those files would make apk
+# refuse to install the package that owns them.
+M=/usr/share/luci/menu.d
+
+# printer: admin/services/p910nd -> admin/services/usb/printer
+# The file holds this one entry only, so the substitutions cannot hit anything
+# else.
+F="$M/luci-app-p910nd.json"
+[ -f "$F" ] && sed -i '
+	s#admin/services/p910nd#admin/services/usb/printer#g
+	s#"p910nd - Printer server"#"Printer"#
+	s#"order": 60#"order": 10#
+' "$F"
+
+# System -> Mount Points is deliberately left alone. It was moved in here at
+# first, and that was wrong twice over: it looks like a second copy of the
+# Storage tab, and it is not a USB page at all — it edits the whole fstab and
+# the swap entries, internal storage included. One page per job: drives that are
+# plugged into the socket are the Storage tab, the system's mount table stays in
+# System.
+
+# network share: admin/services/ksmbd -> admin/services/usb/shares
+# minidlna:      admin/services/minidlna -> admin/services/usb/media
+# Neither entry carries an "order" of its own, so one is spliced onto the title
+# line — JSON does not care that the two keys end up side by side, and this
+# avoids having to insert a line with busybox sed. Both are renamed away from
+# the name of the program that implements them, which is the whole point of
+# this menu: "miniDLNA" tells you nothing about what the page does.
+F="$M/luci-app-ksmbd.json"
+[ -f "$F" ] && sed -i '
+	s#admin/services/ksmbd#admin/services/usb/shares#g
+	s#"title": "Network Shares",#"title": "Shares", "order": 30,#
+' "$F"
+
+F="$M/luci-app-minidlna.json"
+[ -f "$F" ] && sed -i '
+	s#admin/services/minidlna#admin/services/usb/media#g
+	s#"title": "miniDLNA",#"title": "Media", "order": 40,#
+' "$F"
+
+# rebuild LuCI menu/index cache
+rm -f /tmp/luci-indexcache* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+exit 0

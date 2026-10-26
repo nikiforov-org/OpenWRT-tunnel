@@ -26,7 +26,15 @@ fetch https://cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-$LIBRESSL.tar.gz $LI
 fetch https://github.com/libevent/libevent/releases/download/release-$LIBEVENT-stable/libevent-$LIBEVENT-stable.tar.gz $LIBEVENT_SHA
 fetch https://zlib.net/fossils/zlib-$ZLIB.tar.gz $ZLIB_SHA
 
-case $HOST in aarch64-*) ARCH_CFLAGS='-march=armv8-a' ;; *) ARCH_CFLAGS='' ;; esac
+# A tor client keeps a heap copy of every microdescriptor that sits in the journal (cached-microdescs.new)
+# until it rebuilds the cache file, which it does every 30 minutes (clean_caches_callback): a start without
+# a cache held ~48 MB of copies on the ZTE MF286R (120 MB of RAM). Rebuild as soon as the journal exceeds
+# 8 MB, checked whenever the descriptor downloads are updated (every 10 s while fetching).
+MD=$W/tor-$TOR/src/feature/nodelist/microdesc.c
+sed -i 's|^  pending = digest256map_new();$|  if (get_microdesc_cache()->journal_len > (8 * 1024 * 1024))\n    microdesc_cache_rebuild(NULL, 1);\n\n&|' $MD
+grep -q 'journal_len > (8 \* 1024 \* 1024)' $MD || { echo "tor.sh: the microdesc patch did not apply" >&2; exit 1; }
+
+case $HOST in aarch64-*) ARCH_CFLAGS='-march=armv8-a' ;; mips-*) ARCH_CFLAGS='-mips32r2 -mtune=24kc -mno-branch-likely' ;; *) ARCH_CFLAGS='' ;; esac
 export CC=$HOST-gcc AR=$HOST-ar RANLIB=$HOST-ranlib
 export CFLAGS="-Os -pipe $ARCH_CFLAGS -ffunction-sections -fdata-sections -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIC"
 export LDFLAGS="-Wl,--gc-sections -Wl,-z,now -Wl,-z,relro"

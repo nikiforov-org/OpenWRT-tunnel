@@ -1,0 +1,11 @@
+
+config settings 'settings'
+	option forward_telegram '0'
+	option telegram_token ''
+	option telegram_chat ''
+	option forward_webhook '0'
+	option webhook_url ''
+	option ussd_schedule '0'
+	option ussd_code ''
+	option ussd_interval '86400'
+	option poll_interval '30'

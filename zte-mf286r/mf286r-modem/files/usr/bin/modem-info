@@ -1,0 +1,168 @@
+#!/bin/sh
+# Report everything the internal LTE module knows about itself, as one JSON
+# object, for the LuCI Modem page.
+#
+# Every value comes from an AT command on /dev/ttyACM0 through modem-at, which
+# serializes access — this module has no QMI or MBIM port, so AT is the only way
+# in and it must not collide with netifd's dialling.
+#
+# The identity half (model, firmware, IMEI, IMSI, ICCID) does not change while
+# the modem runs, and each of those commands answers with a bare value that
+# cannot be told apart from its neighbour's in a batched reply. So they are read
+# one at a time and cached; everything else is read in a single batch, since
+# those replies are self-labelled.
+. /usr/share/libubox/jshn.sh
+
+CACHE=/tmp/modem-static.cache
+[ "$1" = "-r" ] && rm -f "$CACHE"
+
+# --- helpers ---------------------------------------------------------------
+# first labelled line of a batched reply, label stripped
+val() { printf '%s\n' "$RAW" | grep -m1 "^$1" | sed "s/^$1//; s/^[: ]*//"; }
+# nth comma-separated field of a reply line, quotes stripped
+fld() { printf '%s' "$1" | cut -d, -f"$2" | tr -d '"' | sed 's/^ *//; s/ *$//'; }
+
+# EF_ICCID is BCD with the nibbles of every byte swapped, right-padded with F.
+iccid_decode() {
+	h="$1"; out=""
+	while [ ${#h} -ge 2 ]; do
+		out="$out$(printf %s "$h" | cut -c2)$(printf %s "$h" | cut -c1)"
+		h=$(printf %s "$h" | cut -c3-)
+	done
+	printf %s "$out" | sed 's/[Ff]*$//'
+}
+
+# 3GPP access technology codes, as reported by +CEREG/+CGREG/+COPS
+rat_name() {
+	case "$1" in
+		0) echo GSM ;; 1) echo "GSM Compact" ;; 2) echo UMTS ;;
+		3) echo EDGE ;; 4) echo HSDPA ;; 5) echo HSUPA ;; 6) echo HSPA ;;
+		# 9 is "E-UTRAN (NB-S1)" in 3GPP 27.007, but this module returns 7 and 9
+		# interchangeably on the same plain LTE connection — reporting NB-IoT for a
+		# link that is plainly not NB-IoT would be worse than folding the two.
+		7|9) echo LTE ;; 8) echo "EC-GSM-IoT" ;;
+		10) echo "LTE (5GC)" ;; 11|12) echo NR ;; *) echo "" ;;
+	esac
+}
+reg_name() {
+	case "$1" in
+		0) echo "not registered, not searching" ;;
+		1) echo "registered (home)" ;;
+		2) echo "searching" ;;
+		3) echo "registration denied" ;;
+		4) echo "unknown" ;;
+		5) echo "registered (roaming)" ;;
+		*) echo "" ;;
+	esac
+}
+
+# --- identity (cached, keyed on the card) -----------------------------------
+# The cache is valid only for the card that filled it. IMSI is one command and
+# changes the moment a different card is inserted, so it is read every time and
+# used as the key — without that, a swapped SIM would keep reporting the old
+# ICCID until the next reboot, and the SMS archive would keep filing messages
+# into the previous card's mailbox.
+IMSI_NOW=$(modem-at -t 4 'AT+CIMI' 2>/dev/null | grep -m1 -oE '^[0-9]{14,15}$')
+if [ -s "$CACHE" ]; then
+	. "$CACHE"
+	# Invalidate the cache if the card changed (IMSI differs) OR the cached
+	# identity is incomplete — a read contended by netifd's dialling can cache an
+	# empty IMEI/model, and IMEI is available with or without a SIM, so an empty
+	# one always means a bad read, never a real state.
+	if { [ -n "$IMSI_NOW" ] && [ "$IMSI" != "$IMSI_NOW" ]; } \
+	   || [ -z "$IMEI" ] || [ -z "$MODEL" ]; then
+		rm -f "$CACHE"
+	fi
+fi
+if [ ! -s "$CACHE" ]; then
+	MANUF=$(modem-at -t 4 'AT+CGMI' 2>/dev/null | grep -m1 '+CGMI' | sed 's/.*+CGMI:[ ]*//; s/"//g')
+	MODEL=$(modem-at -t 4 'AT+CGMM' 2>/dev/null | grep -m1 '+CGMM' | sed 's/.*+CGMM:[ ]*//; s/"//g')
+	FW=$(modem-at -t 4 'AT+CGMR' 2>/dev/null | grep -m1 -E '^[A-Za-z0-9_.]{4,}$')
+	IMEI=$(modem-at -t 4 'AT^ZWIMEI?' 2>/dev/null | grep -m1 -oE '[0-9]{15}')
+	IMSI="$IMSI_NOW"
+	ICCID_RAW=$(modem-at -t 4 'AT+CRSM=176,12258,0,0,10' 2>/dev/null | grep -m1 '+CRSM' | cut -d, -f3 | tr -d ' ')
+	ICCID=$(iccid_decode "$ICCID_RAW")
+	{
+		echo "MANUF='$MANUF'"; echo "MODEL='$MODEL'"; echo "FW='$FW'"; echo "IMEI='$IMEI'"
+		echo "IMSI='$IMSI'"; echo "ICCID='$ICCID'"
+	} > "$CACHE"
+fi
+. "$CACHE"
+
+# --- live state (one batch, all replies labelled) ---------------------------
+RAW=$(modem-at -t 5 'AT+CPIN?' 'AT+CEREG?' 'AT+COPS=3,0;+COPS?' 'AT+COPS=3,2;+COPS?' \
+	'AT+CNUM' 'AT+CSQ' 'AT+CESQ' 'AT+ZGACT?' 'AT+CGCONTRDP=1' 2>/dev/null)
+
+SIM=$(val '+CPIN:')
+CEREG=$(val '+CEREG:')
+COPS=$(val '+COPS:')
+CSQ=$(val '+CSQ:')
+CESQ=$(val '+CESQ:')
+ZGACT=$(val '+ZGACT:')
+RDP=$(val '+CGCONTRDP:')
+
+# +CEREG: <n>,<stat>[,<tac>,<ci>,<AcT>]
+REG=$(reg_name "$(fld "$CEREG" 2)")
+TAC=$(fld "$CEREG" 3)
+CELL=$(fld "$CEREG" 4)
+RAT=$(rat_name "$(fld "$CEREG" 5)")
+
+# +COPS: <mode>,<format>,<oper>[,<AcT>]  — asked in long alphanumeric format
+OPER=$(fld "$COPS" 3)
+
+# Numeric operator code from the second +COPS (format 2): the first +COPS line
+# with an all-digit operator field is MCC+MNC. Split it into MCC (3) and MNC.
+OPER_CODE=$(printf '%s\n' "$RAW" | grep '^+COPS:' | grep -oE '"[0-9]{5,6}"' | head -1 | tr -d '"')
+MCC=$(printf %s "$OPER_CODE" | cut -c1-3)
+MNC=$(printf %s "$OPER_CODE" | cut -c4-)
+
+# +CNUM: <alpha>,<number>,<type>  — the subscriber's own MSISDN (usually blank)
+MSISDN=$(printf '%s\n' "$RAW" | grep -m1 '^+CNUM:' | grep -oE '"\+?[0-9]{6,}"' | head -1 | tr -d '"')
+
+# +CSQ: <rssi>,<ber>   rssi 0..31 maps to -113..-51 dBm, 99 = unknown
+RSSI=$(fld "$CSQ" 1)
+case "$RSSI" in ''|99|*[!0-9]*) RSSI_DBM=''; SIGQ='' ;;
+	*) RSSI_DBM=$((-113 + 2 * RSSI)); SIGQ=$((RSSI * 100 / 31)) ;; esac
+
+# +CESQ: <rxlev>,<ber>,<rscp>,<ecno>,<rsrq>,<rsrp>
+RSRQ_I=$(fld "$CESQ" 5); RSRP_I=$(fld "$CESQ" 6)
+case "$RSRP_I" in ''|255|*[!0-9]*) RSRP_DBM='' ;; *) RSRP_DBM=$((-140 + RSRP_I)) ;; esac
+case "$RSRQ_I" in
+	''|255|*[!0-9]*) RSRQ_DB='' ;;
+	*) RSRQ_DB=$(awk "BEGIN{printf \"%.1f\", -19.5 + $RSRQ_I * 0.5}") ;;
+esac
+
+# +CGCONTRDP: <cid>,<bearer>,<apn>,<addr>,<gw>,<dns1>,<dns2>,...
+APN=$(fld "$RDP" 3); IPADDR=$(fld "$RDP" 4)
+DNS1=$(fld "$RDP" 6); DNS2=$(fld "$RDP" 7)
+
+# +ZGACT: <state>,<cid>
+case "$(fld "$ZGACT" 1)" in 1) PDP=1 ;; *) PDP=0 ;; esac
+
+json_init
+json_add_string manufacturer "$MANUF"
+json_add_string model "$MODEL"
+json_add_string firmware "$FW"
+json_add_string imei "$IMEI"
+json_add_string imsi "$IMSI"
+json_add_string iccid "$ICCID"
+json_add_string sim "$SIM"
+json_add_string registration "$REG"
+json_add_string operator "$OPER"
+json_add_string operator_code "$OPER_CODE"
+json_add_string mcc "$MCC"
+json_add_string mnc "$MNC"
+json_add_string msisdn "$MSISDN"
+json_add_string rat "$RAT"
+json_add_string tac "$TAC"
+json_add_string cell "$CELL"
+json_add_string signal_pct "$SIGQ"
+json_add_string rssi "$RSSI_DBM"
+json_add_string rsrp "$RSRP_DBM"
+json_add_string rsrq "$RSRQ_DB"
+json_add_string apn "$APN"
+json_add_string ipaddr "$IPADDR"
+json_add_string dns1 "$DNS1"
+json_add_string dns2 "$DNS2"
+json_add_boolean connected "$PDP"
+json_dump

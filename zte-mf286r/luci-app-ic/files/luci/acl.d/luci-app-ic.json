@@ -1,0 +1,6 @@
+{
+	"luci-app-ic": {
+		"description": "Cellular network status (read-only, via modem-info)",
+		"read": { "file": { "/usr/bin/modem-info": [ "exec" ] } }
+	}
+}

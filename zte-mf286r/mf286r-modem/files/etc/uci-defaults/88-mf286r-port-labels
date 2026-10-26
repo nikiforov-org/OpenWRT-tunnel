@@ -1,0 +1,41 @@
+#!/bin/sh
+# Call the sockets what the case calls them.
+#
+# /etc/board.json is what LuCI builds the switch page's port labels from, and
+# for this board it describes the socket printed WAN/LAN1 as an ordinary
+# "lan" with index 1. So the page offers LAN 1..LAN 4 and no WAN at all, while
+# the case says otherwise - which is how a socket that is wired to the LAN
+# switch ends up looking like a WAN port to everyone reading the label and like
+# a LAN port to the router.
+#
+# Switch port 5 is that socket (established by watching which port gains link
+# with a cable in it). Marking it "wan" makes the page say WAN, and makes
+# OpenWrt's own config generator put it on its own VLAN if the configuration is
+# ever regenerated from scratch - which is what 89-mf286r-wan sets up anyway.
+#
+# Idempotent: does nothing once the role is already wan.
+B=/etc/board.json
+[ -f "$B" ] || exit 0
+command -v ucode >/dev/null 2>&1 || exit 0
+
+ucode -l fs -e '
+	let f = "'"$B"'";
+	let d = json(fs.readfile(f));
+	let ports = d?.switch?.switch0?.ports;
+	if (!ports) exit(0);
+	let touched = false;
+	for (let p in ports) {
+		if (p.num == 5 && p.role != "wan") {
+			p.role = "wan";
+			delete p.index;
+			touched = true;
+		}
+	}
+	if (touched)
+		fs.writefile(f, sprintf("%.J", d));
+' 2>/dev/null
+
+# the menu/index cache remembers the old labels
+rm -f /tmp/luci-indexcache* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+exit 0

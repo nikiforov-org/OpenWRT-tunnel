@@ -1,0 +1,714 @@
+#!/bin/sh
+# Modem messaging back end for the LuCI page and the smsd service.
+#
+# This module has no QMI and no MBIM port — one CDC-ACM control port is the whole
+# interface — so everything here is AT: sms_tool for the PDU work (listing,
+# sending, deleting, USSD) and modem-at for plain queries. Both take the same lock,
+# because netifd drives that same port while dialling.
+#
+# What follows from that:
+#   * message identity is a content hash, never a slot index: the SIM slot
+#     numbers sms_tool reports are reused the moment a slot is freed;
+#   * multi-part messages arrive as separate PDUs and are reassembled here —
+#     with ModemManager that came for free;
+#   * a delivery report cannot be requested. sms_tool builds the SUBMIT PDU
+#     itself with the status-report bit clear and offers no way in, so the
+#     option is gone from the page rather than silently ignored;
+#   * new mail is found by polling, not by a bus signal (there is no bus);
+#   * the archive lives in /srv/sms/<ICCID>.jsonl — one mailbox per SIM card,
+#     because the card can be swapped at any time.
+#
+# Every command answers with a single JSON object on stdout.
+. /usr/share/libubox/jshn.sh
+
+ARCHIVE_DIR=/srv/sms
+SIM_DIR=/srv/sms/sim
+CONF=sms
+
+CMD="$1"; [ $# -gt 0 ] && shift
+
+die() { json_init; json_add_boolean ok 0; json_add_string error "$1"; json_dump; exit 1; }
+
+uci_get() { uci -q get "$CONF.$1" 2>/dev/null; }
+
+# --- modem / SIM -----------------------------------------------------------
+DEV=/dev/ttyACM0
+SIMCACHE=/tmp/smsctl-sim.cache
+# How long the cached card/network identity is trusted. Every AT exchange costs a
+# round trip on a port that is also being dialled on, and the page asks for status
+# constantly, so this is the difference between a page that answers instantly and
+# one that crawls. It also bounds how long a swapped card keeps filing messages
+# into the previous card's mailbox, which is why it is minutes and not hours.
+SIMCACHE_TTL=120
+
+# sms_tool talks to the port directly, so it runs under the same lock as
+# everything else (see /usr/bin/modem-at). The timestamp format is fixed here so the
+# archive keeps sorting lexicographically, as it does for the records we write.
+smst() { modem-atlock sms_tool -d "$DEV" -f '%Y-%m-%dT%H:%M:%S' "$@"; }
+
+modem_present() { [ -c "$DEV" ] && echo 1; }
+
+jval() { printf '%s' "$1" | jsonfilter -e "@.$2" 2>/dev/null; }
+
+load_sim() {
+	local age=99999 info
+	[ -s "$SIMCACHE" ] && age=$(( $(date +%s) - $(sed -n 's/^AT=//p' "$SIMCACHE" 2>/dev/null || echo 0) ))
+	if [ "$age" -gt "$SIMCACHE_TTL" ]; then
+		info=$(modem-info 2>/dev/null)
+		# Some cards carry their MSISDN in EF_MSISDN; most operators leave it
+		# empty, and then it can only come from the per-card settings.
+		{
+			echo "ICCID='$(jval "$info" iccid)'"
+			echo "IMSI='$(jval "$info" imsi)'"
+			echo "OPERATOR='$(jval "$info" operator)'"
+			echo "MSTATE='$(jval "$info" registration)'"
+			echo "OWNNUM='$(modem-at -t 4 'AT+CNUM' 2>/dev/null | grep -m1 -oE '\+?[0-9]{6,}')'"
+			echo "AT=$(date +%s)"
+		} > "$SIMCACHE"
+	fi
+	. "$SIMCACHE" 2>/dev/null
+}
+
+mailbox() { printf '%s/%s.jsonl' "$ARCHIVE_DIR" "${1:-$ICCID}"; }
+
+# Every mailbox on the dongle, or just one when an ICCID is given. Listings use
+# all of them: the archive belongs to the device, so messages received on a card
+# that has since been taken out stay visible.
+mailbox_files() {
+	local f
+	if [ -n "$1" ]; then
+		[ -f "$(mailbox "$1")" ] && printf '%s\n' "$(mailbox "$1")"
+		return 0
+	fi
+	for f in "$ARCHIVE_DIR"/*.jsonl; do
+		[ -f "$f" ] && printf '%s\n' "$f"
+	done
+	return 0
+}
+
+# Per-card settings live beside the archive, one file per ICCID. Everything
+# stays on the dongle: inserting a different card never touches another card's
+# file, and a card that comes back finds its settings and its messages exactly
+# as it left them. They are kept out of UCI because /etc/config is the router's
+# own configuration — backed up, restored and reset with it — whereas this data
+# must simply persist until it is deleted or the firmware is replaced.
+sim_file() { printf '%s/%s.json' "$SIM_DIR" "$1"; }
+
+sim_write() {
+	mkdir -p "$SIM_DIR"
+	# Same permissions as the archive: this is the owner's data.
+	umask 077
+	json_init
+	json_add_string iccid  "$1"
+	json_add_string label  "$2"
+	json_add_string number "$3"
+	json_add_string apn    "$4"
+	json_dump > "$(sim_file "$1")"
+}
+
+# Settings made before per-card files existed are carried over from UCI once.
+sim_migrate() {
+	local icc="$1" i=0 v
+	[ -f "$(sim_file "$icc")" ] && return 0
+	while v=$(uci -q get "$CONF.@sim[$i].iccid"); do
+		[ -z "$v" ] && break
+		if [ "$v" = "$icc" ]; then
+			sim_write "$icc" "$(uci -q get "$CONF.@sim[$i].label")" \
+			                 "$(uci -q get "$CONF.@sim[$i].number")" ""
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	return 1
+}
+
+sim_attr() {
+	local icc="$1" attr="$2" f
+	[ -n "$icc" ] || return 0
+	sim_migrate "$icc"
+	f=$(sim_file "$icc")
+	[ -f "$f" ] || return 0
+	tr -d '\n' < "$f" | sed -n "s/.*\"$attr\": *\"\([^\"]*\)\".*/\1/p"
+}
+sim_label()  { sim_attr "$1" label; }
+sim_number() { sim_attr "$1" number; }
+sim_apn()    { sim_attr "$1" apn; }
+
+# Stable message identity: a SIM slot number is reused as soon as it is freed.
+msg_hash() {
+	printf '%s|%s|%s|%s|%s' "$1" "$2" "$3" "$4" "$5" | sha256sum | cut -c1-32
+}
+
+# --- archive ---------------------------------------------------------------
+# Records are appended as single JSON lines. jshn does the escaping; newlines
+# inside the object are folded so one record is exactly one line.
+archive_append() {
+	local file="$1"; shift
+	mkdir -p "$ARCHIVE_DIR"
+	printf '%s\n' "$(json_dump | tr -d '\n')" >> "$file"
+}
+
+archive_has() { [ -f "$1" ] && grep -q "\"id\": *\"$2\"" "$1"; }
+
+# Replace the record carrying <id> with the currently built jshn object.
+archive_replace() {
+	local file="$1" id="$2" tmp="$1.tmp"
+	[ -f "$file" ] || return 0
+	grep -v "\"id\": *\"$id\"" "$file" > "$tmp" 2>/dev/null
+	printf '%s\n' "$(json_dump | tr -d '\n')" >> "$tmp"
+	mv "$tmp" "$file"
+}
+
+# Build a record in the current jshn context.
+build_record() {
+	json_init
+	json_add_string id       "$1"
+	json_add_string dir      "$2"
+	json_add_string folder   "$3"
+	json_add_string peer     "$4"
+	json_add_string iccid    "$ICCID"
+	json_add_string imsi     "$IMSI"
+	json_add_string operator "$OPERATOR"
+	json_add_string ts       "$5"
+	json_add_string text     "$6"
+	json_add_string smsc     "$7"
+	json_add_string state    "$8"
+	json_add_string error    "$9"
+	[ -n "${10}" ] && json_add_string mmid "${10}"
+	# The network ties a delivery report to the message only by this number.
+	[ -n "${11}" ] && [ "${11}" != "--" ] && json_add_string ref "${11}"
+}
+
+# Mark the archived message carrying <ref> as delivered. The record is rewritten
+# in place rather than rebuilt: its text is already JSON-escaped, and passing it
+# back through jshn would escape it a second time.
+mark_delivered() {
+	local file="$1" ref="$2" dts="$3" line tmp="$1.tmp"
+	[ -n "$ref" ] && [ -f "$file" ] || return 1
+	line=$(grep "\"ref\": *\"$ref\"" "$file" | head -1)
+	[ -n "$line" ] || return 1
+	case "$line" in *'"delivered":'*) return 1 ;; esac
+	sed "/\"ref\": *\"$ref\"/{s/\"state\": *\"[^\"]*\"/\"state\": \"delivered\"/;s/ }\$/, \"delivered\": \"$dts\" }/;}" \
+		"$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+now() { date +%Y-%m-%dT%H:%M:%S%z; }
+
+# --- forwarding ------------------------------------------------------------
+# Returns 0 only when a message was actually handed to a configured target.
+forward() {
+	local peer="$1" text="$2" ts="$3" body sent=1
+	if [ "$(uci_get settings.forward_telegram)" = "1" ]; then
+		local tok chat
+		tok=$(uci_get settings.telegram_token); chat=$(uci_get settings.telegram_chat)
+		if [ -n "$tok" ] && [ -n "$chat" ]; then
+			curl -s -m 15 -o /dev/null \
+			     --data-urlencode "chat_id=$chat" \
+			     --data-urlencode "text=SMS from $peer ($OPERATOR, $ts)
+$text" \
+			     "https://api.telegram.org/bot$tok/sendMessage" 2>/dev/null && sent=0
+		fi
+	fi
+	if [ "$(uci_get settings.forward_webhook)" = "1" ]; then
+		local url; url=$(uci_get settings.webhook_url)
+		if [ -n "$url" ]; then
+			json_init
+			json_add_string peer "$peer"; json_add_string text "$text"
+			json_add_string ts "$ts";     json_add_string iccid "$ICCID"
+			json_add_string operator "$OPERATOR"
+			body=$(json_dump)
+			curl -s -m 15 -o /dev/null -H 'Content-Type: application/json' \
+			     -d "$body" "$url" 2>/dev/null && sent=0
+		fi
+	fi
+	return $sent
+}
+
+# --- SIM message helpers ---------------------------------------------------
+# One read of the card, reused by everything in the same run: each one costs a
+# full AT session.
+sim_fetch() { SIMJSON=$(smst -j recv 2>/dev/null); [ -n "$SIMJSON" ] || SIMJSON='{"msg":[]}'; }
+sms_ids()   { printf '%s' "${SIMJSON:-}" | jsonfilter -e '@.msg[*].index' 2>/dev/null; }
+sms_count() { sms_ids | wc -l | tr -d ' '; }
+# by POSITION in the array, not by slot number — a slot number is not a key.
+sms_at()    { printf '%s' "$SIMJSON" | jsonfilter -e "@.msg[$1].$2" 2>/dev/null; }
+
+sms_delete() { smst delete "$1" >/dev/null 2>&1; }
+
+# Emit what is on the card right now, exactly as sms_tool reports it.
+print_sim_messages() {
+	sim_fetch
+	printf '{"ok":true,"messages":%s}\n' "$(printf '%s' "$SIMJSON" | jsonfilter -e '@.msg' 2>/dev/null || echo '[]')"
+}
+
+# Poll the card and sync whenever something is on it. This is the smsd
+# "listener" instance.
+#
+# There is no bus to watch here: the module announces new mail with an
+# unsolicited +CMTI on the control port, but that port is shared with netifd's
+# dialling, so a permanently attached reader is exactly the thing that breaks a
+# dial (proven on this device). Polling under the shared lock costs one short AT
+# session per interval and cannot interfere.
+#
+# The interval is a compromise, not a limitation of the hardware: the card holds
+# 100 messages, so nothing is lost between polls — only noticed later.
+sms_listen() {
+	local every
+	every=$(uci_get settings.poll_interval); [ -n "$every" ] || every=30
+	while :; do
+		"$0" sync >/dev/null 2>&1
+		sleep "$every"
+	done
+}
+
+# --- commands --------------------------------------------------------------
+IDX=$(modem_present)
+case "$CMD" in
+	# these only touch the archive on disk, so they must not pay for an AT session
+	listen|archive|archive-delete|export|threads|thread|ussd-log|counts) : ;;
+	# these need to know which card is in, which is cached and so nearly free
+	sims|sim-set) [ -n "$IDX" ] && load_sim ;;
+	*)
+		[ -n "$IDX" ] || die "no modem control port at $DEV"
+		load_sim
+		;;
+esac
+case "$CMD" in
+
+listen)
+	sms_listen
+	;;
+
+status)
+	# There is no session object to ask; the state is what the last +CUSD said.
+	ussd_state=$(cat /tmp/smsctl-ussd.state 2>/dev/null)
+	json_init
+	json_add_boolean ok 1
+	json_add_int    modem    1
+	json_add_string state    "${MSTATE:-unknown}"
+	json_add_string operator "$OPERATOR"
+	json_add_string iccid    "$ICCID"
+	json_add_string imsi     "$IMSI"
+	json_add_string ussd     "${ussd_state:-idle}"
+	# Empty settings fall back to what the network and the card do tell us, so
+	# the fields come up filled in rather than blank.
+	slabel=$(sim_label "$ICCID");   [ -n "$slabel" ]  || slabel="$OPERATOR"
+	snumber=$(sim_number "$ICCID"); [ -n "$snumber" ] || snumber="$OWNNUM"
+	sapn=$(sim_apn "$ICCID");       [ -n "$sapn" ]    || sapn=$(uci -q get network.wwan.apn)
+	json_add_string label    "$slabel"
+	json_add_string number   "$snumber"
+	json_add_string apn      "$sapn"
+	json_dump
+	;;
+
+# Store this card's settings. The APN is kept with the card but also written to
+# the connection, since that is where it actually takes effect.
+sim-set)
+	[ -n "$1" ] || die "usage: smsctl sim-set <iccid> <label> [number] [apn]"
+	sim_write "$1" "$2" "$3" "$4"
+	apn_changed=0
+	if [ -n "$4" ] && [ "$4" != "$(uci -q get network.wwan.apn)" ]; then
+		uci -q set network.wwan.apn="$4"
+		uci -q commit network
+		apn_changed=1
+	fi
+	json_init
+	json_add_boolean ok 1
+	json_add_boolean apn_changed "$apn_changed"
+	json_dump
+	;;
+
+# Mailboxes present in the archive, plus the card currently inserted.
+sims)
+	json_init
+	json_add_boolean ok 1
+	json_add_array mailboxes
+	for f in "$ARCHIVE_DIR"/*.jsonl; do
+		[ -f "$f" ] || continue
+		icc=$(basename "$f" .jsonl)
+		json_add_object
+		json_add_string iccid "$icc"
+		json_add_int    count "$(wc -l < "$f" | tr -d ' ')"
+		json_add_string label  "$(sim_label "$icc")"
+		json_add_string number "$(sim_number "$icc")"
+		# the operator this card last reported, taken from its newest message
+		json_add_string operator "$(sed -n 's/.*"operator": *"\([^"]*\)".*/\1/p' "$f" | tail -1)"
+		json_add_boolean current "$([ "$icc" = "$ICCID" ] && echo 1 || echo 0)"
+		json_close_object
+	done
+	json_close_array
+	json_add_string current "$ICCID"
+	json_dump
+	;;
+
+# Messages currently held on the SIM (not the archive).
+list)
+	print_sim_messages
+	;;
+
+# Import new SIM messages into the archive, forward them, then free the slots.
+sync)
+	[ -n "$ICCID" ] || die "no SIM"
+	# A sync can be asked for from three places at once — the poller, the
+	# maintenance tick and the "Fetch from SIM" button — and two of them
+	# overlapping would both pass the archive_has check for the same message and
+	# append it twice. Serialise them; the lock is dropped when the process ends.
+	exec 9>/var/lock/smsctl-sync
+	flock 9
+	file=$(mailbox); mkdir -p "$ARCHIVE_DIR"
+	imported=0; forwarded=0; delivered=0
+	sim_fetch
+	total_msgs=$(sms_count)
+
+	# Every field read costs a jsonfilter process, and finding the parts of a
+	# group means looking at every message for every part — squared, that is
+	# tens of thousands of processes on a full card. So the addressing fields are
+	# pulled out once into a table and searched with awk; only the text of a
+	# message actually being archived is fetched from the JSON.
+	META="/tmp/smsctl-sync.$$"
+	trap 'rm -f "$META"' EXIT INT TERM
+	: > "$META"
+	i=0
+	while [ "$i" -lt "$total_msgs" ]; do
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$i" "$(sms_at "$i" index)" "$(sms_at "$i" reference)" \
+			"$(sms_at "$i" part)" "$(sms_at "$i" total)" \
+			"$(sms_at "$i" sender)" "$(sms_at "$i" error)" >> "$META"
+		i=$((i + 1))
+	done
+	meta_at() { awk -F'\t' -v n="$1" -v c="$2" '$1 == n { print $c; exit }' "$META"; }
+
+	# Multi-part messages arrive as one PDU per part, all carrying the same
+	# reference number; ModemManager used to join them. A group is only usable
+	# once every part of it is on the card, so an incomplete group is left where
+	# it is and picked up by a later run — the card holds 100 messages, there is
+	# no hurry. Single-part messages have no reference field at all.
+	i=0
+	while [ "$i" -lt "$total_msgs" ]; do
+		idx=$(meta_at "$i" 2)
+		if [ -n "$(meta_at "$i" 7)" ]; then
+			# not a message (a status report, or a PDU sms_tool cannot decode):
+			# free the slot so it does not block delivery, and move on
+			sms_delete "$idx"
+			i=$((i + 1)); continue
+		fi
+		tot=$(meta_at "$i" 5)
+		peer=$(meta_at "$i" 6)
+		ts=$(sms_at "$i" timestamp)
+		[ -n "$ts" ] || ts=$(now)
+
+		if [ -n "$tot" ] && [ "$tot" -gt 1 ] 2>/dev/null; then
+			ref=$(meta_at "$i" 3)
+			# gather the whole group: text in part order, slots to free, and the
+			# timestamp of part 1 — which is the group's timestamp no matter which
+			# part this iteration happens to have started from. Taking the current
+			# position's timestamp instead would hash the same message differently
+			# on a later pass and archive it twice.
+			text=""; have=0; slots=""; ts1=""
+			part=1
+			while [ "$part" -le "$tot" ]; do
+				found=$(awk -F'\t' -v r="$ref" -v s="$peer" -v p="$part" \
+					'$3 == r && $6 == s && $4 == p { print $1; exit }' "$META")
+				[ -n "$found" ] || break
+				text="$text$(sms_at "$found" content)"
+				slots="$slots $(meta_at "$found" 2)"
+				[ "$part" = 1 ] && ts1=$(sms_at "$found" timestamp)
+				have=$((have + 1))
+				part=$((part + 1))
+			done
+			if [ "$have" -lt "$tot" ]; then
+				i=$((i + 1)); continue          # still arriving — try again later
+			fi
+			ts="$ts1"; [ -n "$ts" ] || ts=$(now)
+		else
+			text=$(sms_at "$i" content)
+			slots="$idx"
+		fi
+
+		dir=in; folder=inbox
+		h=$(msg_hash "$ICCID" "$dir" "$peer" "$ts" "$text")
+		if ! archive_has "$file" "$h"; then
+			build_record "$h" "$dir" "$folder" "$peer" "$ts" "$text" "" received ""
+			archive_append "$file"
+			imported=$((imported + 1))
+			forward "$peer" "$text" "$ts" && forwarded=$((forwarded + 1))
+		fi
+		# The card is only a transit buffer: its 100 slots would fill up and the
+		# network would stop delivering, so an archived message is always removed.
+		for sl in $slots; do sms_delete "$sl"; done
+		i=$((i + 1))
+	done
+	rm -f "$META"
+	json_init
+	json_add_boolean ok 1
+	json_add_int imported "$imported"
+	json_add_int forwarded "$forwarded"
+	json_add_int delivered "$delivered"
+	json_dump
+	;;
+
+# archive <folder> [limit] [query] [iccid]   — newest first
+archive)
+	folder="${1:-inbox}"; limit="${2:-200}"; query="$3"; icc="$4"
+	printf '{"ok":true,"folder":"%s","messages":[' "$folder"
+	files=$(mailbox_files "$icc")
+	if [ -n "$files" ]; then
+		{ for file in $files; do
+			if [ "$folder" = "all" ]; then cat "$file"
+			else grep "\"folder\": *\"$folder\"" "$file" 2>/dev/null; fi
+		  done
+		} | { [ -n "$query" ] && awk -v q="$query" '
+			# Search only what the user sees — the correspondent and the text.
+			# Matching the raw line would hit operator/iccid/imsi/id as well.
+			BEGIN { ql = tolower(q) }
+			{
+				p = ""; t = ""
+				if (match($0, /"peer": *"[^"]*"/))          p = substr($0, RSTART, RLENGTH)
+				if (match($0, /"text": *".*", *"smsc"/))    t = substr($0, RSTART, RLENGTH)
+				if (index(tolower(p t), ql)) print
+			}' || cat; } \
+		  | sed 's/.*"ts": *"\([^"]*\)".*/\1\t&/' | sort -r | cut -f2- \
+		  | head -n "$limit" \
+		  | awk '{ if(NR>1) printf ","; printf "%s", $0 }'
+	fi
+	printf ']}\n'
+	;;
+
+send)
+	# A delivery report cannot be asked for on this device: sms_tool encodes the
+	# SUBMIT PDU itself with the status-report bit clear and exposes no way in.
+	# The flag is accepted and ignored rather than rejected, so an older page or
+	# a script that still passes it keeps working.
+	[ "$1" = "-r" ] && shift
+	number="$1"; [ $# -gt 0 ] && shift; text="$*"
+	[ -n "$number" ] || die "recipient is empty"
+	[ -n "$text" ]   || die "message is empty"
+	[ -n "$ICCID" ]  || die "no SIM"
+	# Take the sync lock for the whole send: the poller must not run a sync
+	# while the card holds a copy of the message being sent.
+	exec 9>/var/lock/smsctl-sync
+	flock 9
+	file=$(mailbox); ts=$(now)
+	h=$(msg_hash "$ICCID" out "$number" "$ts" "$text")
+	# sms_tool exits 0 whether or not the message went out — a +CMS ERROR is
+	# only written to stderr — so success is read from what it printed, not from
+	# its status. The number it echoes is the network's reference for the message.
+	out=$(smst send "$number" "$text" 2>&1)
+	case "$out" in
+		*"sms sent"*)
+			ref=$(printf '%s' "$out" | grep -oE '[0-9]+' | tail -1)
+			build_record "$h" out sent "$number" "$ts" "$text" "" sent "" "" "$ref"
+			archive_append "$file"
+			json_init; json_add_boolean ok 1; json_add_string id "$h"; json_dump
+			;;
+		*)
+			err=$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g')
+			[ -n "$err" ] || err="the modem did not answer"
+			build_record "$h" out outbox "$number" "$ts" "$text" "" failed "$err"
+			archive_append "$file"
+			die "$err"
+			;;
+	esac
+	;;
+
+# Retry everything sitting in the outbox.
+queue-flush)
+	[ -n "$ICCID" ] || die "no SIM"
+	file=$(mailbox); sent=0; left=0
+	[ -f "$file" ] || { json_init; json_add_boolean ok 1; json_add_int sent 0; json_add_int pending 0; json_dump; exit 0; }
+	for h in $(grep '"folder": *"outbox"' "$file" 2>/dev/null | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p'); do
+		line=$(grep "\"id\": *\"$h\"" "$file" | head -1)
+		peer=$(printf '%s' "$line" | sed -n 's/.*"peer": *"\([^"]*\)".*/\1/p')
+		text=$(printf '%s' "$line" | sed -n 's/.*"text": *"\(.*\)", *"smsc".*/\1/p')
+		ts=$(printf '%s'   "$line" | sed -n 's/.*"ts": *"\([^"]*\)".*/\1/p')
+		out=$(smst send "$peer" "$text" 2>&1)
+		case "$out" in
+			*"sms sent"*)
+				ref=$(printf '%s' "$out" | grep -oE '[0-9]+' | tail -1)
+				build_record "$h" out sent "$peer" "$ts" "$text" "" sent "" "" "$ref"
+				archive_replace "$file" "$h"
+				sent=$((sent + 1))
+				;;
+			*) left=$((left + 1)) ;;
+		esac
+	done
+	json_init; json_add_boolean ok 1; json_add_int sent "$sent"; json_add_int pending "$left"; json_dump
+	;;
+
+# Save a draft (id is regenerated from the content).
+draft)
+	number="$1"; [ $# -gt 0 ] && shift; text="$*"
+	[ -n "$ICCID" ] || die "no SIM"
+	ts=$(now); h=$(msg_hash "$ICCID" out "$number" "$ts" "$text")
+	build_record "$h" out drafts "$number" "$ts" "$text" "" pending ""
+	archive_append "$(mailbox)"
+	json_init; json_add_boolean ok 1; json_add_string id "$h"; json_dump
+	;;
+
+# Delete from the card by slot number (valid only until the next sync frees it).
+delete)
+	[ -n "$1" ] || die "usage: smsctl delete <slot|all>"
+	if [ "$1" = "all" ]; then
+		smst delete all >/dev/null 2>&1
+	else
+		smst delete "$1" >/dev/null 2>&1 || die "could not delete message $1"
+	fi
+	json_init; json_add_boolean ok 1; json_dump
+	;;
+
+# Delete from the archive (id is the content hash).
+archive-delete)
+	[ -n "$1" ] || die "usage: smsctl archive-delete <hash|all> [iccid]"
+	icc="${2:-$ICCID}"; file=$(mailbox "$icc")
+	if [ "$1" = "all" ]; then rm -f "$file"
+	elif [ -f "$file" ]; then
+		grep -v "\"id\": *\"$1\"" "$file" > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file"
+	fi
+	json_init; json_add_boolean ok 1; json_dump
+	;;
+
+export)
+	icc="${1:-$ICCID}"; file=$(mailbox "$icc")
+	[ -f "$file" ] && cat "$file" || printf ''
+	;;
+
+ussd|ussd-respond)
+	[ -n "$1" ] || die "nothing to send"
+	# Initiating a session and answering its menu are the same AT command
+	# (AT+CUSD=1,...), so both arrive here and differ only in what is sent.
+	#
+	# sms_tool prints just the decoded answer, but the +CUSD line also carries
+	# <m>, which is the only way to know whether the network is waiting for a
+	# choice. -D echoes that raw line, so it is asked for and then filtered out
+	# of the reply.
+	raw=$(smst -D ussd "$1" 2>&1)
+	m=$(printf '%s\n' "$raw" | sed -n 's/^debug: *+CUSD: *\([0-9]\).*/\1/p' | head -1)
+	reply=$(printf '%s\n' "$raw" | grep -v '^debug: ' | grep -v '^error' | sed '/^[[:space:]]*$/d')
+	# <m>: 1 = the network wants a response, everything else ends the session.
+	case "$m" in 1) state=user-response ;; *) state=idle ;; esac
+	printf '%s' "$state" > /tmp/smsctl-ussd.state
+	[ -n "$reply" ] || [ -n "$m" ] || die "the network did not answer"
+	json_init; json_add_boolean ok 1
+	json_add_string reply "$reply"; json_add_string state "$state"
+	json_dump
+	;;
+
+ussd-cancel)
+	modem-at -t 6 'AT+CUSD=2' >/dev/null 2>&1
+	printf 'idle' > /tmp/smsctl-ussd.state
+	json_init; json_add_boolean ok 1; json_dump
+	;;
+
+forward-test)
+	[ -n "$ICCID" ] || die "no SIM"
+	forward "test" "smsctl forwarding test" "$(now)"
+	json_init; json_add_boolean ok 1; json_dump
+	;;
+
+# Message counts per folder, for the sidebar.
+counts)
+	files=$(mailbox_files "$1")
+	json_init
+	json_add_boolean ok 1
+	for fol in inbox sent outbox drafts; do
+		n=0
+		for file in $files; do
+			n=$((n + $(grep -c "\"folder\": *\"$fol\"" "$file" 2>/dev/null)))
+		done
+		json_add_int "$fol" "$n"
+	done
+	json_add_int threads "$(for file in $files; do
+		sed -n 's/.*"peer": *"\([^"]*\)".*/\1/p' "$file"
+	done | sort -u | wc -l | tr -d ' ')"
+	json_dump
+	;;
+
+# Conversations: one entry per correspondent, with its latest message.
+# `text` is re-emitted verbatim — it is already JSON-escaped in the record, and
+# "smsc" always follows it, which makes a reliable anchor.
+threads)
+	files=$(mailbox_files "$1")
+	printf '{"ok":true,"threads":['
+	if [ -n "$files" ]; then
+		tmp="/tmp/smsctl.$$"
+		# dir and iccid come along so the list can fill in To and From the same
+		# way the other message tables do — the card a conversation belongs to
+		# is not necessarily the one inserted now.
+		sed -n 's/.*"dir": *"\([^"]*\)".*"peer": *"\([^"]*\)".*"iccid": *"\([^"]*\)".*"ts": *"\([^"]*\)", *"text": *"\(.*\)", *"smsc".*/\1\t\2\t\3\t\4\t\5/p' \
+			$files > "$tmp"
+		awk -F'\t' '
+			{ c[$2]++; if ($4 > last[$2]) { last[$2]=$4; txt[$2]=$5; dir[$2]=$1; icc[$2]=$3 } }
+			END { n=0; for (p in c) { if (n++) printf ",";
+			      printf "{\"peer\":\"%s\",\"count\":%d,\"ts\":\"%s\",\"dir\":\"%s\",\"iccid\":\"%s\",\"text\":\"%s\"}",
+			             p, c[p], last[p], dir[p], icc[p], txt[p] } }' "$tmp"
+		rm -f "$tmp"
+	fi
+	printf ']}\n'
+	;;
+
+# Every message exchanged with one correspondent, newest first.
+thread)
+	[ -n "$1" ] || die "usage: smsctl thread <peer> [iccid]"
+	files=$(mailbox_files "$2")
+	printf '{"ok":true,"peer":"%s","messages":[' "$1"
+	if [ -n "$files" ]; then
+		grep -h "\"peer\": *\"$1\"" $files 2>/dev/null \
+			| sed 's/.*"ts": *"\([^"]*\)".*/\1\t&/' | sort -r | cut -f2- \
+			| awk '{ if (NR>1) printf ","; printf "%s", $0 }'
+	fi
+	printf ']}\n'
+	;;
+
+# SIM phonebook, cached — reading it spins up an AT session every time.
+contacts)
+	cache="$ARCHIVE_DIR/contacts.json"
+	if [ "$1" != "refresh" ] && [ -f "$cache" ]; then cat "$cache"; exit 0; fi
+	mkdir -p "$ARCHIVE_DIR"
+	raw=$(modem-at -t 8 'AT+CPBS="SM"' 'AT+CPBR=1,100' 2>/dev/null)
+	json_init
+	json_add_boolean ok 1
+	json_add_array contacts
+	printf '%s\n' "$raw" | grep -oE '\+CPBR: [0-9]+,"[^"]*",[0-9]+,"[^"]*"' | while IFS= read -r line; do
+		json_add_object
+		json_add_string number "$(printf '%s' "$line" | cut -d'"' -f2)"
+		json_add_string name   "$(printf '%s' "$line" | cut -d'"' -f4)"
+		json_close_object
+	done
+	json_close_array
+	json_dump | tee "$cache"
+	;;
+
+
+# Periodic operator query (balance, package state) driven by smsd.
+ussd-scheduled)
+	[ "$(uci_get settings.ussd_schedule)" = "1" ] || { json_init; json_add_boolean ok 1; json_add_boolean skipped 1; json_dump; exit 0; }
+	code=$(uci_get settings.ussd_code); [ -n "$code" ] || die "no scheduled code configured"
+	every=$(uci_get settings.ussd_interval); [ -n "$every" ] || every=86400
+	stamp="$ARCHIVE_DIR/.ussd_stamp"; mkdir -p "$ARCHIVE_DIR"
+	last=0; [ -f "$stamp" ] && last=$(cat "$stamp" 2>/dev/null)
+	nowsec=$(date +%s)
+	if [ "$1" != "force" ] && [ $((nowsec - last)) -lt "$every" ]; then
+		json_init; json_add_boolean ok 1; json_add_boolean skipped 1; json_dump; exit 0
+	fi
+	reply=$(smst ussd "$code" 2>/dev/null | grep -v '^debug: ' | sed '/^[[:space:]]*$/d')
+	modem-at -t 6 'AT+CUSD=2' >/dev/null 2>&1
+	printf 'idle' > /tmp/smsctl-ussd.state
+	printf '%s' "$nowsec" > "$stamp"
+	json_init
+	json_add_string ts "$(now)"; json_add_string code "$code"; json_add_string reply "$reply"
+	printf '%s\n' "$(json_dump | tr -d '\n')" >> "$ARCHIVE_DIR/ussd.log"
+	json_init; json_add_boolean ok 1; json_add_string reply "$reply"; json_dump
+	;;
+
+# Last scheduled-USSD results, newest first.
+ussd-log)
+	printf '{"ok":true,"entries":['
+	[ -f "$ARCHIVE_DIR/ussd.log" ] && tail -n "${1:-20}" "$ARCHIVE_DIR/ussd.log" \
+		| awk '{ a[NR]=$0 } END { for (i=NR;i>=1;i--) { if (i<NR) printf ","; printf "%s", a[i] } }'
+	printf ']}\n'
+	;;
+
+*)
+	die "unknown command '$CMD'"
+	;;
+esac

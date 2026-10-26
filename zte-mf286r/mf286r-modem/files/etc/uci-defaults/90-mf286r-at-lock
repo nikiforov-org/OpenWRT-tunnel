@@ -1,0 +1,29 @@
+#!/bin/sh
+# Make netifd's ncm handler share the modem's single AT port with everything else
+# on the box (see /usr/bin/modem-at for why that matters).
+#
+# ncm.sh drives /dev/ttyACM0 through gcom while dialling and hanging up, with no
+# idea that anyone else exists. An SMS poll landing in the middle of a dial steals
+# the reply gcom is waiting for, and the attempt dies with "Failed to get modem
+# information" — observed exactly that way on this device.
+#
+# The file belongs to comgt-ncm, so it is patched in place rather than shipped as
+# a copy: two packages cannot own the same file. One sourced line per entry point,
+# added only when the exact anchor is present, so this is a no-op once applied and
+# a no-op if upstream ever changes the function.
+
+F=/lib/netifd/proto/ncm.sh
+INC=/usr/share/mf286r/at-lock.inc
+
+[ -f "$F" ] || exit 0
+[ -r "$INC" ] || exit 0
+grep -q 'at-lock.inc' "$F" && exit 0
+
+patched=0
+for fn in proto_ncm_setup proto_ncm_teardown; do
+	grep -q "^$fn() {\$" "$F" || continue
+	sed -i "s|^$fn() {\$|$fn() {\n\t[ -r $INC ] \&\& . $INC|" "$F" && patched=1
+done
+
+[ "$patched" = 1 ] && logger -t mf286r-modem "ncm.sh now shares the modem AT port lock"
+exit 0
