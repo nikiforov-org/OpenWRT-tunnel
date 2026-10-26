@@ -227,11 +227,12 @@ Devices with a profile's links connect to it over the Internet and use the route
   all editable) and works on every enabled transport. The **Links** button shows one link and
   QR code per transport, ready for v2rayNG, Hiddify, Streisand, NekoBox, the Hysteria2 apps and
   the [Client page](#client) of another router, the links through Tor and the Tor key.
-- **Link through Tor.** While the onion service (section **Tor**, tab **Onion service**) is on, **Links**
-  also gives *through Tor*: the TCP + XTLS-Vision link with the onion address and that
-  transport's port (the onion service passes each of its ports to the same port of the router,
-  so the port has to be among them: 443 by default). It works without a public address or open
-  ports; a client needs the profile's Tor key too (tab **Tor key**). The [Client page](#links-through-tor) of
+- **Links through Tor.** While the onion service (section **Tor**, tab **Onion service**) is on, **Links**
+  also gives *TCP + Vision through Tor* and *XHTTP through Tor*: the same VLESS links with the
+  onion address and the transport's own port (the onion service passes each of its ports to
+  the same port of the router, so the transport's port has to be among them: 443 for Vision,
+  8443 for XHTTP by default). They work without a public address or open ports; a client needs
+  the profile's Tor key too (tab **Tor key**). The [Client page](#links-through-tor) of
   another router takes both. Tor carries TCP only, so there is no Hysteria2 link through Tor.
 - **Keys** are generated on the router (`xray x25519`) with one button; the public key is
   shown next to the private one. Short IDs, the XHTTP path and the obfuscation password get
@@ -368,10 +369,11 @@ profile has a Tor key (the page says "Not published" otherwise, and the address 
   are used by the clients only; the router's own tor does not change with them.
 - **No firewall changes.** The router makes the connections itself; nothing is opened from
   WAN. The onion address works behind any NAT.
-- **Link through Tor.** While the onion service is on, **Links** also gives *through Tor*: the
-  TCP + XTLS-Vision link with the onion address and that transport's port (the onion service
-  passes each of its ports to the same port of the router, so the port has to be among them:
-  443 is in the default list). Tor carries TCP only, so there is no Hysteria2 link through Tor.
+- **Links through Tor.** While the onion service is on, **Links** also gives *TCP + Vision
+  through Tor* and *XHTTP through Tor*: the VLESS links with the onion address and the
+  transport's own port (the onion service passes each of its ports to the same port of the
+  router, so the transport's port has to be among them: 443 for Vision and 8443 for XHTTP are in
+  the default list). Tor carries TCP only, so there is no Hysteria2 link through Tor.
 
 #### Step by step
 
@@ -410,7 +412,8 @@ the [Server page](#server) of another router shows them:
 | TCP + XTLS-Vision | `vless://` with `type=tcp` and `flow=xtls-rprx-vision` |
 | XHTTP | `vless://` with `type=xhttp` |
 | Hysteria2 | `hysteria2://` or `hy2://` |
-| through Tor | the TCP + XTLS-Vision `vless://` link to the server's onion address |
+| TCP + XTLS-Vision through Tor | the same `vless://` link to the server's onion address |
+| XHTTP through Tor | the same `vless://` link to the server's onion address |
 
 The links through Tor reach a server that has no public address or open ports, through its
 onion service: see [Links through Tor](#links-through-tor).
@@ -485,17 +488,19 @@ the server's.
 
 A server router whose onion service is on (its Server page, section **Tor**, tab **Onion service**) is
 reachable through its onion address without a public address or open ports (behind a mobile
-operator's NAT, for example). **Links** next to a profile on its Server page then gives *through
-Tor* (TCP + XTLS-Vision to the onion address) next to the other links, and the tab **Tor key**
-the line of the profile's key: the onion service lets in only clients with a key.
+operator's NAT, for example). **Links** next to a profile on its Server page then gives *TCP +
+Vision through Tor* and *XHTTP through Tor* next to the other links, and the tab **Tor key** the
+line of the profile's key: the onion service lets in only clients with a key.
 
-- A profile holds it next to the direct links: the field **Link through Tor**, the **Onion
-  service key** (the whole line of the Tor key, `<address>:descriptor:x25519:<key>`) and the
-  box **Through Tor**, which decides whether it is used; switched off, it is kept but left out.
-- The link through Tor is a client like the others: measured, checked every minute (with 30
+- A profile holds them next to the direct links: the fields **TCP + Vision through Tor
+  link** and **XHTTP through Tor link**, the **Onion service key** (the whole line of the Tor
+  key, `<address>:descriptor:x25519:<key>`) and the box **Through Tor**, which decides whether
+  they are used; switched off, they are kept but left out.
+- The links through Tor are clients like the others: measured, checked every minute (with 30
   seconds for an answer instead of 10) and chosen by hand or automatically. When the direct
   links of a server stop answering (its cable out, the server on a mobile uplink), the minute
-  check makes the link through Tor active; when the direct links answer again, the next
+  check makes the link through Tor that answers first active, and the measurements then
+  choose the faster of the links through Tor; when the direct links answer again, the next
   measurement goes back to the fastest. Measured between two test routers in Docker over the
   Tor network: 40-430 KB/s through Tor against tens of MB/s directly, 1-7 s to the first byte.
 - xray dials them through the SOCKS port of this router's tor, `127.0.0.1:9050` (tor's
@@ -528,11 +533,11 @@ the link is on.
 1. Install the package, log in to LuCI again, open **XTunnel → Client**.
 2. **Profiles → Add profile…**, give it the server's name and paste its links from the
    server page (**Links** next to a profile there), **Save**. Repeat for every server. For a
-   server with an onion service also paste its link through Tor and the line of its tab
+   server with an onion service also paste its links through Tor and the line of its tab
    **Tor key**, and tick **Through Tor**. Quicker: **Copy all** in that **Links** dialog, paste
    into **All links at once** of the profile's dialog and click **Fill in the fields** (each link
    goes into the field of its transport, the Tor key into **Onion service key**, **Through Tor**
-   is ticked when there is a link through Tor).
+   is ticked when there are links through Tor).
 3. Check the **Split tunnelling** section: the mode, your entries, the sources.
 4. Click **Turn the client on** in the overview (it saves and applies the page like **Save &
    Apply**; **Turn the client off** switches it off the same way). The overview shows the

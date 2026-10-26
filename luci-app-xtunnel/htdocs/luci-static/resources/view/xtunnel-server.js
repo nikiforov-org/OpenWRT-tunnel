@@ -395,7 +395,7 @@ return view.extend({
 					al.length ? ' ' + _('(MapAddress: the client opens %s instead of the address)').format(al.map(function(a) { return a + '.onion'; }).join(', ')) : '', dir, r.name.replace(/[^A-Za-z0-9._-]/g, '_'))),
 				conf,
 				E('p', { 'style': 'color:' + COLOR.dim }, k.vision_port
-					? _('Ports of this router through %s: %s; the Xray server answers on %s:%s too (the link through Tor).').format(name, (k.ports || []).join(', '), name, k.vision_port)
+					? _('Ports of this router through %s: %s; the Xray server answers on %s:%s too (the links through Tor).').format(name, (k.ports || []).join(', '), name, k.vision_port)
 					: _('Ports of this router through %s: %s.').format(name, (k.ports || []).join(', '))),
 				qrNode(k.auth_line)
 			];
@@ -411,7 +411,7 @@ return view.extend({
 		ui.showModal(_('Client links') + ' » ' + r.name, [
 			E('p', [
 				r.host ? _('One link per enabled transport, for the address %s.').format(r.host) + ' ' : '',
-				r.onion ? _('The link through Tor goes to the onion address %s; a client needs the profile\'s Tor key too ("Tor key").').format(r.onion) + ' ' : '',
+				r.onion ? _('The links through Tor go to the onion address %s; a client needs the profile\'s Tor key too ("Tor key").').format(r.onion) + ' ' : '',
 				_('Import a link or scan its QR code in the client app.')
 			].join('')),
 			E('div', { 'style': 'margin-bottom:.5em' }, btns.concat(all.length > 1 ? [
@@ -917,7 +917,7 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.taboption('onion', form.DynamicList, 'port', _('Ports'),
-			_('Ports of this router reachable through the onion address, each to the same port on the router itself: 22 is SSH, 80 the web interface (or the site), 443 the site over HTTPS and the Xray server in front of it, 8443 the XHTTP transport; the link through Tor needs the port of TCP + XTLS-Vision here.'));
+			_('Ports of this router reachable through the onion address, each to the same port on the router itself: 22 is SSH, 80 the web interface (or the site), 443 the site over HTTPS and the Xray server in front of it, 8443 the XHTTP transport; the VLESS transports whose port is here get links through Tor.'));
 		o.datatype = 'port';
 		o.rmempty = false;
 		o.validate = function(section_id, value) {
