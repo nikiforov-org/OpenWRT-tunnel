@@ -15,7 +15,7 @@
 
 import { access, readfile, writefile, mkdir, unlink, chmod, lsdir, readlink, symlink } from 'fs';
 import { cursor } from 'uci';
-import { XRAY, shq, exec, log, list, flag, read_json, url_parts, lock, ubus, uset, not_applied, cron_daily, set_cron, write_xray } from 'xtunnel.common';
+import { XRAY, shq, exec, log, list, flag, read_json, url_parts, lock, ubus, uset, not_applied, cron_daily, set_cron, write_xray, spawn } from 'xtunnel.common';
 import { RUN, cidr, TOR_OUTBOUND, profile_links, in_use, onion_keys } from 'xtunnel-client.common';
 
 const CFG      = 'xtunnel-client';
@@ -492,7 +492,7 @@ if (enabled) {
 	}
 	if (access(CONF) != true) { enabled = false; keep_nft = false; }   // nothing in effect: the system stays as it is
 	for (let s in sources)
-		if (s.enabled && !s.ready && !s.time) { exec('setsid /usr/libexec/xtunnel-client/sources >/dev/null 2>&1 </dev/null &'); break; }
+		if (s.enabled && !s.ready && !s.time) { spawn('/usr/libexec/xtunnel-client/sources'); break; }
 }
 else {
 	unlink(`${CONF}.new`);

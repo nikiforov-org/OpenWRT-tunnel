@@ -99,7 +99,7 @@ function build(main, onion, ports, client_keys) {
 		let snow = use_snowflake(main, all);
 		let chosen = filter(all, l => snow || !is_snowflake(l));
 		push(lines, 'UseBridges 1');
-		push(lines, `ClientTransportPlugin obfs4,meek_lite${length(filter(chosen, is_snowflake)) ? ',snowflake' : ''} exec ${LYREBIRD}`);
+		push(lines, `ClientTransportPlugin obfs4,meek_lite,webtunnel${length(filter(chosen, is_snowflake)) ? ',snowflake' : ''} exec ${LYREBIRD}`);
 		for (let l in chosen) push(lines, `Bridge ${l}`);
 	}
 	if (onion && !length(ports)) push(errors, 'no onion service port is set');

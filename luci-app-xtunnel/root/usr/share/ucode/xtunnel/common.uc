@@ -21,6 +21,14 @@ export function exec(command) {
 	return { code: p.close(), out: out };
 };
 
+// COMMAND in the background, detached: a session of its own, /dev/null for its standard descriptors and
+// no other inherited one. Descriptor 1000 is the lock rc.common holds while an init script runs (a sync
+// started by procd's reload trigger): a job that inherits it keeps the next reload of that init script
+// waiting until the job ends (the measurement after a start of xray held the client's reload for ~40 s).
+export function spawn(command) {
+	system(`( exec 1000>&-; exec setsid sh -c ${shq(command)} ) </dev/null >/dev/null 2>&1 &`);
+};
+
 // a message in the system log under TAG
 export function log(tag, msg) {
 	system(`logger -t ${tag} ${shq(msg)}`);

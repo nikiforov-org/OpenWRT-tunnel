@@ -70,7 +70,8 @@ cached per session): the pages appear in the **XTunnel** section of the top menu
 
 Upgrading uses the same commands: `apk add` replaces the installed package in place even when
 the version number has not changed (`Replacing luci-app-xtunnel (1.0.0-r1 -> 1.0.0-r1)`) and runs
-the package's postinst (LuCI cache reset, rpcd restart).
+the package's postinst (LuCI cache reset, rpcd restart, and a running xray is restarted when its
+executable or its settings changed: the LAN's connections through the client reconnect).
 
 Removing: `apk del luci-app-xtunnel xtunnel-core`.
 
@@ -94,7 +95,7 @@ The rows after the first are the earlier packages that `luci-app-xtunnel` replac
 `snowflake-client` and `tor` with `libopenssl3` and `libevent2`:
 
 - `/usr/bin/xray`: one Go executable for xray (Xray-core v26.3.27, the version of the `xray-core` package
-  of OpenWrt 25.12) and lyrebird (the Tor Project's pluggable transports obfs4, meek_lite and snowflake;
+  of OpenWrt 25.12) and lyrebird (the Tor Project's pluggable transports obfs4, meek_lite, webtunnel and snowflake;
   `/usr/bin/lyrebird` is a link to the same file, which runs lyrebird under that name): one Go runtime and
   one copy of the libraries, and only the parts of xray the package configures (VLESS with REALITY or TLS
   over TCP and XHTTP, Hysteria2 with Salamander, dokodemo-door, SOCKS, freedom, blackhole, DNS; the commands

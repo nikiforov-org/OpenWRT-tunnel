@@ -22,7 +22,7 @@
 
 import { access, readfile, writefile, mkdir, unlink, stat } from 'fs';
 import { cursor } from 'uci';
-import { exec, log, read_json, locked, running } from 'xtunnel.common';
+import { exec, log, read_json, locked, running, spawn } from 'xtunnel.common';
 import { control } from 'xtunnel-tor.common';
 
 const CFG       = 'xtunnel-tor';
@@ -108,7 +108,7 @@ function first_update(t) {
 	if (last && age >= 0 && age < FIRST_RETRY * 60) return;
 	if (locked(BLOCK)) return;
 	log(CFG, 'bridges: tor runs on the list shipped with the package and has a circuit: the bridge update runs now');
-	system(`setsid ${UPDATE} </dev/null >/dev/null 2>&1 &`);
+	spawn(UPDATE);
 }
 
 if (!running('tor')) exit(0);

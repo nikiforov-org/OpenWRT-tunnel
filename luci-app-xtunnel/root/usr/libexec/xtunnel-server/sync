@@ -27,6 +27,8 @@ const RULES = {
 	xhttp:     { section: 'xtunnel_server_xhttp',     proto: 'tcp', name: 'xtunnel-server: XHTTP from WAN' },
 	hysteria2: { section: 'xtunnel_server_hysteria2', proto: 'udp', name: 'xtunnel-server: Hysteria2 from WAN' }
 };
+// loopback ports not for the server's clients: tor's SOCKS port and the local ports of the client part
+const LOCAL_ONLY = { ip: [ '127.0.0.0/8', '::1/128' ], port: '9050,61000-61299' };
 const PRIVATE = [ '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
 	'172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4', '::1/128', 'fc00::/7', 'fe80::/10' ];
 
@@ -163,6 +165,7 @@ function build(main, profiles, uci) {
 	}
 	// the rules are bound to this server's inbounds: xray may run with the client's configuration too
 	let tags = map(inbounds, ib => ib.tag), rules = [];
+	push(rules, { type: 'field', inboundTag: tags, ip: LOCAL_ONLY.ip, port: LOCAL_ONLY.port, outboundTag: 'block' });
 	if (!flag(main.local_access, true))
 		push(rules, { type: 'field', inboundTag: tags, ip: PRIVATE, outboundTag: 'block' });
 	push(rules, { type: 'field', inboundTag: tags, protocol: [ 'bittorrent' ], outboundTag: 'block' });

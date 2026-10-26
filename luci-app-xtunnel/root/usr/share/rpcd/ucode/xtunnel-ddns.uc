@@ -4,7 +4,7 @@
 
 import { access, readfile, writefile, lsdir, stat, mkdir, unlink, readlink } from 'fs';
 import { cursor } from 'uci';
-import { shq, exec, tail, valid_sid, locked, running, read_json } from 'xtunnel.common';
+import { shq, exec, tail, valid_sid, locked, running, read_json, spawn } from 'xtunnel.common';
 import { file_status } from 'xtunnel.x509';
 import { grade, in_effect, target, move_state, note_watch, confirm } from 'xtunnel-ddns.sitecert';
 
@@ -122,7 +122,7 @@ function start_build(name) {
 	mkdir(RUN, 0o755);
 	mkdir(STATE, 0o755);
 	writefile(`${STATE}/site-${name}.state`, `starting ${time()}`);
-	exec(`setsid ${SITEBUILD} ${shq(name)} >/dev/null 2>&1 </dev/null &`);
+	spawn(`${SITEBUILD} ${shq(name)}`);
 }
 
 function overlay_free_kb(fresh) {
@@ -146,7 +146,7 @@ function move_kick(mv, to) {
 	if (mv?.state == 'failed' && mv.to == to && time() - (mv.attempt ?? 0) < ((mv.kind == 'confirm') ? 600 : 3600)) return;
 	if (locked(`${RUN}/move.lock`)) return;
 	move_kicked = time();
-	exec(`setsid ${MOVE} >/dev/null 2>&1 </dev/null &`);
+	spawn(MOVE);
 }
 
 const methods = {};
@@ -244,7 +244,7 @@ methods.ddns_update = {
 		uci.load(CFG);
 		if (uci.get(CFG, sid, 'enabled') != '1' || !uci.get(CFG, sid, 'hostname') || !uci.get(CFG, sid, 'provider'))
 			return { error: 'This domain is not active. Enable it and click Save & Apply first.' };
-		exec(`setsid ${UPDATE} ${shq(sid)} force >/dev/null 2>&1 </dev/null &`);
+		spawn(`${UPDATE} ${shq(sid)} force`);
 		return { ok: true };
 	}
 };
@@ -435,7 +435,7 @@ methods.set_port = {
 		uci.set(CFG, 'main', 'site_port', p);
 		uci.commit(CFG);
 		// apply in the background so this reply returns before uhttpd restarts on the new port
-		exec(`setsid ${SYNC} >/dev/null 2>&1 </dev/null &`);
+		spawn(SYNC);
 		return { ok: true, port: p };
 	}
 };

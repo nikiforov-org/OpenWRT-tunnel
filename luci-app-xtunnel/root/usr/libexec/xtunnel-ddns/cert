@@ -16,7 +16,7 @@
 
 import { readfile, writefile, mkdir, access, readlink, rename, chmod } from 'fs';
 import { cursor } from 'uci';
-import { shq, exec, log as syslog, valid_sid, stamp } from 'xtunnel.common';
+import { shq, exec, log as syslog, valid_sid, stamp, spawn } from 'xtunnel.common';
 import { info } from 'xtunnel.x509';
 import { grade, in_effect } from 'xtunnel-ddns.sitecert';
 
@@ -42,7 +42,7 @@ mkdir(RUN, 0o755);
 if (cmd == 'issue') {
 	if (!valid_sid(sid)) exit(1);
 	writefile(`${RUN}/cert-${sid}.state`, `starting ${time()}\n`);
-	system(`setsid flock -n ${RUN}/cert-${sid}.lock ${SELF} run ${sid} >/dev/null 2>&1 </dev/null &`);
+	spawn(`flock -n ${RUN}/cert-${sid}.lock ${SELF} run ${sid}`);
 	exit(0);
 }
 

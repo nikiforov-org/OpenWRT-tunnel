@@ -21,6 +21,10 @@ define Package/luci-app-xtunnel/postinst
 	rm -f /tmp/luci-indexcache*
 	rm -rf /tmp/luci-modulecache/
 	/etc/init.d/rpcd restart >/dev/null 2>&1
+	# a running xray gets the new executable and settings (procd restarts it when they changed)
+	[ -s /tmp/xtunnel-xray/started ] && for f in $$(cat /tmp/xtunnel-xray/started); do
+		/usr/libexec/xtunnel/xray-service start "$$f" >/dev/null 2>&1
+	done
 }
 exit 0
 endef

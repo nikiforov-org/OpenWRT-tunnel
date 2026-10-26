@@ -2,7 +2,7 @@
 
 import { access, readfile, stat, lsdir } from 'fs';
 import { cursor } from 'uci';
-import { XRAY, exec, read_json, locked, running, xray_version, syslog_tail, restart } from 'xtunnel.common';
+import { XRAY, exec, read_json, locked, running, xray_version, syslog_tail, restart, spawn } from 'xtunnel.common';
 import { RUN, instance, active_link, uplink, TOR_OUTBOUND } from 'xtunnel-client.common';
 
 const CFG     = 'xtunnel-client';
@@ -71,7 +71,7 @@ methods.status = {
 methods.measure = {
 	call: function() {
 		if (locked(`${RUN}/measure.lock`)) return { running: true };
-		exec('setsid /usr/libexec/xtunnel-client/measure now >/dev/null 2>&1 </dev/null &');
+		spawn('/usr/libexec/xtunnel-client/measure now');
 		return { started: true };
 	}
 };
@@ -79,7 +79,7 @@ methods.measure = {
 methods.update_sources = {
 	call: function() {
 		if (locked(`${RUN}/sources.lock`)) return { running: true };
-		exec('setsid /usr/libexec/xtunnel-client/sources >/dev/null 2>&1 </dev/null &');
+		spawn('/usr/libexec/xtunnel-client/sources');
 		return { started: true };
 	}
 };

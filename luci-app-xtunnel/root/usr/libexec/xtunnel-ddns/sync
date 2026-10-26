@@ -7,7 +7,7 @@
 
 import { readfile, writefile, mkdir, unlink, rmdir, lsdir, lstat, readlink, symlink, access, glob } from 'fs';
 import { cursor } from 'uci';
-import { log, read_json, lock, uset, fw_rule, set_cron } from 'xtunnel.common';
+import { log, read_json, lock, uset, fw_rule, set_cron, spawn } from 'xtunnel.common';
 import { grade, in_effect, target } from 'xtunnel-ddns.sitecert';
 
 const CFG        = 'xtunnel-ddns';
@@ -273,7 +273,7 @@ if (set_cron('# xtunnel-ddns-', wanted))
 	log(CFG, `cron: update=${want_update ? 'yes' : 'no'} cert=${want_renewal ? 'yes' : 'no'} site=${length(filter(wanted, l => index(l, 'xtunnel-ddns-site') >= 0)) ? 'yes' : 'no'}`);
 
 // a domain switched on gets its address at once
-if (want_update) system(`setsid ${UPDATE} >/dev/null 2>&1 </dev/null &`);
+if (want_update) spawn(UPDATE);
 
 // The Xray server's Hysteria2 transport can take the certificate of a domain of this package: when
 // the certificate files of that domain are not the ones of the server's configuration in effect (the
@@ -288,11 +288,11 @@ if (mode == 'apply' && srv.enabled == '1' && srv.hysteria2_enabled == '1' && (sr
 	    access('/etc/init.d/xtunnel-server', 'x')) {
 		log(CFG, `the Xray server's Hysteria2 certificate follows its domain to ${h}`);
 		// in the background: the server's sync can be the one that runs this sync (the port hand-over)
-		system('setsid /etc/init.d/xtunnel-server reload >/dev/null 2>&1 </dev/null &');
+		spawn('/etc/init.d/xtunnel-server reload');
 	}
 }
 
 // the site is to answer to another name, or its name has no certificate of the kind its domain is
 // set to: the move job takes over after this apply is confirmed
 if (tgt && (tgt.host != eff || grade(eff).grade < (tgt.staging ? 1 : 2)))
-	system(`setsid ${MOVE} >/dev/null 2>&1 </dev/null &`);
+	spawn(MOVE);

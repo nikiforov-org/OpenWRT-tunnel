@@ -6,7 +6,7 @@
 
 import { access, readfile, stat, lsdir } from 'fs';
 import { cursor } from 'uci';
-import { exec, list, read_json, locked, running, syslog_tail, restart, version_of } from 'xtunnel.common';
+import { exec, list, read_json, locked, running, syslog_tail, restart, version_of, spawn } from 'xtunnel.common';
 import { RUN, CONF, valid_key, public_key, keypair, aliases, bootstrap_phase } from 'xtunnel-tor.common';
 
 const SRV     = 'xtunnel-server';
@@ -165,7 +165,7 @@ methods.update_bridges = {
 	call: function() {
 		if (locked(BLOCK))
 			return { running: true };
-		exec(`setsid ${UPDATE} >/dev/null 2>&1 </dev/null &`);
+		spawn(UPDATE);
 		return { started: true };
 	}
 };

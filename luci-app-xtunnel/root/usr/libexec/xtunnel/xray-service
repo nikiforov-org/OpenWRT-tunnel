@@ -14,7 +14,7 @@
 'use strict';
 
 import { access, readfile, writefile, mkdir, unlink, chmod } from 'fs';
-import { XRAY, log, lock, read_json, ubus, instances, replace_checked, xray_test } from 'xtunnel.common';
+import { XRAY, log, lock, read_json, ubus, instances, replace_checked, xray_test, spawn } from 'xtunnel.common';
 
 const SERVICE = 'xtunnel-xray';
 const DIR     = '/tmp/xtunnel-xray';
@@ -106,7 +106,7 @@ ubus().call('service', 'set', {
 		xray: {
 			command: command,
 			env: { XRAY_LOCATION_ASSET: ASSETS, XTUNNEL_CONTROL: CONTROL },
-			file: [ CONF ],
+			file: [ CONF, XRAY ],          // a changed file restarts xray at the next service set (an upgrade)
 			respawn: [ '3600', '5', '5' ],
 			limits: { nofile: '16384 16384' },
 			stderr: true
@@ -119,5 +119,5 @@ if (replaced || !before?.running || join(' ', before?.command ?? []) != join(' '
 	let old = before?.running ? before.pid : 0;
 	for (let p in used)
 		if (p.after && access(split(p.after, ' ')[0], 'x'))
-			system(`(i=0; while [ $i -lt 10 ] && [ "$(ubus call service list '{"name":"${SERVICE}"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')" = "${old}" ]; do sleep 1; i=$((i+1)); done; ${p.after}) >/dev/null 2>&1 &`);
+			spawn(`i=0; while [ $i -lt 10 ] && [ "$(ubus call service list '{"name":"${SERVICE}"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')" = "${old}" ]; do sleep 1; i=$((i+1)); done; ${p.after}`);
 }

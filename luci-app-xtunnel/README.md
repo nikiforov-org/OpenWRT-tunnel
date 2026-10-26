@@ -315,8 +315,9 @@ profile has a Tor key (the page says "Not published" otherwise, and the address 
 - **Bridges.** The router's tor connects to the Tor network by itself; where direct
   connections are blocked, it goes through bridges. **Built-in bridges** starts from the
   bridges shipped with the package (`/usr/share/xtunnel-tor/bridges.txt`: the bridges
-  `bridges.torproject.org` handed out for the country ru when the package was built, then Tor
-  Browser's built-in snowflake and obfs4 bridges). With a **Country for bridges** set, the
+  `bridges.torproject.org` handed out for the country ru when the package was built — obfs4,
+  webtunnel and snowflake lines — then Tor Browser's built-in snowflake and obfs4 bridges). With
+  a **Country for bridges** set, the
   router refreshes that list once a day, on **Update bridges** and, while the list shipped with
   the package is in use, as soon as tor has a working circuit (again every 30 minutes until an
   update succeeds): it asks `bridges.torproject.org` (the moat API, what Tor Browser's connection

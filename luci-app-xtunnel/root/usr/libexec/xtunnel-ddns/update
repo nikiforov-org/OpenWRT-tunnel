@@ -13,7 +13,7 @@
 
 import { readfile, writefile, mkdir } from 'fs';
 import { cursor } from 'uci';
-import { log as syslog, read_json, lock, stamp } from 'xtunnel.common';
+import { log as syslog, read_json, lock, stamp, spawn } from 'xtunnel.common';
 import { public_ip } from 'xtunnel-ddns.http';
 import { provider } from 'xtunnel-ddns.providers';
 import { grade, in_effect, target } from 'xtunnel-ddns.sitecert';
@@ -114,4 +114,4 @@ held.close();
 // carries on (it repeats a failed certificate request at most once an hour)
 let t = target(uci, CFG);
 if (t && (t.host != in_effect() || grade(t.host).grade < (t.staging ? 1 : 2)))
-	system('setsid /usr/libexec/xtunnel-ddns/move >/dev/null 2>&1 </dev/null &');
+	spawn('/usr/libexec/xtunnel-ddns/move');

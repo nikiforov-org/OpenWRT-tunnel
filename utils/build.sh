@@ -41,7 +41,7 @@ except ValueError:
 	sys.exit('build.sh: the answer of bridges.torproject.org is not JSON')
 VALID = re.compile(r'^(obfs4|snowflake|meek_lite|webtunnel) [^ ]+:[0-9]+ [0-9A-Fa-f]{40}( [^ ]+)*$')
 VANILLA = re.compile(r'^[^ ]+:[0-9]+ [0-9A-Fa-f]{40}$')
-PLUGINS = ('obfs4', 'meek_lite', 'snowflake')   # the transports the package's dependencies have plugins for
+PLUGINS = ('obfs4', 'meek_lite', 'webtunnel', 'snowflake')   # the transports of lyrebird (xtunnel-core)
 def valid(l): return VALID.match(l) or VANILLA.match(l)
 def transport(l): return 'vanilla' if ':' in l.split(' ')[0] else l.split(' ')[0]
 def key(l): return ' '.join(l.split(' ')[:2] if transport(l) == 'vanilla' else l.split(' ')[:3]).upper()

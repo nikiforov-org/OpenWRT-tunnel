@@ -516,7 +516,7 @@ return view.extend({
 		var m, s, o;
 
 		m = new form.Map(CFG, _('Server'),
-			_('One xray process on this router serves the enabled transports: VLESS + REALITY over TCP with XTLS-Vision, VLESS + REALITY over XHTTP and Hysteria2 over QUIC (UDP). Devices with a profile\'s links connect to it over the Internet and use the router\'s connection. With the onion service of the router\'s tor the router is also reachable through the Tor network, without a public address or open ports: the profiles\' Tor keys let them in, for SSH, the web interface and the VLESS transports. Nothing changes on the router until you click "Save & Apply" or the button that turns the server on or off.'));
+			_('An xray server with the transports below (VLESS + REALITY over TCP with XTLS-Vision and over XHTTP, Hysteria2) and the onion service of the router\'s tor; every profile is a user with a link per transport. Nothing changes on the router until "Save & Apply" or the button that turns the server on or off.'));
 		this.map = m;
 
 		/* Overview */
@@ -593,6 +593,7 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'uuid', 'UUID', _('The profile\'s identifier on the VLESS transports. A random one is filled in for a new profile.'));
+		o.modalonly = true;
 		o.rmempty = false;
 		o.validate = function(section_id, value) {
 			return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim())
@@ -612,6 +613,7 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'password', _('Hysteria2 password'), _('The profile\'s password on the Hysteria2 transport. A random one is filled in for a new profile.'));
+		o.modalonly = true;
 		o.rmempty = false;
 		o.validate = function(section_id, value) {
 			var v = String(value || '');
@@ -954,16 +956,16 @@ return view.extend({
 		};
 
 		o = s.taboption('connection', form.ListValue, 'bridges', _('Bridges'),
-			_('How tor reaches the Tor network.'));
-		o.value('builtin', _('Built-in bridges (snowflake and obfs4; refreshed from bridges.torproject.org when a country is set)'));
+			_('How tor reaches the Tor network. Built-in: the list shipped with the package (obfs4, webtunnel and snowflake bridges), refreshed from bridges.torproject.org when a country is set below.'));
+		o.value('builtin', _('Built-in bridges'));
 		o.value('custom', _('Bridges entered below'));
-		o.value('none', _('No bridges: connect directly'));
+		o.value('none', _('None: connect directly'));
 		o.default = 'builtin';
 
 		o = s.taboption('connection', form.ListValue, 'snowflake', _('Snowflake bridges'),
 			_('Snowflake reaches the Tor network through volunteer proxies found by a broker and keeps trying new proxies, which costs traffic. As the fallback the snowflake lines are added only when tor had no working circuit through the other bridges for 6 minutes while the router has a default route, and held back again after 30 minutes of circuits through the other bridges, 24 hours after they were added, or when the daily bridge update brings a changed list. Checked every 2 minutes through tor\'s control port on 127.0.0.1; every change restarts tor.'));
-		o.value('fallback', _('Only when no other bridge works (saves traffic)'));
-		o.value('always', _('Always, together with the other bridges'));
+		o.value('fallback', _('Only when no other bridge works'));
+		o.value('always', _('Always'));
 		o.value('never', _('Never'));
 		o.default = 'fallback';
 		o.retain = true;

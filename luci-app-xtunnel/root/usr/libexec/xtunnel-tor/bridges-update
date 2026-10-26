@@ -25,7 +25,7 @@ const SYNC    = '/usr/libexec/xtunnel-tor/sync';
 const FALLBACK = `${DIR}/snowflake.on`;             // the snowflake lines are added (see watch)
 const API     = 'https://bridges.torproject.org/moat/circumvention/settings';
 const MAX     = 12;
-const PLUGINS = [ 'obfs4', 'meek_lite', 'snowflake' ];       // the transports of lyrebird (xtunnel-core) tor is given
+const PLUGINS = [ 'obfs4', 'meek_lite', 'webtunnel', 'snowflake' ];   // the transports of lyrebird (xtunnel-core)
 
 // "obfs4 1.2.3.4:443 FP cert=…" -> transport obfs4; "1.2.3.4:443 FP" -> vanilla
 function transport(line) {

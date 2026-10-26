@@ -239,7 +239,7 @@ return view.extend({
 		var m, s, o;
 
 		m = new form.Map(CFG, _('Client'),
-			_('The devices connected to this router reach the Internet through tunnel clients: a profile holds the links of one server (TCP + XTLS-Vision, XHTTP, Hysteria2, and TCP + XTLS-Vision and XHTTP through Tor, as the server page shows them), every link is a client, and one of them is active, by hand or by the measured speed. The traffic of the LAN is split by a list of domains and subnets; nothing of it bypasses the clients (kill switch) and IPv6 is switched off for the LAN while the client is on. Nothing changes on the router until you click "Save & Apply" or the button that turns the client on or off.'));
+			_('The LAN reaches the Internet through the links of the profiles below (the links of one server per profile); one link is active, by hand or by the measured speed, and the list of the split tunnelling decides what goes through it. Nothing changes on the router until "Save & Apply" or the button that turns the client on or off.'));
 		this.map = m;
 
 		/* Overview */
@@ -269,14 +269,14 @@ return view.extend({
 
 		/* Links */
 		s = m.section(form.NamedSection, 'main', CFG, _('Links'),
-			_('Every link of the profiles below. The speed is a download of the test payload through each link, one link after the other (by default from the server\'s own site through the tunnel, https://127.0.0.1/cgi-bin/speed, served by the site of the Dynamic DNS page of the server router; a profile may name another URL, whose download is cut off after the test size); the latency is the time to the first byte.'));
+			_('The speed is a download of the test payload through each link, one after the other (by default from the server\'s own site through the tunnel, https://127.0.0.1/cgi-bin/speed; a profile may name another URL), the latency the time to the first byte.'));
 		common.shownWhile(s, '_links', function() { return self.links().length > 0; });
 		o = s.option(form.DummyValue, '_clients', _('Links'));
 		o.renderWidget = function() { return E('div', { 'id': 'tcl-clients' }, self.clientsTable()); };
 
 		/* Profiles */
 		s = m.section(form.GridSection, 'profile', _('Profiles'),
-			_('A profile holds the links of one server: one per transport, and with "Through Tor" the links through the onion address of the server with the key of its onion service. Paste them from "Links" next to a profile on the Server page of the server router (the links through Tor and the Tor key are there too; its "Copy all" gives every one of them for "All links at once" in the dialog of the profile).'));
+			_('A profile holds the links of one server, one per transport; "Through Tor" adds its links through the onion address of the server. They come from "Links" of the profile on the Server page of that router ("Copy all" there, "All links at once" in the dialog here).'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.nodescriptions = true;
@@ -417,7 +417,7 @@ return view.extend({
 		s.tab('tor', _('Tor without a server'));
 
 		o = s.taboption('choice', form.ListValue, 'mode', _('Choice of the link'));
-		o.value('auto', _('Automatic: the fastest of all links by the measurements'));
+		o.value('auto', _('Automatic: the fastest link'));
 		o.value('manual', _('By hand'));
 		o.default = 'auto';
 
