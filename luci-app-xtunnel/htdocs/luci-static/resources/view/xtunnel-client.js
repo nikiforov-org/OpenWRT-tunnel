@@ -437,9 +437,9 @@ return view.extend({
 		o.placeholder = '2000000';
 		o.rmempty = false;
 
-		o = s.taboption('choice', form.Value, 'test_threshold', _('Switch when faster by, %'), _('Automatic mode: another link replaces the active one only when it is faster by at least this much; a failed active link is replaced at once.'));
+		o = s.taboption('choice', form.Value, 'test_threshold', _('Switch when faster by, %'), _('Automatic mode. 0: the fastest link of every measurement is active. A larger value: another link replaces the active one only when it is faster by at least this much. A failed active link is replaced at once.'));
 		o.datatype = 'range(0,1000)';
-		o.placeholder = '20';
+		o.placeholder = '0';
 		o.rmempty = false;
 
 		o = s.taboption('choice', form.Value, 'test_timeout', _('Test timeout, seconds'));

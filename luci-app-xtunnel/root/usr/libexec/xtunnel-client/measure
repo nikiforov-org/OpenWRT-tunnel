@@ -8,7 +8,7 @@
 //   (none)   from cron: only in the automatic mode with two links or more, and not while the route
 //            to the Internet goes through an interface of the "metered" list (only this periodic
 //            measurement is held there); the fastest link
-//            becomes active when it beats the current one by the threshold, or at once when the
+//            becomes active (with a threshold set, only when it beats the current one by that much), or at once when the
 //            current one failed
 //   now      the same at once, in every mode and on every uplink (the page's button); a link chosen
 //            by hand stays
@@ -130,7 +130,7 @@ function name(tag) { return names[tag] ?? (tag || 'none'); }
 
 let bytes = int(main.test_bytes ?? 2000000); if (bytes < 10000) bytes = 10000; if (bytes > 20000000) bytes = 20000000;
 let timeout = int(main.test_timeout ?? 15); if (timeout < 5) timeout = 5;
-let threshold = int(main.test_threshold ?? 20); if (threshold < 0) threshold = 0;
+let threshold = int(main.test_threshold ?? 0); if (threshold < 0) threshold = 0;   // 0: the fastest link, always
 let active = active_link(inst, st);
 
 function switch_to(tag, reason) {
@@ -184,7 +184,7 @@ if (auto) {
 	let cur = results[active] ?? null;
 	if (best == null) decision = 'no link answered; nothing changed';
 	else if (!cur || !cur.ok) { decision = `${name(active)} failed, ${name(best)} is the fastest`; switched = best; }
-	else if (best != active && results[best].speed > cur.speed * (100 + threshold) / 100) { decision = `${name(best)} is more than ${threshold}% faster than ${name(active)}`; switched = best; }
+	else if (best != active && results[best].speed > cur.speed * (100 + threshold) / 100) { decision = threshold ? `${name(best)} is more than ${threshold}% faster than ${name(active)}` : `${name(best)} is the fastest`; switched = best; }
 	else decision = (best == active) ? `${name(active)} stays, the fastest` : `${name(active)} stays, ${name(best)} is faster by less than ${threshold}%`;
 	if (switched && switched != active) {
 		if (!switch_to(switched, decision)) decision += ' (switching failed)';

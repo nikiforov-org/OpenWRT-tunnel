@@ -462,8 +462,8 @@ the server's.
 - **The active link.** *By hand*: strictly the chosen profile and transport, even when it
   fails. *Automatic* with two links or more: every N minutes (60 by default) the test payload
   (2 MB by default) is downloaded through every link of every profile, one link after the
-  other; the fastest replaces the active one when it is faster by the threshold (20 %), or at
-  once when the active one failed. Every minute the active link gets a small request (a HEAD
+  other; the fastest becomes active (with **Switch when faster by** set, only when it is faster
+  than the active one by that much), and at once when the active one failed. Every minute the active link gets a small request (a HEAD
   request to its test URL, or one byte from the server's site, about 12 KB with the
   handshakes); when it does not answer, the other links get the same request and the one that
   answers first becomes active. By hand or with a single link nothing runs on its own (**Measure
