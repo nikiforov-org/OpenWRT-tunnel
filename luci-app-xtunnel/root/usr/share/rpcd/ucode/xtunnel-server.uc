@@ -122,8 +122,8 @@ methods.pubkey = {
 };
 
 // the links of a profile: one per enabled transport, and while the onion service (section "tor")
-// is on, one through Tor per VLESS transport whose port it has (to the onion address, at the
-// transport's own port) and the profile's Tor key; a transport that cannot give a working link is
+// is on, one through Tor (TCP + XTLS-Vision to the onion address, at that transport's port, which the
+// onion service has to pass) and the profile's Tor key; a transport that cannot give a working link is
 // listed with the reason instead
 methods.links = {
 	args: { profile: '' },
@@ -185,18 +185,17 @@ methods.links = {
 				link: link
 			});
 		}
-		// through Tor: to the onion address at the transport's own port (the onion service passes each
-		// of its ports to the same port of the router); Tor carries no UDP, so not for Hysteria2
-		for (let t in [ [ 'vision', vision, main.vision_port, 'TCP + Vision through Tor', `flow=xtls-rprx-vision&type=tcp&headerType=none#${urlencode(name + '-tor')}` ],
-		                [ 'xhttp', xhttp, main.xhttp_port, 'XHTTP through Tor', `type=xhttp&path=${urlencode(main.xhttp_path || '/')}&mode=${urlencode(main.xhttp_mode || 'auto')}&core=xray#${urlencode(name + '-xhttp-tor')}` ] ]) {
-			if (!onion || !t[1]) continue;
-			let port = `${int(t[2])}`;
-			let no = why || (!length(onion.address) ? 'the onion address is not known yet: tor starts the onion service'
+		// through Tor: the TCP + Vision link to the onion address at that transport's port (the onion service
+		// passes each of its ports to the same port of the router); Tor carries no UDP, so not Hysteria2
+		if (onion) {
+			let port = `${int(main.vision_port)}`;
+			let no = why || (!vision ? 'the TCP + XTLS-Vision transport is off: the link through Tor uses it'
+				: !length(onion.address) ? 'the onion address is not known yet: tor starts the onion service'
 				: (index(onion.ports, port) < 0) ? `port ${port} is not among the ports of the onion service (section Tor, tab Onion service)` : '');
-			push(links, no ? { transport: `${t[0]}_tor`, title: t[3], error: no } : {
-				transport: `${t[0]}_tor`, title: t[3],
-				note: 'Through the onion address of this router, without a public address: for XTunnel → Client of another router (the field of this transport through Tor, with the line of "Tor key") or for a client app behind a local tor.',
-				link: `vless://${p.uuid}@${onion.address}:${port}?${common}&${t[4]}`
+			push(links, no ? { transport: 'tor', title: 'through Tor', error: no } : {
+				transport: 'tor', title: 'through Tor',
+				note: 'Through the onion address of this router, without a public address: for XTunnel → Client of another router (the field "Link through Tor", with the line of "Tor key") or for a client app behind a local tor.',
+				link: `vless://${p.uuid}@${onion.address}:${port}?${common}&flow=xtls-rprx-vision&type=tcp&headerType=none#${urlencode(name + '-tor')}`
 			});
 		}
 		// the Tor key of the profile: what Tor Browser, a tor daemon or XTunnel → Client of another router

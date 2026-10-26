@@ -19,10 +19,10 @@ var callRestart       = rpc.declare({ object: CFG, method: 'restart', expect: {}
 
 var COLOR = common.COLOR, span = common.span, timeAgo = common.timeAgo;
 var DIRECT = [ 'vision', 'xhttp', 'hysteria2' ];
-var VIA_TOR = [ 'vision_tor', 'xhttp_tor' ];
+var VIA_TOR = [ 'vision_tor' ];        /* the link through Tor: TCP + Vision to the onion address */
 var PROTOCOLS = DIRECT.concat(VIA_TOR);
 var TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
-               vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'Tor without a server' };
+               vision_tor: 'through Tor', tor: 'Tor without a server' };
 
 function speedText(bps) {
 	if (!bps) return '—';
@@ -96,7 +96,7 @@ return view.extend({
 	overviewTor: function() {
 		var t = this.status.tor || {};
 		if (!t.used)
-			return span(COLOR.dim, _('not used (no links through Tor in effect)'));
+			return span(COLOR.dim, _('not used (no link through Tor in effect)'));
 		if (!t.running)
 			return span(COLOR.bad, _('The router\'s tor is not running, so the links through Tor do not work (its settings: XTunnel → Server, section Tor).'));
 		return span(COLOR.ok, _('The links through Tor go through the router\'s tor (SOCKS %s)').format(t.socks) +
@@ -276,7 +276,7 @@ return view.extend({
 
 		/* Profiles */
 		s = m.section(form.GridSection, 'profile', _('Profiles'),
-			_('A profile holds the links of one server, one per transport; "Through Tor" adds its links through the onion address of the server. They come from "Links" of the profile on the Server page of that router ("Copy all" there, "All links at once" in the dialog here).'));
+			_('A profile holds the links of one server, one per transport; "Through Tor" adds its link through the onion address of the server. They come from "Links" of the profile on the Server page of that router ("Copy all" there, "All links at once" in the dialog here).'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.nodescriptions = true;
@@ -308,8 +308,8 @@ return view.extend({
 				var tor = /\.onion$/i.test(p[2]);
 				var t = (p[1] == 'hysteria2' || p[1] == 'hy2') ? 'hysteria2'
 					: (p[1] != 'vless') ? null : /[?&]type=(xhttp|splithttp)(&|#|$)/.test(v) ? 'xhttp' : 'vision';
-				if (!t || (tor && t == 'hysteria2')) return;
-				set[tor ? t + '_tor' : t] = v;
+				if (!t || (tor && t != 'vision')) return;
+				set[tor ? 'vision_tor' : t] = v;
 				if (!name && (m = /#([^#]+)$/.exec(v))) name = decodeURIComponent(m[1]).replace(/(-xhttp)?(-hysteria2)?(-tor)?$/, '');
 			});
 			if (!Object.keys(set).length) {
@@ -317,7 +317,7 @@ return view.extend({
 				return;
 			}
 			PROTOCOLS.concat([ 'tor_key' ]).forEach(function(n) { var el = get(n); if (el && set[n]) { el.setValue(set[n]); el.triggerValidation(); } });
-			if (set.vision_tor || set.xhttp_tor) { var t = get('tor'); if (t) t.setValue('1'); }
+			if (set.vision_tor) { var t = get('tor'); if (t) t.setValue('1'); }
 			var nm = get('name');
 			if (nm && name && !String(nm.getValue() || '').trim()) { nm.setValue(name); nm.triggerValidation(); }
 			get('_paste').setValue('');
@@ -356,7 +356,7 @@ return view.extend({
 			}
 		};
 		var linkField = function(p, description) {
-			o = s.option(form.Value, p, _('%s link').format(TITLES[p]), description);
+			o = s.option(form.Value, p, (p == 'vision_tor') ? _('Link through Tor') : _('%s link').format(TITLES[p]), description);
 			o.modalonly = true;
 			o.rmempty = true;
 			o.placeholder = (p == 'hysteria2') ? 'hysteria2://…' : 'vless://…';
@@ -375,11 +375,11 @@ return view.extend({
 		DIRECT.forEach(function(p) { linkField(p, _('Empty: no link for this transport.')); });
 
 		o = s.option(form.Flag, 'tor', _('Through Tor'),
-			_('The links through Tor go through this router\'s tor (its SOCKS port 127.0.0.1:9050) to the onion address of the server and take part in the choice like the other links. tor runs while they are in use, with the connection settings of XTunnel → Server (section Tor). Tor carries TCP only, so Hysteria2 has no link through Tor. Off: the links through Tor are kept but not used.'));
+			_('The link through Tor goes through this router\'s tor (its SOCKS port 127.0.0.1:9050) to the onion address of the server and takes part in the choice like the other links. tor runs while it is in use, with the connection settings of XTunnel → Server (section Tor). Off: the link is kept but not used.'));
 		o.default = '0';
 		o.editable = true;
 
-		VIA_TOR.forEach(function(p) { linkField(p, _('The link through Tor from the server page: to its onion address. Empty: none.')); });
+		VIA_TOR.forEach(function(p) { linkField(p, _('The link "through Tor" from the server page: TCP + Vision to its onion address. Empty: none.')); });
 
 		o = s.option(form.Value, 'tor_key', _('Onion service key'),
 			_('The line of the Tor key from "Links" of the profile on the Server page of the server router (address:descriptor:x25519:key): its onion service lets in only clients with a key. A new or changed key restarts the tor of this router.'));

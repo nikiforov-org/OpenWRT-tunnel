@@ -1,6 +1,6 @@
 'use strict';
 // Shared helpers of the client part of luci-app-xtunnel: the links of a profile (one per transport of the
-// server page: TCP + XTLS-Vision, XHTTP, Hysteria2, and the VLESS ones through Tor) into xray
+// server page: TCP + XTLS-Vision, XHTTP, Hysteria2, and the one through Tor) into xray
 // outbounds, the running xray and its active link, the uplink, IPv4 subnets.
 //   import { PROTOCOLS, link_outbound } from 'xtunnel-client.common';
 
@@ -13,9 +13,9 @@ const TOR = '/usr/sbin/tor';
 
 export const RUN = '/tmp/xtunnel-client';
 export const ACTIVE = `${RUN}/active`;          // "TAG PID": the link select applied to that xray process
-export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2', 'vision_tor', 'xhttp_tor' ];
+export const PROTOCOLS = [ 'vision', 'xhttp', 'hysteria2', 'vision_tor' ];   // vision_tor: the link through Tor
 export const TITLES = { vision: 'TCP + Vision', xhttp: 'XHTTP', hysteria2: 'Hysteria2',
-                        vision_tor: 'TCP + Vision through Tor', xhttp_tor: 'XHTTP through Tor', tor: 'Tor without a server' };
+                        vision_tor: 'through Tor', tor: 'Tor without a server' };
 // the outbound "tor": the SOCKS port of the router's tor (tor's default: the stock torrc sets none). The links
 // through Tor are dialed through it (sockopt.dialerProxy); the link "Tor without a server" (main.tor_exit) is
 // this outbound itself, the LAN out of the exit relays of the Tor network
@@ -189,7 +189,7 @@ export function link_outbound(protocol, link) {
 		let o = hysteria2(p);
 		return o.error ? o : { outbound: o.outbound, host: p.host, port: p.port, tor: false };
 	}
-	let tor = (protocol in [ 'vision_tor', 'xhttp_tor' ]);
+	let tor = (protocol == 'vision_tor');
 	if (!p || p.scheme != 'vless') return { error: 'not a vless:// link' };
 	if (!tor && is_onion(p.host)) return { error: 'an .onion address is reached only through Tor: this link belongs in the field through Tor' };
 	if (tor && is_onion(p.host) && !match(lc(p.host), /^[a-z2-7]{56}\.onion$/))
@@ -205,7 +205,7 @@ export function link_outbound(protocol, link) {
 
 // every link of the profiles: { tag, profile, profile_name, protocol, title, enabled, tor, tor_on,
 // server_host, server_port, test_url, outbound | error }; the tag is "<profile section>-<protocol>", for
-// a link through Tor "<profile section>-tor_<transport>": the balancer of the active link selects every
+// the link through Tor "<profile section>-tor": the balancer of the active link selects every
 // outbound whose tag starts with its selector, so no tag may start with another.
 // A link through Tor (tor) is used while its profile has "Through Tor" on (tor_on); without tor on
 // the router such a link is marked with the reason.
@@ -219,7 +219,7 @@ export function profile_links(uci) {
 			let o = link_outbound(proto, link), tor = (index(proto, '_tor') > 0);
 			if (tor && on && tor_on && !o.error && !have_tor)
 				o.error = 'tor is not installed on this router (/usr/sbin/tor of the package xtunnel-core)';
-			push(out, { tag: tor ? `${sid}-tor_${replace(proto, /_tor$/, '')}` : `${sid}-${proto}`, profile: sid, profile_name: name, protocol: proto, title: TITLES[proto],
+			push(out, { tag: tor ? `${sid}-tor` : `${sid}-${proto}`, profile: sid, profile_name: name, protocol: proto, title: TITLES[proto],
 			            enabled: on, tor: tor, tor_on: tor_on, server_host: o.host ?? '', server_port: o.port ?? 0,
 			            test_url: trim(s.test_url ?? ''), outbound: o.outbound, error: o.error ?? '' });
 		}
