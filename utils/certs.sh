@@ -1,23 +1,20 @@
 #!/bin/sh
-# certs.sh DEVICE save|restore [HOST]: the router's certificates and onion service keys in the
-# directory config/devices/DEVICE/ of the repository (gitignored), as plain files under the paths they
-# have on the router:
+# certs.sh DEVICE save|restore HOST: the router's certificates in the directory config/devices/DEVICE/ of
+# the repository (gitignored), as plain files under the paths they have on the router:
 #   etc/xtunnel-ddns/acme  uacme's account key and its copy of every certificate
 #   etc/ssl/xtunnel-ddns   the installed certificates (the web server, Hysteria2)
-#   etc/tor/xtunnel-tor    the onion service's keys (its address) and the authorized clients
 # save     replaces these directories in config/devices/DEVICE/ with the router's current ones; no older
 #          copy is kept (one the router does not have keeps its saved copy)
-# restore  puts them back on the router (owners and modes as the packages create them)
-# HOST: the router's SSH address, for a DEV check on its LAN, or docker:NAME for a stage container
-# (utils/stage); without HOST the router is reached over Tor (utils/tor-client/tor-client DEVICE,
-# settings in config/devices/DEVICE/.env).
+# restore  puts them back on the router (owners and modes as the package creates them)
+# HOST: the router's SSH address (its LAN address, or the address and port of a reverse access port of
+# another router: HOST=192.168.123.123 PORT=22001), or docker:NAME for a stage container (utils/stage).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PATHS="etc/xtunnel-ddns/acme etc/ssl/xtunnel-ddns etc/tor/xtunnel-tor"
+PATHS="etc/xtunnel-ddns/acme etc/ssl/xtunnel-ddns"
 
 die() { echo "certs.sh: $*" >&2; exit 1; }
-[ $# -ge 2 ] || die "usage: certs.sh DEVICE save|restore [HOST]"
-DEVICE=$1 OP=$2 HOST=${3:-}
+[ $# -ge 3 ] || die "usage: certs.sh DEVICE save|restore HOST"
+DEVICE=$1 OP=$2 HOST=$3
 case "$DEVICE" in *[!A-Za-z0-9_.-]*|.*|'') die "invalid device name: $DEVICE" ;; esac
 DIR="$ROOT/config/devices/$DEVICE"
 [ -r "$DIR/.env" ] || die "no $DIR/.env"
@@ -28,10 +25,8 @@ ALIAS=$(. "$DIR/.env"; echo "${SSH_HOST_KEY_ALIAS:-}")   # the name its host key
 run() {
 	if [ "${HOST#docker:}" != "$HOST" ]; then
 		docker exec -i "${HOST#docker:}" sh -c "$1"
-	elif [ -n "$HOST" ]; then
-		ssh -o BatchMode=yes ${ALIAS:+-o HostKeyAlias="$ALIAS"} ${SSH_KEY:+-i "$SSH_KEY"} "root@$HOST" "$1"
 	else
-		"$ROOT/utils/tor-client/tor-client" "$DEVICE" "$1"
+		ssh -o BatchMode=yes ${PORT:+-p "$PORT"} ${ALIAS:+-o HostKeyAlias="$ALIAS"} ${SSH_KEY:+-i "$SSH_KEY"} "root@$HOST" "$1"
 	fi
 }
 
@@ -53,19 +48,11 @@ save)
 		[ -r "$c" ] || continue
 		printf '  %s: %s\n' "$(basename "$(dirname "$c")")" "$(openssl x509 -in "$c" -noout -enddate -issuer 2>/dev/null | tr '\n' ' ')"
 	done
-	[ -r "$DIR/etc/tor/xtunnel-tor/hostname" ] && echo "  onion service keys: etc/tor/xtunnel-tor"
 	;;
 restore)
-	# the onion service keys only where the tor package is installed: the directory belongs to its user
-	tor=$(run 'id tor >/dev/null 2>&1 && echo yes')
 	present=""
 	for p in $PATHS; do
-		[ -e "$DIR/$p" ] || continue
-		if [ "$p" = etc/tor/xtunnel-tor ] && [ "$tor" != yes ]; then
-			echo "onion service keys skipped: the router has no tor user (install luci-app-xtunnel, then restore again)"
-			continue
-		fi
-		present="$present $p"
+		[ -e "$DIR/$p" ] && present="$present $p"
 	done
 	[ -n "$present" ] || die "nothing to restore from $DIR"
 	# COPYFILE_DISABLE: no AppleDouble entries from macOS tar
@@ -77,10 +64,8 @@ restore)
 		{ [ ! -d /etc/ssl/xtunnel-ddns ] || { chown -R root:root /etc/ssl/xtunnel-ddns
 			find /etc/ssl/xtunnel-ddns -type d -exec chmod 700 {} \; ; find /etc/ssl/xtunnel-ddns -type f -exec chmod 600 {} \;
 			find /etc/ssl/xtunnel-ddns -name fullchain.pem -exec chmod 644 {} \; ; }; } &&
-		{ [ ! -d /etc/tor/xtunnel-tor ] || ! id tor >/dev/null 2>&1 || { chown -R tor:tor /etc/tor/xtunnel-tor
-			find /etc/tor/xtunnel-tor -type d -exec chmod 700 {} \; ; find /etc/tor/xtunnel-tor -type f -exec chmod 600 {} \; ; }; } &&
 		{ ls /etc/ssl/xtunnel-ddns 2>/dev/null || true; }' || die "restore failed"
 	echo "restored:$present"
 	;;
-*) die "usage: certs.sh DEVICE save|restore [HOST]" ;;
+*) die "usage: certs.sh DEVICE save|restore HOST" ;;
 esac

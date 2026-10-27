@@ -1,12 +1,11 @@
 #!/usr/bin/env ucode
 // xtunnel-client sync: make the system match /etc/config/xtunnel-client. Every link of an enabled
-// profile (TCP + XTLS-Vision, XHTTP, Hysteria2, and with "Through Tor" on the VLESS links through the
-// router's tor) is a client: an xray outbound.
+// profile (TCP + XTLS-Vision, XHTTP, Hysteria2) is a client: an xray outbound.
 //   sync          apply: the xray configuration (interception of the LAN, the lists, DNS, the active
-//                 client), the nftables rules and the set of the listed subnets (fw4 includes), the
-//                 mark routing (netifd), the kill switch (no lan -> wan forwarding), IPv6 off for the
-//                 LAN, dnsmasq through xray, cron (the client keys of onion services go to tor with
-//                 the Tor part, /usr/libexec/xtunnel-tor/sync)
+//                 client, the reverse access and the local ports of the profiles), and with the LAN
+//                 through the client (main.lan) the nftables rules and the set of the listed subnets
+//                 (fw4 includes), the mark routing (netifd), the kill switch (no lan -> wan
+//                 forwarding), IPv6 off for the LAN, dnsmasq through xray; cron
 //   sync revert   undo everything (package removal)
 // The configuration file is replaced only after "xray run -test" accepts it; an error keeps the file
 // in effect and shows the reason on the page.
@@ -15,8 +14,8 @@
 
 import { access, readfile, writefile, mkdir, unlink, chmod, lsdir, readlink, symlink } from 'fs';
 import { cursor } from 'uci';
-import { XRAY, shq, exec, log, list, flag, read_json, url_parts, lock, ubus, uset, not_applied, cron_daily, set_cron, write_xray, spawn } from 'xtunnel.common';
-import { RUN, cidr, TOR_OUTBOUND, profile_links, in_use, onion_keys } from 'xtunnel-client.common';
+import { XRAY, shq, exec, log, list, flag, read_json, url_parts, lock, ubus, uset, not_applied, cron_daily, set_cron, write_xray, spawn, cidr, reverse_domain, port_entry, allow_entry, REVERSE_ALLOW } from 'xtunnel.common';
+import { RUN, profile_links, in_use } from 'xtunnel-client.common';
 
 const CFG      = 'xtunnel-client';
 const DIR      = '/etc/xtunnel-client';
@@ -114,6 +113,37 @@ function sources_info(uci) {
 	return out;
 }
 
+// the reverse access and the local ports of the enabled profiles: { sid, reverse: { domain, allow } | null,
+// forward: [ { port, host, target_port } ], error }. The channel of the reverse access is named after the
+// UUID of the profile's VLESS link (the server's router derives the same name from its profile).
+function access_of(uci, links) {
+	let out = [], seen = {};
+	uci.foreach(CFG, 'profile', function(s) {
+		if (s.enabled == '0') return;
+		let sid = s['.name'], p = { sid: sid, reverse: null, forward: [], error: '' };
+		if (s.reverse == '1') {
+			let uuid = '';
+			for (let l in links)
+				if (l.profile == sid && !l.error && l.outbound?.protocol == 'vless') { uuid = l.outbound.settings.vnext[0].users[0].id; break; }
+			if (!uuid) p.error = 'the reverse access needs a VLESS link (TCP + Vision or XHTTP) of the profile';
+			else {
+				let allow = filter(map(list(s.reverse_allow), allow_entry), x => x != null);
+				if (!length(allow)) allow = filter(map(REVERSE_ALLOW, allow_entry), x => x != null);
+				p.reverse = { domain: reverse_domain(uuid), allow: allow };
+			}
+		}
+		for (let e in list(s.forward)) {
+			let f = port_entry(e);
+			if (!f) continue;
+			if (seen[f.port] || (f.port >= 61000 && f.port <= 61299)) { p.error = `local port ${f.port} is used twice or is one of this client's own ports`; continue; }
+			seen[f.port] = true;
+			push(p.forward, f);
+		}
+		push(out, p);
+	});
+	return out;
+}
+
 // the speed test target of a client: its own URL, or the server's site through the tunnel
 function test_target(url) {
 	let u = url_parts(url);
@@ -142,7 +172,7 @@ function read_lines(path, into, seen, norm) {
 // The listed subnets go to an nftables set (in the kernel about a quarter of the memory xray needs
 // for them as routing rules): the LAN's connections to them reach xray on their own inbound,
 // "lan-listed", and are routed by it. Lists of .dat files stay in xray (ext:<file>:<tag>).
-function build(main, clients, sources, resolvers) {
+function build(main, lan, clients, profiles, sources, resolvers) {
 	let by_list = flag(main.split, true), except = (main.split_mode == 'except');
 	let resolver = trim(main.resolver ?? '') || '1.1.1.1';
 	let isp = length(resolvers) ? resolvers : [ resolver ];
@@ -176,26 +206,26 @@ function build(main, clients, sources, resolvers) {
 	// the domain of a connection is sniffed only for the domain rules of the list: sniffing waits for the
 	// client's first data, which a protocol where the server speaks first (SSH, SMTP) only sends later
 	let sniff = by_list && length(domains) > 0;
-	let inbounds = [
-		{ tag: 'lan', listen: '0.0.0.0', port: TPROXY_PORT, protocol: 'dokodemo-door',
-		  settings: { network: 'tcp,udp', followRedirect: true }, streamSettings: { sockopt: { tproxy: 'tproxy' } },
-		  sniffing: sniff ? { enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: true } : { enabled: false } },
-		{ tag: 'dns-in', listen: '127.0.0.1', port: DNS_PORT, protocol: 'dokodemo-door', settings: { address: isp[0], port: 53, network: 'tcp,udp' } }
-	];
-	if (length(listed))
-		push(inbounds, { tag: 'lan-listed', listen: '0.0.0.0', port: LISTED_PORT, protocol: 'dokodemo-door',
-		                 settings: { network: 'tcp,udp', followRedirect: true }, streamSettings: { sockopt: { tproxy: 'tproxy' } } });
+	let inbounds = [];
+	if (lan) {
+		push(inbounds,
+			{ tag: 'lan', listen: '0.0.0.0', port: TPROXY_PORT, protocol: 'dokodemo-door',
+			  settings: { network: 'tcp,udp', followRedirect: true }, streamSettings: { sockopt: { tproxy: 'tproxy' } },
+			  sniffing: sniff ? { enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: true } : { enabled: false } },
+			{ tag: 'dns-in', listen: '127.0.0.1', port: DNS_PORT, protocol: 'dokodemo-door', settings: { address: isp[0], port: 53, network: 'tcp,udp' } });
+		if (length(listed))
+			push(inbounds, { tag: 'lan-listed', listen: '0.0.0.0', port: LISTED_PORT, protocol: 'dokodemo-door',
+			                 settings: { network: 'tcp,udp', followRedirect: true }, streamSettings: { sockopt: { tproxy: 'tproxy' } } });
+	}
+	else listed = [];
 	let outbounds = [ { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }, { tag: 'dns-out', protocol: 'dns' } ];
-	// the links through Tor are dialed through it (sockopt.dialerProxy "tor"); tor resolves the names
-	if (length(filter(clients, c => c.tor)))
-		push(outbounds, TOR_OUTBOUND);
 	let rules = [], detail = [], n = 0;
 	for (let c in clients) {
-		if (c.tag != TOR_OUTBOUND.tag) push(outbounds, { ...c.outbound, tag: c.tag });
+		push(outbounds, { ...c.outbound, tag: c.tag });
 		let t = test_target(c.test_url), tap = TAP_BASE + (++n);
 		push(inbounds, { tag: `tap-${c.tag}`, listen: '127.0.0.1', port: tap, protocol: 'dokodemo-door', settings: { address: t.host, port: t.port, network: 'tcp' } });
 		push(rules, { type: 'field', inboundTag: [ `tap-${c.tag}` ], outboundTag: c.tag });
-		push(detail, { tag: c.tag, profile: c.profile, profile_name: c.profile_name, protocol: c.protocol, title: c.title, tor: c.tor,
+		push(detail, { tag: c.tag, profile: c.profile, profile_name: c.profile_name, protocol: c.protocol, title: c.title,
 		               server_host: c.server_host, server_port: c.server_port, test_url: t.url, tap_port: tap });
 	}
 	// the hosts of the list sources: downloads go through the active client
@@ -208,29 +238,58 @@ function build(main, clients, sources, resolvers) {
 		push(inbounds, { tag: `src-${m}`, listen: '127.0.0.1', port: tap, protocol: 'dokodemo-door', settings: { address: u.host, port: u.port, network: 'tcp' } });
 		push(rules, { type: 'field', inboundTag: [ `src-${m}` ], ...(have ? { balancerTag: 'active' } : { outboundTag: 'direct' }) });
 	}
-	push(rules,
-		{ type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' },
-		{ type: 'field', inboundTag: [ 'dns-internal' ], ip: [ resolver ], ...to_tunnel },
-		{ type: 'field', inboundTag: [ 'dns-internal' ], outboundTag: 'direct' },
-		{ type: 'field', inboundTag: length(listed) ? [ 'lan', 'lan-listed' ] : [ 'lan' ], ip: PRIVATE, outboundTag: 'direct' });
-	if (by_list) {
-		let via = except ? { outboundTag: 'direct' } : to_tunnel;
-		if (length(listed)) push(rules, { type: 'field', inboundTag: [ 'lan-listed' ], ...via });
-		if (length(domains)) push(rules, { type: 'field', inboundTag: [ 'lan' ], domain: domains, ...via });
-		if (length(ext_ips)) push(rules, { type: 'field', inboundTag: [ 'lan' ], ip: ext_ips, ...via });
-		push(rules, { type: 'field', inboundTag: [ 'lan' ], ...(except ? to_tunnel : { outboundTag: 'direct' }) });
+	// the reverse access and the local ports of the profiles go through the profile's links: the
+	// balancer of the active link while that link is one of the profile's, else its first link
+	let via_of = function(sid) {
+		let own = filter(clients, c => c.profile == sid);
+		if (!length(own)) return null;
+		return length(filter(own, c => c.tag == active)) ? { balancerTag: 'active' } : { outboundTag: own[0].tag };
+	};
+	let bridges = [], access = [];
+	for (let p in profiles) {
+		let via = via_of(p.sid), a = { profile: p.sid, reverse: null, forward: [], error: p.error };
+		if (via && p.reverse) {
+			let tag = `bridge-${p.sid}`;
+			push(bridges, { tag: tag, domain: p.reverse.domain });
+			push(rules, { type: 'field', inboundTag: [ tag ], domain: [ `full:${p.reverse.domain}` ], ...via });
+			for (let x in p.reverse.allow)
+				push(rules, { type: 'field', inboundTag: [ tag ], ip: [ x.ip ], port: x.port, outboundTag: 'direct' });
+			push(rules, { type: 'field', inboundTag: [ tag ], outboundTag: 'block' });
+			a.reverse = { domain: p.reverse.domain, allow: map(p.reverse.allow, x => `${x.ip}:${x.port}`) };
+		}
+		let k = 0;
+		for (let f in (via ? p.forward : [])) {
+			let tag = `fwd-${p.sid}-${++k}`;
+			push(inbounds, { tag: tag, listen: '0.0.0.0', port: f.port, protocol: 'dokodemo-door', settings: { address: f.host, port: f.target_port, network: 'tcp' } });
+			push(rules, { type: 'field', inboundTag: [ tag ], ...via });
+			push(a.forward, { port: f.port, target: `${f.host}:${f.target_port}` });
+		}
+		if (!via && (p.reverse || length(p.forward))) a.error = 'the profile has no link in use';
+		push(access, a);
 	}
-	else push(rules, { type: 'field', inboundTag: [ 'lan' ], ...to_tunnel });
+	if (lan) {
+		push(rules,
+			{ type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' },
+			{ type: 'field', inboundTag: [ 'dns-internal' ], ip: [ resolver ], ...to_tunnel },
+			{ type: 'field', inboundTag: [ 'dns-internal' ], outboundTag: 'direct' },
+			{ type: 'field', inboundTag: length(listed) ? [ 'lan', 'lan-listed' ] : [ 'lan' ], ip: PRIVATE, outboundTag: 'direct' });
+		if (by_list) {
+			let via = except ? { outboundTag: 'direct' } : to_tunnel;
+			if (length(listed)) push(rules, { type: 'field', inboundTag: [ 'lan-listed' ], ...via });
+			if (length(domains)) push(rules, { type: 'field', inboundTag: [ 'lan' ], domain: domains, ...via });
+			if (length(ext_ips)) push(rules, { type: 'field', inboundTag: [ 'lan' ], ip: ext_ips, ...via });
+			push(rules, { type: 'field', inboundTag: [ 'lan' ], ...(except ? to_tunnel : { outboundTag: 'direct' }) });
+		}
+		else push(rules, { type: 'field', inboundTag: [ 'lan' ], ...to_tunnel });
+	}
 
-	// DNS: the names of the servers always at the provider (those of the links through Tor are
-	// resolved by tor); the listed names through the tunnel (or the unlisted ones in the "except"
-	// mode); without a client everything at the provider
+	// DNS: the names of the servers always at the provider; the listed names through the tunnel (or
+	// the unlisted ones in the "except" mode); without a client everything at the provider
 	let servers = [], names = [];
 	for (let c in clients)
-		if (!c.tor && c.server_host && !match(c.server_host, /^[0-9.]+$/) && index(names, `full:${c.server_host}`) < 0) push(names, `full:${c.server_host}`);
+		if (c.server_host && !match(c.server_host, /^[0-9.]+$/) && index(names, `full:${c.server_host}`) < 0) push(names, `full:${c.server_host}`);
 	if (length(names)) push(servers, { address: isp[0], domains: names, skipFallback: true });
-	// Tor carries TCP only: with the link "through Tor" the resolver of the tunnel is asked over TCP
-	let tunnel_dns = length(filter(clients, c => c.tag == TOR_OUTBOUND.tag)) ? `tcp://${resolver}` : resolver;
+	let tunnel_dns = resolver;
 	if (have && by_list && !except) {
 		if (length(domains)) push(servers, { address: tunnel_dns, domains: domains, skipFallback: true });
 		for (let r in isp) push(servers, r);
@@ -242,18 +301,21 @@ function build(main, clients, sources, resolvers) {
 	else if (have) push(servers, tunnel_dns);
 	else for (let r in isp) push(servers, r);
 
+	let config = {
+		log: { loglevel: 'warning', access: 'none' },
+		// disableFallbackIfMatch: a name that matched a server's list is asked only there (no leak
+		// of a listed name to the provider when the tunnel is down)
+		dns: { tag: 'dns-internal', queryStrategy: 'UseIPv4', disableFallbackIfMatch: true, servers: servers },
+		inbounds: inbounds,
+		outbounds: outbounds,
+		routing: { domainStrategy: 'AsIs', rules: rules, balancers: have ? [ { tag: 'active', selector: [ active ] } ] : [] }
+	};
+	if (length(bridges)) config.reverse = { bridges: bridges };
 	return {
-		config: {
-			log: { loglevel: 'warning', access: 'none' },
-			// disableFallbackIfMatch: a name that matched a server's list is asked only there (no leak
-			// of a listed name to the provider when the tunnel is down)
-			dns: { tag: 'dns-internal', queryStrategy: 'UseIPv4', disableFallbackIfMatch: true, servers: servers },
-			inbounds: inbounds,
-			outbounds: outbounds,
-			routing: { domainStrategy: 'AsIs', rules: rules, balancers: have ? [ { tag: 'active', selector: [ active ] } ] : [] }
-		},
+		config: config,
 		listed: listed,
-		state: { active: active, clients: detail, src_taps: src_taps, own: own, domains: length(domains), ips: length(ips) + length(ext_ips), resolver: resolver, isp: isp }
+		state: { lan: lan, active: active, clients: detail, src_taps: src_taps, own: own, domains: length(domains), ips: length(ips) + length(ext_ips),
+		         resolver: resolver, isp: isp, access: access }
 	};
 }
 
@@ -455,10 +517,10 @@ mkdir(RUN, 0o755);
 unlink(ERROR);
 
 let enabled = (mode == 'apply' && flag(main.enabled, false));
+let lan = flag(main.lan, true);                // the LAN through the client; off: only the reverse access and the local ports
 let backup = backup_read();
 let devs = lan_devices();
 let links = profile_links(uci);
-onion_keys(uci, links);                 // marks the links whose key does not fit; the Tor part writes the keys
 let state = { time: time(), enabled: enabled, lan_devices: devs, active: '', clients: [], src_taps: {},
               own: { domains: 0, ips: 0 }, domains: 0, ips: 0, sources: [], error: '',
               links: map(links, l => { let x = { ...l }; delete x.outbound; return x; }) };
@@ -477,7 +539,7 @@ if (enabled) {
 	}
 	let sources = sources_info(uci);
 	prune_sources(sources);
-	let b = build(main, clients, sources, isp_resolvers());
+	let b = build(main, lan, clients, access_of(uci, links), sources, isp_resolvers());
 	if (write_xray(CFG, ERROR, CONF, b.config, `XRAY_LOCATION_ASSET=${shq(SOURCES)}`)) {
 		state = { ...state, ...b.state, sources: sources };
 		listed = b.listed;
@@ -485,7 +547,7 @@ if (enabled) {
 	else {
 		// the configuration in effect stays, and with it what the measurements and select rely on
 		let prev = read_json(STATE, {});
-		for (let k in [ 'active', 'clients', 'src_taps', 'own', 'domains', 'ips', 'resolver', 'isp' ])
+		for (let k in [ 'lan', 'active', 'clients', 'src_taps', 'own', 'domains', 'ips', 'resolver', 'isp', 'access' ])
 			if (exists(prev, k)) state[k] = prev[k];
 		state.sources = sources;
 		keep_nft = true;
@@ -499,34 +561,36 @@ else {
 	if (access(CONF) == true) { unlink(CONF); log(CFG, 'configuration removed, xray stops'); }
 }
 
+// the system around xray changes only while the LAN goes through the client
+let lan_on = enabled && lan;
 let fw = cursor(); fw.load('firewall');
-let nft = keep_nft ? { file: false, uci: false } : sync_nft(fw, enabled, devs, listed);
-let fwd = sync_forwarding(fw, enabled, backup);
+let nft = keep_nft ? { file: false, uci: false } : sync_nft(fw, lan_on, devs, listed);
+let fwd = sync_forwarding(fw, lan_on, backup);
 if (nft.uci || fwd) fw.commit('firewall');
 if (nft.file || nft.uci || fwd) {
 	system('/etc/init.d/firewall reload >/dev/null 2>&1');
-	log(CFG, enabled ? `firewall: LAN interception on ${join(', ', devs)}${length(listed) ? ', ' + length(listed) + ' listed subnets in the set ' + SET : ''}, lan -> wan forwarding off (kill switch)`
+	log(CFG, lan_on ? `firewall: LAN interception on ${join(', ', devs)}${length(listed) ? ', ' + length(listed) + ' listed subnets in the set ' + SET : ''}, lan -> wan forwarding off (kill switch)`
 	            : 'firewall: interception removed, lan -> wan forwarding back');
 }
 let net = cursor(); net.load('network');
 let dhcp = cursor(); dhcp.load('dhcp');
-let mark = sync_mark_routing(net, enabled);
-let v6 = sync_ipv6(dhcp, net, enabled, backup);
+let mark = sync_mark_routing(net, lan_on);
+let v6 = sync_ipv6(dhcp, net, lan_on, backup);
 if (mark || v6.network) {
 	net.commit('network');
 	system('/etc/init.d/network reload >/dev/null 2>&1');
-	log(CFG, enabled ? 'network: mark routing for the interception, IPv6 off for the LAN' : 'network: mark routing removed, IPv6 settings restored');
+	log(CFG, lan_on ? 'network: mark routing for the interception, IPv6 off for the LAN' : 'network: mark routing removed, IPv6 settings restored');
 }
-let dns = sync_dnsmasq(dhcp, enabled, backup);
+let dns = sync_dnsmasq(dhcp, lan_on, backup);
 if (v6.dhcp || dns) dhcp.commit('dhcp');
 if (v6.dhcp) system('/etc/init.d/odhcpd reload >/dev/null 2>&1');
 if (dns) {
 	system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
-	log(CFG, enabled ? `dnsmasq: upstream is xray (127.0.0.1#${DNS_PORT}); the router itself asks the provider's resolvers` : 'dnsmasq: upstream restored');
+	log(CFG, lan_on ? `dnsmasq: upstream is xray (127.0.0.1#${DNS_PORT}); the router itself asks the provider's resolvers` : 'dnsmasq: upstream restored');
 }
 // with localuse 0 the dnsmasq init leaves /tmp/resolv.conf as it was (its own "127.0.0.1" file
 // after a start with localuse 1); the router's resolver file is the list of the uplinks' resolvers
-if (enabled && readlink('/tmp/resolv.conf') != '/tmp/resolv.conf.d/resolv.conf.auto') {
+if (lan_on && readlink('/tmp/resolv.conf') != '/tmp/resolv.conf.d/resolv.conf.auto') {
 	unlink('/tmp/resolv.conf');
 	symlink('/tmp/resolv.conf.d/resolv.conf.auto', '/tmp/resolv.conf');
 }

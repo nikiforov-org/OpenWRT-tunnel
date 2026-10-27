@@ -13,8 +13,8 @@
 
 import { access, readfile, writefile, mkdir, unlink, rename, stat } from 'fs';
 import { cursor } from 'uci';
-import { shq, exec, log, lock, url_parts, read_json, xray_test } from 'xtunnel.common';
-import { RUN, cidr, instance } from 'xtunnel-client.common';
+import { shq, exec, log, lock, url_parts, read_json, xray_test, cidr } from 'xtunnel.common';
+import { RUN, instance } from 'xtunnel-client.common';
 
 const CFG   = 'xtunnel-client';
 const DIR   = '/etc/xtunnel-client/sources';

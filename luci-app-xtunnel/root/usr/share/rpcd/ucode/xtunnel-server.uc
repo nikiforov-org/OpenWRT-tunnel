@@ -6,7 +6,6 @@ import { XRAY, list, valid_sid, xray_instance, xray_version, x25519, syslog_tail
 import { file_status } from 'xtunnel.x509';
 import { urlencode } from 'xtunnel-ddns.http';
 import { in_effect } from 'xtunnel-ddns.sitecert';
-import { aliases } from 'xtunnel-tor.common';
 import { certificate } from 'xtunnel-server.common';
 
 const CFG   = 'xtunnel-server';
@@ -55,15 +54,6 @@ function ddns_domains(uci) {
 		push(out, { id: s['.name'], hostname: host, has_cert: (c != null && !c.error), expires: c?.expires ?? null, valid: c?.valid ?? false });
 	});
 	return out;
-}
-
-// the onion service (section "tor") while it is switched on: its address ('' until tor created it),
-// its ports (each leads to the same port on the router) and the names for tor clients (MapAddress)
-function onion_service(uci) {
-	if (uci.get(CFG, 'tor', 'enabled') != '1')
-		return null;
-	return { address: trim(readfile('/etc/tor/xtunnel-tor/hostname') ?? ''),
-	         ports: map(list(uci.get(CFG, 'tor', 'port')), p => `${int(p)}`), aliases: aliases(uci.get(CFG, 'tor', 'alias')) };
 }
 
 const methods = {};
@@ -126,9 +116,7 @@ methods.pubkey = {
 	}
 };
 
-// the links of a profile: one per enabled transport, and while the onion service (section "tor")
-// is on, one through Tor per VLESS transport whose port it has (to the onion address, at the
-// transport's own port) and the profile's Tor key; a transport that cannot give a working link is
+// the links of a profile: one per enabled transport; a transport that cannot give a working link is
 // listed with the reason instead
 methods.links = {
 	args: { profile: '' },
@@ -148,10 +136,9 @@ methods.links = {
 		let site = ddns_site(uci);
 		let cert = hy2 ? certificate(main, uci) : null;
 		let host = main.link_host || site?.hostname || ((cert && !cert.error) ? cert.server_name : '');
-		let onion = (vision || xhttp) ? onion_service(uci) : null;
-		if (!host && !length(onion?.address ?? ''))
+		if (!host)
 			return { error: 'Set the address in the links first (section "Clients").' };
-		let nohost = host ? '' : 'no address for the links: set it in the section "Clients"';
+		let nohost = '';
 		let name = p.name || sid;
 		let links = [];
 		let why = '', common = '';
@@ -190,31 +177,7 @@ methods.links = {
 				link: link
 			});
 		}
-		// through Tor: to the onion address at the transport's own port (the onion service passes each
-		// of its ports to the same port of the router); Tor carries no UDP, so not for Hysteria2
-		for (let t in [ [ 'vision', vision, main.vision_port, 'TCP + Vision through Tor', `flow=xtls-rprx-vision&type=tcp&headerType=none#${urlencode(name + '-tor')}` ],
-		                [ 'xhttp', xhttp, main.xhttp_port, 'XHTTP through Tor', `type=xhttp&path=${urlencode(main.xhttp_path || '/')}&mode=${urlencode(main.xhttp_mode || 'auto')}&core=xray#${urlencode(name + '-xhttp-tor')}` ] ]) {
-			if (!onion || !t[1]) continue;
-			let port = `${int(t[2])}`;
-			let no = why || (!length(onion.address) ? 'the onion address is not known yet: tor starts the onion service'
-				: (index(onion.ports, port) < 0) ? `port ${port} is not among the ports of the onion service (section Tor, tab Onion service)` : '');
-			push(links, no ? { transport: `${t[0]}_tor`, title: t[3], error: no } : {
-				transport: `${t[0]}_tor`, title: t[3],
-				note: 'Through the onion address of this router, without a public address: for XTunnel → Client of another router (the field of this transport through Tor, with the line of "Tor key") or for a client app behind a local tor.',
-				link: `vless://${p.uuid}@${onion.address}:${port}?${common}&${t[4]}`
-			});
-		}
-		// the Tor key of the profile: what Tor Browser, a tor daemon or XTunnel → Client of another router
-		// needs for the onion address (its service lets in only the keys of the profiles)
-		let tor = null;
-		if (onion) {
-			let key = trim(p.tor_key ?? '');
-			tor = !match(key, /^[A-Z2-7]{52}$/) ? { error: 'the profile has no Tor key: generate one in its dialog and click Save & Apply' }
-				: !length(onion.address) ? { error: 'the onion address is not known yet: tor starts the service' }
-				: { onion: onion.address, key: key, auth_line: `${replace(onion.address, '.onion', '')}:descriptor:x25519:${key}`,
-				    aliases: onion.aliases, ports: onion.ports, vision_port: (vision && index(onion.ports, `${int(main.vision_port)}`) >= 0) ? `${int(main.vision_port)}` : '' };
-		}
-		return { name: name, host: host, onion: onion?.address ?? '', links: links, tor: tor };
+		return { name: name, host: host, links: links };
 	}
 };
 

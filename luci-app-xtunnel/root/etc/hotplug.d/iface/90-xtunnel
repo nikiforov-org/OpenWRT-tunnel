@@ -5,8 +5,6 @@
 #     settings again (after netifd has written the resolvers of the interfaces still up)
 #   dynamic DNS (a domain on), ifup/ifupdate: the public address may be a new one, the domains are
 #     checked at once instead of at the next run from cron
-#   tor (with this package's file): when the route to the Internet changed, tor closes its connections
-#     bound to the old address and connects again (watch reconnect; one at a time)
 case "$ACTION" in ifup|ifdown|ifupdate) ;; *) exit 0 ;; esac
 wan=0
 for z in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
@@ -19,8 +17,5 @@ if [ "$ACTION" != ifupdate ] && [ "$(uci -q get xtunnel-client.main.enabled)" = 
 fi
 if [ "$ACTION" != ifdown ] && grep -q "# xtunnel-ddns-update" /etc/crontabs/root 2>/dev/null; then
 	( sleep 5; /usr/libexec/xtunnel-ddns/update ) >/dev/null 2>&1 &
-fi
-if [ -e /etc/xtunnel-tor/torrc ]; then
-	( sleep 3; flock /var/lock/xtunnel-tor-uplink /usr/libexec/xtunnel-tor/watch reconnect "uplink $INTERFACE: $ACTION" ) >/dev/null 2>&1 &
 fi
 exit 0

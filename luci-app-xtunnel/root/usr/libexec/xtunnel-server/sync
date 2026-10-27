@@ -3,7 +3,9 @@
 //   sync          write the xray configuration and the firewall rules (idempotent)
 //   sync revert   remove everything the package configured (used when the package is removed)
 // One xray process serves every enabled transport: VLESS + REALITY over TCP with XTLS-Vision,
-// VLESS + REALITY over XHTTP, and Hysteria2 over QUIC. The generated file is replaced only
+// VLESS + REALITY over XHTTP, and Hysteria2 over QUIC. A profile with the reverse access on gets a
+// portal (xray's reverse proxy): the router of that profile connects through its link and offers its
+// ports, which this router listens for on local ports of its own. The generated file is replaced only
 // after "xray run -test" accepts it; any error (incomplete settings, a missing certificate, a
 // configuration rejected by xray) leaves the configuration in effect in place, with the reason
 // in /tmp/xtunnel-server/error for the status page. Only switching the server off removes it.
@@ -12,7 +14,7 @@
 
 import { access, readfile, mkdir, unlink, chmod } from 'fs';
 import { cursor } from 'uci';
-import { log, list, flag, read_json, lock, not_applied, fw_rule, write_xray, replace_checked, x25519 } from 'xtunnel.common';
+import { log, list, flag, read_json, lock, not_applied, fw_rule, write_xray, replace_checked, x25519, reverse_domain, port_entry } from 'xtunnel.common';
 import { certificate } from 'xtunnel-server.common';
 
 const CFG   = 'xtunnel-server';
@@ -28,8 +30,8 @@ const RULES = {
 	xhttp:     { section: 'xtunnel_server_xhttp',     proto: 'tcp', name: 'xtunnel-server: XHTTP from WAN' },
 	hysteria2: { section: 'xtunnel_server_hysteria2', proto: 'udp', name: 'xtunnel-server: Hysteria2 from WAN' }
 };
-// loopback ports not for the server's clients: tor's SOCKS port and the local ports of the client part
-const LOCAL_ONLY = { ip: [ '127.0.0.0/8', '::1/128' ], port: '9050,61000-61299' };
+// loopback ports not for the server's clients: the local ports of the client part
+const LOCAL_ONLY = { ip: [ '127.0.0.0/8', '::1/128' ], port: '61000-61299' };
 const PRIVATE = [ '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
 	'172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4', '::1/128', 'fc00::/7', 'fe80::/10' ];
 
@@ -87,7 +89,7 @@ function build(main, profiles, uci) {
 		masq = masquerade(main.hysteria2_masquerade);
 		if (masq.error) push(errors, masq.error);
 	}
-	let seen_name = {}, seen_uuid = {}, seen_pw = {};
+	let seen_name = {}, seen_uuid = {}, seen_pw = {}, seen_port = {};
 	for (let p in profiles) {
 		let who = p.name || p.sid;
 		if (p.name && seen_name[lc(p.name)]) push(errors, `the name "${p.name}" is used twice`);
@@ -101,6 +103,14 @@ function build(main, profiles, uci) {
 			if (!p.password) push(errors, `profile "${who}" has no Hysteria2 password`);
 			else if (seen_pw[p.password]) push(errors, `the Hysteria2 password of profile "${who}" is used twice`);
 			seen_pw[p.password] = true;
+		}
+		if (p.reverse) {
+			if (!reality || !p.uuid) push(errors, `the reverse access of profile "${who}" needs a VLESS transport and the profile's UUID`);
+			for (let f in p.ports) {
+				if (seen_port[f.port] || (vision && f.port == vport) || (xhttp && f.port == xport) || (f.port >= 61000 && f.port <= 61299))
+					push(errors, `local port ${f.port} of profile "${who}" is used twice or by a transport`);
+				seen_port[f.port] = true;
+			}
 		}
 	}
 	if (length(errors))
@@ -166,18 +176,35 @@ function build(main, profiles, uci) {
 	}
 	// the rules are bound to this server's inbounds: xray may run with the client's configuration too
 	let tags = map(inbounds, ib => ib.tag), rules = [];
+	// the reverse access of the profiles: the profile's router registers its bridge through the link
+	// (a request to the channel's name by that user) and this router's local ports lead to its ports
+	let portals = [];
+	for (let p in profiles) {
+		if (!p.reverse) continue;
+		let tag = `portal-${p.sid}`, domain = reverse_domain(p.uuid);
+		push(portals, { tag: tag, domain: domain });
+		push(rules, { type: 'field', inboundTag: tags, user: [ p.name || p.sid ], domain: [ `full:${domain}` ], outboundTag: tag });
+		let k = 0;
+		for (let f in p.ports) {
+			let it = `rev-${p.sid}-${++k}`;
+			push(inbounds, { tag: it, listen: '0.0.0.0', port: f.port, protocol: 'dokodemo-door', settings: { address: f.host, port: f.target_port, network: 'tcp' } });
+			push(rules, { type: 'field', inboundTag: [ it ], outboundTag: tag });
+		}
+	}
 	push(rules, { type: 'field', inboundTag: tags, ip: LOCAL_ONLY.ip, port: LOCAL_ONLY.port, outboundTag: 'block' });
 	if (!flag(main.local_access, true))
 		push(rules, { type: 'field', inboundTag: tags, ip: PRIVATE, outboundTag: 'block' });
 	push(rules, { type: 'field', inboundTag: tags, protocol: [ 'bittorrent' ], outboundTag: 'block' });
 	push(rules, { type: 'field', inboundTag: tags, outboundTag: 'direct' });
+	let config = {
+		log: { loglevel: 'warning', access: 'none' },
+		inbounds: inbounds,
+		outbounds: [ { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' } ],
+		routing: { domainStrategy: 'AsIs', rules: rules }
+	};
+	if (length(portals)) config.reverse = { portals: portals };
 	return {
-		config: {
-			log: { loglevel: 'warning', access: 'none' },
-			inbounds: inbounds,
-			outbounds: [ { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' } ],
-			routing: { domainStrategy: 'AsIs', rules: rules }
-		},
+		config: config,
 		ports: { vision: vision ? vport : 0, xhttp: xhttp ? xport : 0, hysteria2: hy2 ? hport : 0 },
 		behind: behind
 	};
@@ -243,7 +270,8 @@ let main = uci.get_all(CFG, 'main') ?? {};
 let profiles = [];
 uci.foreach(CFG, 'profile', function(s) {
 	if (flag(s.enabled, true))
-		push(profiles, { sid: s['.name'], name: trim(s.name ?? ''), uuid: trim(s.uuid ?? ''), password: trim(s.password ?? '') });
+		push(profiles, { sid: s['.name'], name: trim(s.name ?? ''), uuid: trim(s.uuid ?? ''), password: trim(s.password ?? ''),
+		                 reverse: flag(s.reverse, false), ports: filter(map(list(s.reverse_port), port_entry), x => x != null) });
 });
 chmod(`/etc/config/${CFG}`, 0o600);
 unlink(ERROR);

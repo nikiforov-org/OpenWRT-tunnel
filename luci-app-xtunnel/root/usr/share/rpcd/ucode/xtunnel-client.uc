@@ -1,9 +1,9 @@
 'use strict';
 
-import { access, readfile, stat, lsdir } from 'fs';
+import { access, readfile, stat } from 'fs';
 import { cursor } from 'uci';
-import { XRAY, exec, read_json, locked, running, xray_version, syslog_tail, restart, spawn } from 'xtunnel.common';
-import { RUN, instance, active_link, uplink, TOR_OUTBOUND } from 'xtunnel-client.common';
+import { XRAY, exec, read_json, locked, xray_version, syslog_tail, restart, spawn } from 'xtunnel.common';
+import { RUN, instance, active_link, uplink } from 'xtunnel-client.common';
 
 const CFG     = 'xtunnel-client';
 const CONF    = '/etc/xtunnel-client/config.json';
@@ -28,16 +28,11 @@ methods.status = {
 		let measure = read_json(MEASURE, {}), history = read_json(HISTORY, {});
 		let in_config = {};
 		for (let c in (state.clients ?? [])) in_config[c.tag] = true;
-		// the router's tor, while links through it are in the configuration
-		let tor_used = (length(filter(state.clients ?? [], c => c.tor)) > 0);
-		let tor = { used: tor_used, running: tor_used && running('tor') != null, socks: `${TOR_OUTBOUND.settings.address}:${TOR_OUTBOUND.settings.port}`,
-		            keys: length(filter(lsdir('/etc/tor/xtunnel-client') ?? [], f => match(f, /\.auth_private$/))) };
 		// every link of the profiles as sync saw it, with what the router knows about it now
 		let links = [];
 		for (let l in (state.links ?? [])) {
 			push(links, { ...l,
-				ready: (up && l.enabled && !l.error && in_config[l.tag] == true && (!l.tor || tor.running)),
-				tor_down: (l.tor && in_config[l.tag] == true && !tor.running),
+				ready: (up && l.enabled && !l.error && in_config[l.tag] == true),
 				active: (l.tag == now),
 				measure: measure.clients?.[l.tag] ?? null,
 				history: history[l.tag] ?? [] });
@@ -59,7 +54,6 @@ methods.status = {
 			links: links,
 			measure: { time: measure.time ?? 0, decision: measure.decision ?? '', bytes: measure.bytes ?? 0, health: measure.health ?? null },
 			uplink: uplink(),
-			tor: tor,
 			measuring: locked(`${RUN}/measure.lock`),
 			updating: locked(`${RUN}/sources.lock`),
 			error: trim(readfile(ERROR) ?? '') || trim(readfile('/tmp/xtunnel-xray/error') ?? ''),

@@ -47,14 +47,8 @@ function metered_uplink(main) {
 }
 
 // one curl through the tap of a link; the URL's host keeps its name for TLS. small: a request with
-// a small answer (HEAD to the link's own URL, one byte from the default target); through Tor it has
-// TOR_SMALL seconds and a download TOR_DOWNLOAD, as the first stream to an onion service fetches its
-// descriptor and builds the circuits to it (5-6 s in a container test; 60 s to the first byte over
-// bridges on a mobile uplink, 3 s for the next stream, 2 MB then in 12 s)
-const TOR_SMALL = 30;
-const TOR_DOWNLOAD = 90;
+// a small answer (HEAD to the link's own URL, one byte from the default target)
 function curl_cmd(c, bytes, timeout, small, out) {
-	if (c.tor && timeout < (small ? TOR_SMALL : TOR_DOWNLOAD)) timeout = small ? TOR_SMALL : TOR_DOWNLOAD;
 	if (!length(c.test_url))
 		return `curl -sk -m ${timeout} -o /dev/null -w '${FMT}' 'https://127.0.0.1:${c.tap_port}/cgi-bin/speed?bytes=${small ? 1 : bytes}' > ${shq(out)} 2>/dev/null`;
 	let u = url_parts(c.test_url);

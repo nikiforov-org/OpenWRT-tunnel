@@ -3,7 +3,7 @@
 # that the code behind them is not linked: the protocols other than VLESS, Hysteria2, SOCKS, dokodemo-door,
 # freedom, blackhole and DNS; the transports mKCP, gRPC, WebSocket and HTTPUpgrade; the finalmask types
 # other than Salamander; the sections api (the gRPC API: the client's active link goes through the control
-# socket of src/xray/control.go), metrics, stats, reverse, fakeDns, observatory, burstObservatory; the YAML
+# socket of src/xray/control.go), metrics, stats, fakeDns, observatory, burstObservatory; the YAML
 # and TOML configuration formats. The help of the command line is printed without text/template, and the
 # header templates of the http outbound are taken as plain values (text/template is linked otherwise).
 # Imports left unused are removed afterwards by build.sh (go build reports them).
@@ -49,7 +49,7 @@ def drop_lines(s, pattern):
 
 # protocols: the JSON loaders of the others
 for f in ('http.go', 'shadowsocks.go', 'vmess.go', 'trojan.go', 'wireguard.go', 'tun.go', 'loopback.go',
-          'metrics.go', 'reverse.go', 'fakedns.go', 'observatory.go', 'grpc.go', 'init.go', 'api.go'):
+          'metrics.go', 'fakedns.go', 'observatory.go', 'grpc.go', 'init.go', 'api.go'):
 	os.remove(os.path.join(CONF, f))
 for f in os.listdir(CONF):
 	if f.endswith('_test.go'):
@@ -58,7 +58,7 @@ p = os.path.join(CONF, 'xray.go')
 s = read(p)
 for name in ('http', 'shadowsocks', 'vmess', 'trojan', 'wireguard', 'tun', 'loopback', 'mixed'):
 	s = re.sub(r'\n\t\t"%s":\s+func\(\) interface\{\} \{[^\n]*\},' % name, '', s)
-for field in ('API', 'Metrics', 'Stats', 'Reverse', 'FakeDNS', 'Observatory', 'BurstObservatory'):
+for field in ('API', 'Metrics', 'Stats', 'FakeDNS', 'Observatory', 'BurstObservatory'):
 	s = drop_lines(s, r'^\t' + field + r'\s+\*\w+Config\s+`json:')
 	s = drop_block(s, r'if o\.' + field + r' != nil ')
 	s = drop_block(s, r'if c\.' + field + r' != nil ')

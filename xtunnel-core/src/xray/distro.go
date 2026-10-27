@@ -13,6 +13,7 @@ import (
 	_ "github.com/xtls/xray-core/app/log"
 	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/router"
+	_ "github.com/xtls/xray-core/app/reverse"
 	_ "github.com/xtls/xray-core/app/stats"
 
 	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"

@@ -1,5 +1,5 @@
 'use strict';
-// The helpers of every part of luci-app-xtunnel (dynamic DNS, server, client, tor), once.
+// The helpers of every part of luci-app-xtunnel (dynamic DNS, server, client), once.
 //   import { shq, exec, log, … } from 'xtunnel.common';
 
 import { popen, readfile, writefile, open, mkdir, rename, unlink, chmod, stat } from 'fs';
@@ -265,3 +265,50 @@ export function x25519(priv) {
 	let a = match(out, /Private ?[Kk]ey *: *([A-Za-z0-9_-]{43})/), b = match(out, /(Public ?[Kk]ey|Password)( *\([^)]*\))? *: *([A-Za-z0-9_-]{43})/);
 	return (a && b) ? { private_key: a[1], public_key: b[3] } : null;
 };
+
+// an IPv4 subnet or address -> "a.b.c.d/p" with the host bits cleared, or null
+export function cidr(s) {
+	let m = match(trim(s ?? ''), /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(\/([0-9]{1,2}))?$/);
+	if (!m) return null;
+	let p = (m[6] != null) ? int(m[6]) : 32, n = 0;
+	if (p > 32) return null;
+	for (let i = 1; i <= 4; i++) {
+		let o = int(m[i]);
+		if (o > 255) return null;
+		n = n * 256 + o;
+	}
+	let size = 1;
+	for (let i = 0; i < 32 - p; i++) size *= 2;
+	n -= n % size;
+	return sprintf('%d.%d.%d.%d/%d', n / 16777216 % 256, n / 65536 % 256, n / 256 % 256, n % 256, p);
+};
+
+// ---- reverse access (xray's reverse proxy: a bridge on the client's router, a portal on the server's) ----
+
+// the name of a profile's channel between the bridge and the portal: the UUID of the profile's VLESS
+// link, which both routers know; it only names the channel inside the link
+export function reverse_domain(uuid) {
+	return `${lc(trim(uuid ?? ''))}.reverse.xtunnel`;
+};
+
+// an entry "LOCAL:HOST:PORT" of a list of ports: this router listens on LOCAL and the connection goes
+// through the channel to HOST:PORT on the other router -> { port, host, target_port } or null
+export function port_entry(e) {
+	let m = match(trim(e ?? ''), /^([0-9]{1,5}):([A-Za-z0-9.-]+):([0-9]{1,5})$/);
+	if (!m) return null;
+	let port = int(m[1]), tport = int(m[3]);
+	if (port < 1 || port > 65535 || tport < 1 || tport > 65535) return null;
+	return { port: port, host: m[2], target_port: tport };
+};
+
+// an entry "ADDRESS[/PREFIX]:PORT[-PORT]" of what a bridge lets the other router reach -> { ip, port } or null
+export function allow_entry(e) {
+	let m = match(trim(e ?? ''), /^([0-9.\/]+):([0-9]{1,5}(-[0-9]{1,5})?)$/);
+	if (!m) return null;
+	let ip = cidr(m[1]);
+	return ip ? { ip: ip, port: m[2] } : null;
+};
+
+// what a bridge lets the other router reach when its list is empty: this router's SSH and its web
+// interface (the site, with the REALITY transport in front of it on 443 or uhttpd itself)
+export const REVERSE_ALLOW = [ '127.0.0.1:22', '127.0.0.1:443' ];
