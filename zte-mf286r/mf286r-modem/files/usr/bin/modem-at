@@ -32,11 +32,6 @@ shift $((OPTIND - 1))
 [ $# -gt 0 ] || { echo "usage: modem-at [-t seconds] <AT command> [...]" >&2; exit 3; }
 [ -c "$DEV" ] || { echo "no modem control port at $DEV" >&2; exit 3; }
 
-# busybox sleep takes whole seconds only; coreutils-sleep, when installed, takes
-# fractions and makes a reply come back in a tenth of a second instead of a whole
-# one. Probe once rather than assuming either.
-if sleep 0.1 2>/dev/null; then NAP='sleep 0.1'; TICKS=10; else NAP='sleep 1'; TICKS=1; fi
-
 mkdir -p /var/lock
 exec 9>"$LOCK"
 # busybox flock has no -w, so the bounded wait is a loop over the -n form.
@@ -46,41 +41,42 @@ until flock -n 9; do
 	[ "$i" -ge "$LOCKWAIT" ] && { echo "modem control port busy" >&2; exit 2; }
 	sleep 1
 done
-
 stty -F "$DEV" raw -echo speed 115200 2>/dev/null
-
-OUT=$(mktemp) || exit 3
-CP=""
-cleanup() { [ -n "$CP" ] && kill "$CP" 2>/dev/null; rm -f "$OUT"; }
-trap cleanup EXIT INT TERM
-
+# The reply is read line by line straight from the port with "read -t": a line is returned the
+# moment it arrives, and only a port that says nothing for a whole second costs that second (busybox
+# sleep knows no fractions, so polling a file would cost a second per look). The module echoes the
+# command as the first line of its reply: everything before the echo is somebody else's leftover (an
+# unsolicited notification, a reply that outlived its reader) and is skipped; without an echo the
+# lines before the terminator are the reply. The last line of a reply is OK, ERROR or a CME/CMS
+# error; ">" is the prompt a message body is typed after (it has no newline: a timed-out read with
+# that fragment counts).
+exec 3<"$DEV"
+CR=$(printf '\r')
 rc=0
 for cmd in "$@"; do
-	: > "$OUT"
-	cat "$DEV" > "$OUT" 2>/dev/null &
-	CP=$!
-	$NAP
-	# Whatever arrived before we sent is somebody else's leftover — an unsolicited
-	# notification, or a reply that outlived its reader — and would otherwise
-	# satisfy the terminator search below and be returned as our answer. It is
-	# skipped by offset rather than truncated away: `cat > file` keeps its own
-	# write offset, so truncating the file under it leaves a hole and the next
-	# reply comes back preceded by a run of NUL bytes, which no line anchor matches.
-	skip=$(wc -c < "$OUT" 2>/dev/null || echo 0)
+	pre=""; reply=""; seen=0; waited=0; done=0
 	printf '%s\r' "$cmd" > "$DEV"
-	# Stop as soon as the modem is done instead of sleeping a fixed time: the last
-	# line of any AT reply is OK, ERROR or a CME/CMS error, and ">" is the prompt
-	# a message body is typed after.
-	i=0; n=$((TMO * TICKS))
-	while [ "$i" -lt "$n" ]; do
-		tail -c "+$((skip + 1))" "$OUT" 2>/dev/null \
-			| grep -qE '^(OK|ERROR|\+CME ERROR|\+CMS ERROR|>)' && break
-		$NAP
-		i=$((i + 1))
+	while [ "$done" = 0 ]; do
+		line=""
+		if read -r -t 1 line <&3; then
+			case "$line" in *"$CR") line=${line%?} ;; esac
+			[ -n "$line" ] || continue
+			if [ "$seen" = 0 ] && [ "$line" = "$cmd" ]; then seen=1; pre=""; continue; fi
+			case "$line" in
+				OK|ERROR|"+CME ERROR"*|"+CMS ERROR"*|">") done=1 ;;
+			esac
+			if [ "$seen" = 1 ]; then reply="${reply}${line}
+"; else pre="${pre}${line}
+"; fi
+		else
+			case "$line" in *">"*) reply="${reply}>
+"; done=1; continue ;; esac
+			waited=$((waited + 1))
+			[ "$waited" -ge "$TMO" ] && done=1
+		fi
 	done
-	kill "$CP" 2>/dev/null; wait "$CP" 2>/dev/null; CP=""
-	reply=$(tail -c "+$((skip + 1))" "$OUT" 2>/dev/null)
-	printf '%s\n' "$reply" | tr -d '\r'
-	printf '%s\n' "$reply" | grep -qE '^(ERROR|\+CME ERROR|\+CMS ERROR)' && rc=1
+	[ "$seen" = 1 ] || reply="$pre"
+	printf '%s' "$reply"
+	printf '%s' "$reply" | grep -qE '^(ERROR|\+CME ERROR|\+CMS ERROR)' && rc=1
 done
 exit "$rc"
