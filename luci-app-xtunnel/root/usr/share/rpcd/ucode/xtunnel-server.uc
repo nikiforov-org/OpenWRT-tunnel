@@ -2,7 +2,7 @@
 
 import { access, readfile, stat } from 'fs';
 import { cursor } from 'uci';
-import { XRAY, list, valid_sid, xray_instance, xray_version, x25519, syslog_tail, restart } from 'xtunnel.common';
+import { XRAY, list, valid_sid, xray_instance, xray_version, x25519, syslog_tail, restart, read_json } from 'xtunnel.common';
 import { file_status } from 'xtunnel.x509';
 import { urlencode } from 'xtunnel-ddns.http';
 import { in_effect } from 'xtunnel-ddns.sitecert';
@@ -21,10 +21,15 @@ function valid_key(k) {
 	return type(k) == 'string' && match(k, /^[A-Za-z0-9_-]{43}$/) != null;
 }
 
-// the public key of a REALITY private key, worked out once (rpcd keeps this plugin loaded)
+// the public key of a REALITY private key: the one the sync derived for the key in effect
+// (/etc/xtunnel-server/pubkey.json), else worked out once here (rpcd keeps this plugin loaded)
 let pubkeys = {};
 function public_key(priv) {
 	if (!valid_key(priv)) return '';
+	if (!pubkeys[priv]) {
+		let k = read_json('/etc/xtunnel-server/pubkey.json') ?? {};
+		if (k.private_key == priv && valid_key(k.public_key)) pubkeys[priv] = k.public_key;
+	}
 	pubkeys[priv] ??= x25519(priv)?.public_key ?? '';
 	return pubkeys[priv];
 }

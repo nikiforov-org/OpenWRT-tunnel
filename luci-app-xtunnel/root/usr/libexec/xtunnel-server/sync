@@ -12,7 +12,7 @@
 
 import { access, readfile, mkdir, unlink, chmod } from 'fs';
 import { cursor } from 'uci';
-import { log, list, flag, read_json, lock, not_applied, fw_rule, write_xray } from 'xtunnel.common';
+import { log, list, flag, read_json, lock, not_applied, fw_rule, write_xray, replace_checked, x25519 } from 'xtunnel.common';
 import { certificate } from 'xtunnel-server.common';
 
 const CFG   = 'xtunnel-server';
@@ -20,6 +20,7 @@ const DIR   = '/etc/xtunnel-server';
 const CONF  = `${DIR}/config.json`;
 const RUN   = '/tmp/xtunnel-server';
 const ERROR = `${RUN}/error`;
+const PUBKEY = `${DIR}/pubkey.json`;                 // the public key of the private key in effect, derived once
 const DDNS_INIT   = '/etc/init.d/xtunnel-ddns';   // the part that runs the router's own site (uhttpd)
 const BEHIND_PORT = 4443;                        // where that site listens while this server holds its port
 const RULES = {
@@ -250,8 +251,19 @@ unlink(ERROR);
 let xray_lock = lock('/var/lock/xtunnel-xray', true);
 let vless_before = vless_ports();
 
+// the public key of the REALITY private key for the status and the links, derived by xray once per key
+// (every start of xray's executable costs memory and time on a small router: never from a page)
+function keep_public_key(priv) {
+	if (!priv || !match(priv, /^[A-Za-z0-9_-]{43}$/)) return;
+	let k = read_json(PUBKEY) ?? {};
+	if (k.private_key == priv && k.public_key) return;
+	let pair = x25519(priv);
+	if (pair) replace_checked(PUBKEY, sprintf('%J\n', { private_key: priv, public_key: pair.public_key }), 0o600);
+}
+
 let ports = { vision: 0, xhttp: 0, hysteria2: 0 }, changed = false;
 if (mode == 'apply' && flag(main.enabled, false)) {
+	keep_public_key(main.private_key);
 	let b = build(main, profiles, uci);
 	if (b.errors) {
 		not_applied(CFG, ERROR, join('; ', b.errors));
