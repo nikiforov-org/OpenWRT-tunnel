@@ -49,6 +49,11 @@ if [ -d "$ROOT/$DEV" ]; then
 	done
 	[ ! -f "$ROOT/$DEV/packages" ] || DEVPKGS="$DEVPKGS $(sed 's/#.*//' "$ROOT/$DEV/packages" | tr '\n' ' ')"
 fi
+# a package of DROP that the device's list or EXTRA names stays (the ZTE takes ppp for PPPoE)
+KEEP=" $DEVPKGS ${EXTRA:-} "
+DROPPED=""
+for p in $DROP; do case "$KEEP" in *" $p "*) ;; *) DROPPED="$DROPPED $p" ;; esac; done
+DROP=$DROPPED
 echo "OpenWrt $RELEASE, $TARGET, profile $PROFILE${DEVPKGS:+, the packages of $DEV/}${EXTRA:+, extra packages: $EXTRA}"
 
 docker rm -f -v $NAME >/dev/null 2>&1 || true

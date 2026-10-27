@@ -61,3 +61,19 @@ dnsmasq-full
 # relays take 16-33 MB of it; the size is a setting of the device (system.@system[0].zram_size_mb 48)
 zram-swap
 kmod-zram
+# the connectivity watchdog (user's choice 2026-10-28): in its restart_iface mode on wan it restarts the interface after
+# a minute without a ping answer through the cable, so with the cable out the wan has no route and the modem's one
+# (metric 20) carries the traffic; udhcpc keeps asking (-t 0) and the cable's return brings the wan back by itself
+watchcat
+luci-app-watchcat
+# PPPoE for a wired provider that uses it: luci-proto-ppp is in every image (the luci metapackage), these are the
+# daemon and the kernel side behind it (utils/firmware.sh drops them elsewhere; a device list wins over that)
+ppp
+ppp-mod-pppoe
+kmod-ppp
+kmod-pppoe
+kmod-pppox
+kmod-slhc
+# traffic totals per interface (what went through the modem): the LuCI page needs vnstati2 for its images
+vnstat2
+luci-app-vnstat2
