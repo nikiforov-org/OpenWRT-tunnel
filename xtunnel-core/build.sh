@@ -12,7 +12,8 @@
 #                      (src/snowflake)
 #   /usr/sbin/tor      tor linked statically with LibreSSL (tor.sh, built with the toolchain of the SDK
 #                      images), with the other files of OpenWrt's tor package of the same version (the init
-#                      script, /etc/config/tor, /etc/tor/torrc, its user)
+#                      script, /etc/config/tor, /etc/tor/torrc, its user); the service is disabled: luci-app-xtunnel's
+#                      sync enables and starts it while the onion service or the client's links through Tor need it
 # Sources and the Go module cache stay in the Docker volumes xtunnel-src and xtunnel-gocache.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -170,6 +171,12 @@ docker run --rm --user 0:0 -v "$OUT:/out" "$SDK_IMAGE" sh -c '
 				echo "export root=\"\${IPKG_INSTROOT}\""
 				echo "export pkgname=\"xtunnel-core\""
 				if [ $t = pre-deinstall ]; then echo default_prerm; else echo add_group_and_user; echo default_postinst; fi
+				# the tor service runs only while luci-app-xtunnel needs it (its sync enables and starts it, stops
+				# and disables it otherwise): disabled in the image and at a fresh install (default_postinst enables
+				# and starts it); at an upgrade the new executable is started again only if the service is enabled
+				[ $t = post-install ] && echo "[ -n \"\$root\" ] || /etc/init.d/tor stop >/dev/null 2>&1; \$root/etc/init.d/tor disable >/dev/null 2>&1"
+				[ $t = post-upgrade ] && echo "[ -n \"\$root\" ] || { if /etc/init.d/tor enabled >/dev/null 2>&1; then /etc/init.d/tor restart; else /etc/init.d/tor stop; fi >/dev/null 2>&1; }"
+				echo "exit 0"
 			} > /tmp/$t
 		done
 		mkdir -p /out/apk/$a

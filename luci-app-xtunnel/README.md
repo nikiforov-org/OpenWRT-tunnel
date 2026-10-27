@@ -722,12 +722,11 @@ uses links through Tor; then:
   directory again; afterwards only one copy is kept.
 - The `tor` service is restarted on every change (tor re-reads `/etc/tor/torrc` on reload
   as the unprivileged tor user, which cannot read it, so a reload would stop it). The service
-  (of `xtunnel-core`, the init script of OpenWrt's `tor` package) is enabled and started when it
-  is installed; this package switches the
-  service on with its configuration, and when nothing needs tor any more it stops and disables
-  the stock service only if it was off before this package switched it on (marker
-  `/etc/xtunnel-tor/managed`), otherwise it restarts it without this package's part. **Restart
-  tor** in the section **Tor** restarts the service by hand.
+  (of `xtunnel-core`, the init script of OpenWrt's `tor` package) is disabled when the package is
+  installed; this package enables and starts it with its configuration while the onion service or
+  the client's links through Tor need it, and stops and disables it when nothing needs tor any
+  more (a switched-off onion service costs no memory: tor's cache stays on the router's storage
+  while that option is on). **Restart tor** in the section **Tor** restarts the service by hand.
 
 The generated configuration and the list of authorized clients: **Show tor configuration** in
 the section **Tor**; **Show tor log** shows the tor messages from the system log, including the

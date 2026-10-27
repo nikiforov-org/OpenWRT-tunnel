@@ -31,7 +31,7 @@ const CLIENTS = `${HS}/authorized_clients`;
 const AUTH    = '/etc/tor/xtunnel-client';        // ClientOnionAuthDir: the keys of the onion services the client uses
 const RUN     = '/tmp/xtunnel-tor';
 const ERROR   = `${RUN}/error`;
-const MANAGED = `${DIR}/managed`;                  // exists while this package runs the stock service
+const MANAGED = `${DIR}/managed`;                  // the marker of earlier versions (removed)
 const TOR     = '/usr/sbin/tor';
 const LYREBIRD = '/usr/bin/lyrebird';             // the pluggable transports (xtunnel-core)
 const SHIPPED = '/usr/share/xtunnel-tor/bridges.txt';      // the bridge list shipped with the package
@@ -241,10 +241,11 @@ function sync_tor(enabled, changed) {
 		uci.commit('tor');
 	}
 	let up = (running('tor') != null);
+	let on = (system('/etc/init.d/tor enabled >/dev/null 2>&1') == 0);
+	// the service is this package's (xtunnel-core provides tor): it runs while the onion service or the
+	// client's links through Tor need it, and is stopped and disabled otherwise (a start at boot included)
 	if (enabled) {
-		if (access(MANAGED) != true && system('/etc/init.d/tor enabled >/dev/null 2>&1') != 0)
-			writefile(MANAGED, '');                 // the service was off: this package switches it on
-		system('/etc/init.d/tor enable >/dev/null 2>&1');
+		if (!on) system('/etc/init.d/tor enable >/dev/null 2>&1');
 		if (uci_changed || changed || !up) {
 			// always a restart: the stock reload (SIGHUP) makes tor re-read /etc/tor/torrc as the
 			// tor user, which cannot read it, and tor exits
@@ -252,17 +253,11 @@ function sync_tor(enabled, changed) {
 			log(CFG, 'tor service restarted');
 		}
 	}
-	else if (has) {
-		if (access(MANAGED) == true) {
-			system('/etc/init.d/tor stop >/dev/null 2>&1; /etc/init.d/tor disable >/dev/null 2>&1');
-			unlink(MANAGED);
-			log(CFG, 'tor service stopped');
-		}
-		else if (up) {
-			system('/etc/init.d/tor restart >/dev/null 2>&1');  // the service belongs to someone else: only this package's part goes
-			log(CFG, 'tor service restarted without this package\'s configuration');
-		}
+	else if (up || on) {
+		system('/etc/init.d/tor stop >/dev/null 2>&1; /etc/init.d/tor disable >/dev/null 2>&1');
+		log(CFG, 'tor service stopped');
 	}
+	unlink(MANAGED);                                  // the marker of earlier versions
 }
 
 // ---- cron: the daily bridge update, the watch script ----
@@ -334,9 +329,10 @@ else {
 	sync_client_keys({});
 }
 // the DataDirectory after this run: the configuration in effect, or the stock one without it (tor is
-// then stopped, or restarted without this package's file when the service was not switched on here)
+// then stopped: nothing is copied there, and a copy left in tmpfs goes)
 let cache_after = enabled ? data_dir_of(readfile(CONF)) : STOCK_DATA;
-if (enabled || access(MANAGED) != true) move_cache(cache_before, cache_after);
+if (enabled) move_cache(cache_before, cache_after);
+else system(`rm -f ${STOCK_DATA}/cached-* ${STOCK_DATA}/state 2>/dev/null`);
 sync_tor(enabled, changed);
 tidy_cache(main, cache_after);
 // the watch script runs while snowflake is held back as the fallback and the list has both kinds, and
