@@ -68,11 +68,18 @@ function request_json(method, url, opts) {
 	return r;
 }
 
-// the router's public IPv4 address as the service at URL sees it: { ip, error }
+// the router's public IPv4 address as the service at URL sees it: { ip, error }. An address that cannot be
+// a public one (loopback, private, link-local, 0.0.0.0, multicast, the shared 100.64/10) is an error, not an
+// address: a service answered "127.0.0.1" for a while on 2026-10-27 and the records of every router followed.
 function public_ip(url, timeout) {
 	let r = request('GET', url, { ipv4: true, timeout: timeout ?? 15 });
 	let m = r.ok ? match(r.body, /([0-9]{1,3}(\.[0-9]{1,3}){3})/) : null;
-	return { ip: m ? m[1] : '', error: m ? '' : (r.error || 'no address in the answer') };
+	if (!m) return { ip: '', error: r.error || 'no address in the answer' };
+	let o = map(split(m[1], '.'), x => int(x));
+	let bad = o[0] == 0 || o[0] == 10 || o[0] == 127 || o[0] >= 224 || (o[0] == 100 && o[1] >= 64 && o[1] <= 127) ||
+		(o[0] == 169 && o[1] == 254) || (o[0] == 172 && o[1] >= 16 && o[1] <= 31) || (o[0] == 192 && o[1] == 168) ||
+		o[1] > 255 || o[2] > 255 || o[3] > 255;
+	return bad ? { ip: '', error: `${m[1]} is not a public address` } : { ip: m[1], error: '' };
 }
 
 export { urlencode, form, request, request_json, public_ip };

@@ -70,6 +70,12 @@ if (!held) exit(0);
 
 let url = uci.get(CFG, 'main', 'ip_url') || 'https://ipv4-internet.yandex.net/api/v0/ip';
 let pub = public_ip(url), ip = pub.ip;
+// the service at ip_url may be down or answer nonsense: two others are asked before the address is unknown
+for (let u in [ 'https://api.ipify.org', 'https://ifconfig.me/ip' ]) {
+	if (ip || u == url) continue;
+	let p = public_ip(u);
+	if (p.ip) { ip = p.ip; syslog(CFG, `${url}: ${pub.error}; the public address ${ip} from ${u}`); }
+}
 if (ip) writefile(`${RUN}/public_ip`, ip);
 
 let now = time();
