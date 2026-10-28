@@ -1,8 +1,10 @@
 #!/bin/sh
 # An interface of the firewall zone "wan" came up, went down or changed its addresses (a second uplink,
 # a cable pulled or plugged): what depends on the way out follows.
-#   client (on), ifup/ifdown: the way out and the provider's resolvers changed, the client applies its
-#     settings again (after netifd has written the resolvers of the interfaces still up)
+#   client (on), ifup/ifdown: when the way out (the default routes) or the provider's resolvers changed,
+#     the client applies its settings again (after netifd has written the resolvers of the interfaces
+#     still up). An event that changes neither is left alone: a watchdog that restarts a WAN without a
+#     cable every minute sends ifdown each time, and every reload costs a sync on a small router
 #   dynamic DNS (a domain on), ifup/ifupdate: the public address may be a new one, the domains are
 #     checked at once instead of at the next run from cron
 case "$ACTION" in ifup|ifdown|ifupdate) ;; *) exit 0 ;; esac
@@ -13,7 +15,14 @@ for z in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); 
 done
 [ $wan = 1 ] || exit 0
 if [ "$ACTION" != ifupdate ] && [ "$(uci -q get xtunnel-client.main.enabled)" = 1 ]; then
-	( sleep 3; logger -t xtunnel-client "uplink $INTERFACE: $ACTION, applying the settings again"; /etc/init.d/xtunnel-client reload ) >/dev/null 2>&1 &
+	( sleep 3
+	  mkdir -p /tmp/xtunnel-client
+	  exec 9>/var/lock/xtunnel-client-uplink; flock 9
+	  key=$( { ip route | grep '^default'; grep '^nameserver' /tmp/resolv.conf.d/resolv.conf.auto; } 2>/dev/null | sort | md5sum | cut -d' ' -f1 )
+	  [ "$key" = "$(cat /tmp/xtunnel-client/uplink.key 2>/dev/null)" ] && exit 0
+	  echo "$key" > /tmp/xtunnel-client/uplink.key
+	  logger -t xtunnel-client "uplink $INTERFACE: $ACTION, the way out changed, applying the settings again"
+	  /etc/init.d/xtunnel-client reload 9>&- ) </dev/null >/dev/null 2>&1 &
 fi
 if [ "$ACTION" != ifdown ] && grep -q "# xtunnel-ddns-update" /etc/crontabs/root 2>/dev/null; then
 	( sleep 5; /usr/libexec/xtunnel-ddns/update ) >/dev/null 2>&1 &

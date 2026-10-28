@@ -177,10 +177,12 @@ function build(main, lan, clients, profiles, sources, resolvers) {
 	let resolver = trim(main.resolver ?? '') || '1.1.1.1';
 	let isp = length(resolvers) ? resolvers : [ resolver ];
 	let have = (length(clients) > 0);
+	// without the LAN through the client the list, its sources and the DNS of the LAN are not needed
+	if (!lan) sources = [];
 
 	// the list: own entries and the fetched sources
 	let domains = [], ips = [], ext_ips = [], seen = {};
-	for (let e in list(main.rule)) {
+	for (let e in (lan ? list(main.rule) : [])) {
 		let r = parse_rule(e);
 		if (r && !(r.value in seen)) { seen[r.value] = true; push(r.kind == 'ip' ? ips : domains, r.value); }
 	}
@@ -303,13 +305,15 @@ function build(main, lan, clients, profiles, sources, resolvers) {
 
 	let config = {
 		log: { loglevel: 'warning', access: 'none' },
-		// disableFallbackIfMatch: a name that matched a server's list is asked only there (no leak
-		// of a listed name to the provider when the tunnel is down)
-		dns: { tag: 'dns-internal', queryStrategy: 'UseIPv4', disableFallbackIfMatch: true, servers: servers },
 		inbounds: inbounds,
 		outbounds: outbounds,
 		routing: { domainStrategy: 'AsIs', rules: rules, balancers: have ? [ { tag: 'active', selector: [ active ] } ] : [] }
 	};
+	// disableFallbackIfMatch: a name that matched a server's list is asked only there (no leak of a
+	// listed name to the provider when the tunnel is down); the links dial their servers through the
+	// system's resolver, so without the LAN there is no DNS section
+	if (lan) config = { log: config.log, dns: { tag: 'dns-internal', queryStrategy: 'UseIPv4', disableFallbackIfMatch: true, servers: servers },
+	                   inbounds: inbounds, outbounds: outbounds, routing: config.routing };
 	if (length(bridges)) config.reverse = { bridges: bridges };
 	return {
 		config: config,
@@ -553,7 +557,7 @@ if (enabled) {
 		keep_nft = true;
 	}
 	if (access(CONF) != true) { enabled = false; keep_nft = false; }   // nothing in effect: the system stays as it is
-	for (let s in sources)
+	for (let s in (lan ? sources : []))
 		if (s.enabled && !s.ready && !s.time) { spawn('/usr/libexec/xtunnel-client/sources'); break; }
 }
 else {
@@ -596,7 +600,7 @@ if (lan_on && readlink('/tmp/resolv.conf') != '/tmp/resolv.conf.d/resolv.conf.au
 }
 // the measurements choose between links: only in the automatic mode with two of them or more
 sync_cron(enabled, main.test_interval, main.mode != 'manual' && length(state.clients) >= 2,
-          length(filter(state.sources ?? [], x => x.enabled)) > 0);
+          lan && length(filter(state.sources ?? [], x => x.enabled)) > 0);
 if (length(keys(backup))) writefile(BACKUP, sprintf('%J\n', backup)); else unlink(BACKUP);
 state.enabled = enabled;
 state.error = readfile(ERROR) ?? '';
