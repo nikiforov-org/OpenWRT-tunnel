@@ -64,13 +64,14 @@ return view.extend({
 		var st = this.status;
 		if (!st.installed)
 			return span(COLOR.bad, _('xray is not installed on the router (/usr/bin/xray of the package xtunnel-core, a dependency of this package).'));
+		var v = st.version ? ' (Xray ' + st.version + ')' : '';
 		if (!st.enabled)
-			return span(COLOR.dim, _('Off: the LAN reaches the Internet as before'));
-		var lan = (st.state || {}).lan !== false;
+			return span(COLOR.dim, st.running
+				? _('Off: the LAN reaches the Internet as before; xray runs the links for the reverse access and the local ports of the profiles') + v
+				: _('Off: the LAN reaches the Internet as before'));
 		if (st.running)
-			return span(COLOR.ok, (lan ? _('Running: the LAN reaches the Internet only through this router\'s xray (interception of the LAN, kill switch), IPv6 is off for the LAN')
-			                           : _('Running: the reverse access and the local ports of the profiles; the LAN reaches the Internet as before')) + (st.version ? ' (Xray ' + st.version + ')' : ''));
-		var lines = [ span(COLOR.bad, lan ? _('Not running: the LAN has no way to the Internet until it starts (kill switch)') : _('Not running')) ];
+			return span(COLOR.ok, _('Running: the LAN reaches the Internet only through this router\'s xray (interception of the LAN, kill switch), IPv6 is off for the LAN') + v);
+		var lines = [ span(COLOR.bad, _('Not running: the LAN has no way to the Internet until it starts (kill switch)')) ];
 		if (st.log_last)
 			lines.push(E('pre', { 'style': 'color:' + COLOR.dim + '; white-space:pre-wrap; margin:.3em 0 0; font-size:90%' }, st.log_last));
 		return E('div', {}, lines);
@@ -246,17 +247,19 @@ return view.extend({
 		/* Overview */
 		s = m.section(form.NamedSection, 'main', CFG, _('Overview'));
 		o = s.option(form.DummyValue, '_ov_service', _('Service'),
-			_('The button saves and applies the page like "Save & Apply". On, with "LAN through the client" (section Split tunnelling): the LAN reaches the Internet only through this router\'s xray, which intercepts every connection of the LAN devices (TPROXY) and sends it to the active link or directly by the list; the lan → wan forwarding is switched off and IPv6 is switched off for the LAN. If xray stops, the LAN has no Internet (kill switch); ping and other protocols besides TCP and UDP do not leave the LAN meanwhile. Without it: the links serve the reverse access and the local ports of the profiles only. Off: everything as before.'));
+			_('The button saves and applies the page like "Save & Apply". On: the LAN reaches the Internet only through this router\'s xray, which intercepts every connection of the LAN devices (TPROXY) and sends it to the active link or directly by the list; the lan → wan forwarding is switched off and IPv6 is switched off for the LAN. If xray stops, the LAN has no Internet (kill switch); ping and other protocols besides TCP and UDP do not leave the LAN meanwhile. Without it: the links serve the reverse access and the local ports of the profiles only. Off: everything as before. The reverse access and the local ports of the profiles work in both states.'));
 		o.renderWidget = function() {
 			return E('div', {}, [ E('div', { 'id': 'tcl-ov-service' }, self.overviewService()), E('div', { 'style': 'margin-top:.5em' }, common.switchButton(self, CFG, 'enabled', _('Turn the client on'), _('Turn the client off'))) ]);
 		};
-		/* while the client is off only what helps to set it up is shown */
+		/* while the client is off only what helps to set it up is shown, and what the links do for the
+		   reverse access and the local ports of the profiles */
 		var on = function() { return !!self.status.enabled; };
-		common.statusRow(s, '_ov_active', _('Active link'), L.bind(this.overviewActive, this), function() { return on() || !self.links().length; });
-		common.statusRow(s, '_ov_measure', _('Measurement'), L.bind(this.overviewMeasure, this), on);
+		var used = function() { return on() || !!self.status.running; };
+		common.statusRow(s, '_ov_active', _('Active link'), L.bind(this.overviewActive, this), function() { return used() || !self.links().length; });
+		common.statusRow(s, '_ov_measure', _('Measurement'), L.bind(this.overviewMeasure, this), used);
 		common.statusRow(s, '_ov_lists', _('Lists'), L.bind(this.overviewLists, this), on);
-		common.statusRow(s, '_ov_config', _('Configuration'), L.bind(this.overviewConfig, this), function() { return on() || !!self.status.error; });
-		o = common.shownWhile(s.option(form.DummyValue, '_tools', _('Tools')), '_tools', on);
+		common.statusRow(s, '_ov_config', _('Configuration'), L.bind(this.overviewConfig, this), function() { return used() || !!self.status.error; });
+		o = common.shownWhile(s.option(form.DummyValue, '_tools', _('Tools')), '_tools', used);
 		o.renderWidget = function() {
 			return E('span', {}, [
 				E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleMeasure') }, _('Measure now')), ' ',
@@ -476,27 +479,20 @@ return view.extend({
 		s = m.section(form.NamedSection, 'main', CFG, _('Split tunnelling'),
 			_('Which traffic of the LAN goes through the client. The list holds domains (with their subdomains), subnets, and sources fetched daily.'));
 
-		o = s.option(form.Flag, 'lan', _('LAN through the client'),
-			_('On: the LAN devices reach the Internet through the active link by the list below (interception, kill switch, DNS through the tunnel, IPv6 off for the LAN). Off: the LAN reaches the Internet as before, and the links serve only the reverse access and the local ports of the profiles.'));
-		o.rmempty = false;
-		o.default = '1';
-
 		o = s.option(form.Flag, 'split', _('Split by the list'), _('Off: everything from the LAN goes through the active link.'));
 		o.rmempty = false;
 		o.default = '1';
-		o.depends('lan', '1');
-		o.retain = true;
 
 		o = s.option(form.ListValue, 'split_mode', _('Through the client goes'));
 		o.value('list', _('only what is in the list'));
 		o.value('except', _('everything except the list'));
 		o.default = 'list';
-		o.depends({ lan: '1', split: '1' });
+		o.depends('split', '1');
 		o.retain = true;
 
 		o = s.option(form.DynamicList, 'rule', _('Entries'),
 			_('A domain (example.com covers its subdomains; names in other alphabets in their punycode form, e.g. xn--p1ai for рф) or a subnet (10.1.2.0/24, a single address as 10.1.2.3).'));
-		o.depends({ lan: '1', split: '1' });
+		o.depends('split', '1');
 		o.retain = true;
 		o.rmempty = true;
 		o.validate = function(section_id, value) {

@@ -337,9 +337,10 @@ the [Server page](#server) of another router shows them:
 Links of the same kinds from any other Xray or Hysteria2 server (a VPS, another router) work
 too. Every link is a client; one of them is active, chosen by hand or automatically by the
 measured speed. The traffic of the LAN is split by a list of domains and subnets, and nothing
-of it bypasses the clients (kill switch); with **LAN through the client** off the LAN is left
-alone and the links serve the reverse access and the local ports of the profiles only. All
-clients run in one xray process, the same one as the server's.
+of it bypasses the clients (kill switch). The reverse access and the local ports of the profiles
+do not depend on the client's switch: with the client off the LAN is left alone and xray runs
+the links for them alone, so a router stays reachable for administration. All clients run in
+one xray process, the same one as the server's.
 
 ### What it does
 
@@ -404,8 +405,9 @@ clients run in one xray process, the same one as the server's.
 
 A profile can make this router reachable from the server's router without a public address or
 open ports here, and lead local ports of this router to that router through the link. Both go
-through the same link the LAN uses, and both work with **LAN through the client** off, so a
-router can run the client for them alone.
+through the same link the LAN uses, and both work with the client off: then xray runs the links
+for them alone (with the link choice, the measurement and the minute check as with the client on),
+and the LAN reaches the Internet as before.
 
 - **Reverse access** (in the dialog of a profile): this router keeps a channel to the server
   (xray's reverse proxy: a bridge here, a portal there; the connections are made from here, the
@@ -432,8 +434,7 @@ router can run the client for them alone.
    **Copy all** in that **Links** dialog, paste into **All links at once** of the profile's
    dialog and click **Fill in the fields** (each link goes into the field of its transport).
    For the reverse access and the local ports see above.
-3. Check the **Split tunnelling** section: **LAN through the client**, the mode, your entries,
-   the sources.
+3. Check the **Split tunnelling** section: the mode, your entries, the sources.
 4. Click **Turn the client on** in the overview (it saves and applies the page like **Save &
    Apply**; **Turn the client off** switches it off the same way). The overview shows the
    service running and the links ready; **Measure now** fills the speeds and, in the
@@ -570,8 +571,9 @@ Everything only on **Save & Apply**, nothing at install time. While the client i
   xtunnel-client-…` lines); the file is removed when no other line is left.
 - `/etc/xtunnel-client/sources/`: the fetched lists and their `.meta` (the files of a removed
   source go at the next apply); `/tmp/xtunnel-client/`: measurements, history, state.
-- With **LAN through the client** off, only the configuration file and cron are written: no
-  firewall, network or dhcp change. The reverse access is the `reverse.bridges` section of the
+- With the client off and a profile with the reverse access or local ports, only the configuration
+  file (the links, the bridge, the local ports, no list and no DNS section) and cron (the measurement
+  and the minute check) are written: no firewall, network or dhcp change. The reverse access is the `reverse.bridges` section of the
   configuration with its routing rules (the channel to the link, the reachable targets to
   `direct`, the rest blocked); the local ports are `dokodemo-door` inbounds routed to the link.
 

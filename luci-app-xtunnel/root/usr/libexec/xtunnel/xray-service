@@ -36,8 +36,16 @@ function join_configs(configs) {
 	let out = { inbounds: [], outbounds: [], routing: { domainStrategy: 'AsIs', rules: [], balancers: [] } };
 	let seen_in = {}, seen_out = {}, seen_bal = {};
 	for (let c in configs) {
-		for (let k, v in c)
+		for (let k, v in c) {
+			// the portals of the server and the bridges of the client
+			if (k == 'reverse') {
+				out.reverse ??= {};
+				for (let kk in [ 'bridges', 'portals' ])
+					if (length(v[kk] ?? [])) out.reverse[kk] = [ ...(out.reverse[kk] ?? []), ...v[kk] ];
+				continue;
+			}
 			if (!(k in [ 'inbounds', 'outbounds', 'routing' ]) && !exists(out, k)) out[k] = v;
+		}
 		for (let ib in c.inbounds ?? []) {
 			if (ib.tag && seen_in[ib.tag]) return { error: `the inbound tag "${ib.tag}" is used by two packages` };
 			seen_in[ib.tag] = true;

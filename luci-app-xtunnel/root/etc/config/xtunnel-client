@@ -1,6 +1,5 @@
 config xtunnel-client 'main'
 	option enabled '0'
-	option lan '1'
 	option mode 'auto'
 	option active ''
 	option split '1'

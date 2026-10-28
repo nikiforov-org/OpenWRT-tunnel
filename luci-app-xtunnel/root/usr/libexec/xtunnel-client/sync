@@ -1,11 +1,12 @@
 #!/usr/bin/env ucode
 // xtunnel-client sync: make the system match /etc/config/xtunnel-client. Every link of an enabled
 // profile (TCP + XTLS-Vision, XHTTP, Hysteria2) is a client: an xray outbound.
-//   sync          apply: the xray configuration (interception of the LAN, the lists, DNS, the active
-//                 client, the reverse access and the local ports of the profiles), and with the LAN
-//                 through the client (main.lan) the nftables rules and the set of the listed subnets
-//                 (fw4 includes), the mark routing (netifd), the kill switch (no lan -> wan
-//                 forwarding), IPv6 off for the LAN, dnsmasq through xray; cron
+//   sync          apply: the xray configuration (the reverse access and the local ports of the profiles,
+//                 and with the client on the interception of the LAN, the lists, DNS, the active client),
+//                 with the client on the nftables rules and the set of the listed subnets (fw4 includes),
+//                 the mark routing (netifd), the kill switch (no lan -> wan forwarding), IPv6 off for the
+//                 LAN, dnsmasq through xray; cron. The reverse access and the local ports do not depend
+//                 on the client's switch: with the client off xray runs the links for them alone.
 //   sync revert   undo everything (package removal)
 // The configuration file is replaced only after "xray run -test" accepts it; an error keeps the file
 // in effect and shows the reason on the page.
@@ -318,7 +319,7 @@ function build(main, lan, clients, profiles, sources, resolvers) {
 	return {
 		config: config,
 		listed: listed,
-		state: { lan: lan, active: active, clients: detail, src_taps: src_taps, own: own, domains: length(domains), ips: length(ips) + length(ext_ips),
+		state: { active: active, clients: detail, src_taps: src_taps, own: own, domains: length(domains), ips: length(ips) + length(ext_ips),
 		         resolver: resolver, isp: isp, access: access }
 	};
 }
@@ -520,21 +521,27 @@ chmod(`/etc/config/${CFG}`, 0o600);
 mkdir(RUN, 0o755);
 unlink(ERROR);
 
-let enabled = (mode == 'apply' && flag(main.enabled, false));
-let lan = flag(main.lan, true);                // the LAN through the client; off: only the reverse access and the local ports
+let enabled = (mode == 'apply' && flag(main.enabled, false));    // the LAN through the client
 let backup = backup_read();
 let devs = lan_devices();
 let links = profile_links(uci);
-let state = { time: time(), enabled: enabled, lan_devices: devs, active: '', clients: [], src_taps: {},
+// the reverse access and the local ports of the enabled profiles run also with the client off (the
+// router stays reachable for administration while its LAN is left alone): xray then runs the links
+// for them alone
+let profiles = access_of(uci, links);
+let serving = (mode == 'apply') && length(filter(profiles, p => (p.reverse || length(p.forward)) &&
+	length(filter(links, l => l.profile == p.sid && in_use(l))))) > 0;
+let run = enabled || serving;
+let state = { time: time(), enabled: enabled, serving: serving, lan_devices: devs, active: '', clients: [], src_taps: {},
               own: { domains: 0, ips: 0 }, domains: 0, ips: 0, sources: [], error: '',
               links: map(links, l => { let x = { ...l }; delete x.outbound; return x; }) };
 
 let listed = [], keep_nft = false;
-if (enabled && access(XRAY, 'x') != true) {
+if (run && access(XRAY, 'x') != true) {
 	not_applied(CFG, ERROR, 'xray is not installed (/usr/bin/xray of the package xtunnel-core is missing)');
-	enabled = false;
+	enabled = run = false;
 }
-if (enabled) {
+if (run) {
 	mkdir(SOURCES, 0o755);
 	let clients = filter(links, in_use);
 	if (length(clients) > 99) {                       // one local port per client: 61101..61199
@@ -543,7 +550,7 @@ if (enabled) {
 	}
 	let sources = sources_info(uci);
 	prune_sources(sources);
-	let b = build(main, lan, clients, access_of(uci, links), sources, isp_resolvers());
+	let b = build(main, enabled, clients, profiles, sources, isp_resolvers());
 	if (write_xray(CFG, ERROR, CONF, b.config, `XRAY_LOCATION_ASSET=${shq(SOURCES)}`)) {
 		state = { ...state, ...b.state, sources: sources };
 		listed = b.listed;
@@ -551,13 +558,13 @@ if (enabled) {
 	else {
 		// the configuration in effect stays, and with it what the measurements and select rely on
 		let prev = read_json(STATE, {});
-		for (let k in [ 'lan', 'active', 'clients', 'src_taps', 'own', 'domains', 'ips', 'resolver', 'isp', 'access' ])
+		for (let k in [ 'active', 'clients', 'src_taps', 'own', 'domains', 'ips', 'resolver', 'isp', 'access' ])
 			if (exists(prev, k)) state[k] = prev[k];
 		state.sources = sources;
 		keep_nft = true;
 	}
-	if (access(CONF) != true) { enabled = false; keep_nft = false; }   // nothing in effect: the system stays as it is
-	for (let s in (lan ? sources : []))
+	if (access(CONF) != true) { enabled = run = false; keep_nft = false; }   // nothing in effect: the system stays as it is
+	for (let s in (enabled ? sources : []))
 		if (s.enabled && !s.ready && !s.time) { spawn('/usr/libexec/xtunnel-client/sources'); break; }
 }
 else {
@@ -565,8 +572,8 @@ else {
 	if (access(CONF) == true) { unlink(CONF); log(CFG, 'configuration removed, xray stops'); }
 }
 
-// the system around xray changes only while the LAN goes through the client
-let lan_on = enabled && lan;
+// the system around xray changes only while the client is on (the LAN through it)
+let lan_on = enabled;
 let fw = cursor(); fw.load('firewall');
 let nft = keep_nft ? { file: false, uci: false } : sync_nft(fw, lan_on, devs, listed);
 let fwd = sync_forwarding(fw, lan_on, backup);
@@ -599,8 +606,9 @@ if (lan_on && readlink('/tmp/resolv.conf') != '/tmp/resolv.conf.d/resolv.conf.au
 	symlink('/tmp/resolv.conf.d/resolv.conf.auto', '/tmp/resolv.conf');
 }
 // the measurements choose between links: only in the automatic mode with two of them or more
-sync_cron(enabled, main.test_interval, main.mode != 'manual' && length(state.clients) >= 2,
-          lan && length(filter(state.sources ?? [], x => x.enabled)) > 0);
+// the measurement and the minute check choose the link also for the reverse access alone
+sync_cron(run, main.test_interval, main.mode != 'manual' && length(state.clients) >= 2,
+          enabled && length(filter(state.sources ?? [], x => x.enabled)) > 0);
 if (length(keys(backup))) writefile(BACKUP, sprintf('%J\n', backup)); else unlink(BACKUP);
 state.enabled = enabled;
 state.error = readfile(ERROR) ?? '';

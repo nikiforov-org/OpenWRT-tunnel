@@ -87,7 +87,9 @@ function run(clients, bytes, timeout, small) {
 let uci = cursor();
 uci.load(CFG);
 let main = uci.get_all(CFG, 'main') ?? {};
-if (main.enabled != '1') exit(0);
+// while the client's configuration is in effect: the client on, or the reverse access and the local
+// ports of the profiles with the client off
+if (access('/etc/xtunnel-client/config.json') != true) exit(0);
 let what = ARGV[0] ?? '';
 let st = read_json(STATE, {});
 let clients = (type(st.clients) == 'array') ? st.clients : [];
