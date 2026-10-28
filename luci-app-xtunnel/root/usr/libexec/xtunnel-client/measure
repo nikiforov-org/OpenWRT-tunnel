@@ -64,6 +64,13 @@ function curl_cmd(c, bytes, timeout, small, out) {
 function run(clients, bytes, timeout, small) {
 	let cmd = '';
 	for (let c in clients) {
+		// the first connection through a link whose code xray has not used for a while pages that code in
+		// from the compressed flash (measured on the ZTE MF286R after a boot: 26 s for Vision, 13 s for
+		// Hysteria2, then 2.4 and 0.5 s): before a download one small request with a minute for it, not counted
+		if (!small) {
+			system(curl_cmd(c, bytes, 60, true, `${RUN}/w-${c.tag}.out`));
+			unlink(`${RUN}/w-${c.tag}.out`);
+		}
 		let line = curl_cmd(c, bytes, timeout, small, `${RUN}/m-${c.tag}.out`);
 		if (small) cmd += `${line} &\n`;
 		else system(line);

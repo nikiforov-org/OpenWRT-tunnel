@@ -25,8 +25,10 @@ export function exec(command) {
 // no other inherited one. Descriptor 1000 is the lock rc.common holds while an init script runs (a sync
 // started by procd's reload trigger): a job that inherits it keeps the next reload of that init script
 // waiting until the job ends (the measurement after a start of xray held the client's reload for ~40 s).
+// The job runs below the router's services and xray (nice 10): on a slow router the downloads of a measurement took
+// the processor from xray, which carries the reverse channel of the administration.
 export function spawn(command) {
-	system(`( exec 1000>&-; exec setsid sh -c ${shq(command)} ) </dev/null >/dev/null 2>&1 &`);
+	system(`( exec 1000>&-; exec setsid nice -n 10 sh -c ${shq(command)} ) </dev/null >/dev/null 2>&1 &`);
 };
 
 // a message in the system log under TAG
@@ -186,6 +188,11 @@ export function cron_daily(tag, command) {
 // changed, and the crontab goes when no line is left (without one the cron service does not run).
 // True when they changed.
 export function set_cron(tag, lines) {
+	// the jobs run below the router's services and xray (nice 10), like spawn()
+	lines = map(lines, function(l) {
+		let m = match(l, /^(\S+ \S+ \S+ \S+ \S+ )(.*)$/);
+		return (m && substr(m[2], 0, 5) != 'nice ') ? `${m[1]}nice -n 10 ${m[2]}` : l;
+	});
 	let all = filter(split(readfile(CRONTAB) ?? '', '\n'), l => length(l));
 	if (join('\n', filter(all, l => index(l, tag) >= 0)) == join('\n', lines)) return false;
 	let rest = [ ...filter(all, l => index(l, tag) < 0), ...lines ];
@@ -241,10 +248,24 @@ export function control(request, timeout) {
 	return length(out) ? split(rtrim(out, '\n'), '\n') : null;
 };
 
-// the answer of control() of an xray that knows the request (an older one answers "error usage: …"), else null
-function control_known(request, timeout) {
-	let a = control(request, timeout);
-	return (a == null || match(a[0] ?? '', /^error usage/)) ? null : a;
+// whether any xray process runs (the shared instance, also while it starts and has no control socket yet)
+function xray_process() {
+	return length(trim(exec('pidof xray').out)) > 0;
+}
+
+// the answer of control() of an xray that knows the request (an older one answers "error usage: …"). While an
+// xray process runs without answering (it is starting: no socket yet) the request is repeated for up to 30 s.
+// null: no xray process runs (the caller may start the executable: then it is the only one), or an older xray
+// does not know the request; 'busy': an xray process runs and does not answer (starting another one would make
+// two processes: the caller does not)
+function control_known(request, timeout, tries) {
+	for (let i = 0; i < (tries ?? 30); i++) {
+		let a = control(request, timeout);
+		if (a != null) return match(a[0] ?? '', /^error usage/) ? null : a;
+		if (!xray_process()) return null;
+		sleep(1000);
+	}
+	return 'busy';
 }
 
 // xray's test of the configuration in PATH (ASSET: the directory of its ext: files): null when xray accepts
@@ -252,6 +273,7 @@ function control_known(request, timeout) {
 // socket, so that no second xray process starts while one runs; without one, "xray run -test".
 export function xray_test(path, asset) {
 	let a = control_known(`test ${path}${asset ? ' ' + asset : ''}`, 120), msg;
+	if (a == 'busy') return 'xray does not answer on its control socket (it is starting): not tested, kept for the next apply';
 	if (a != null) {
 		if (a[0] == 'ok') return null;
 		msg = replace(join(' ', a), /^error /, '');
@@ -297,8 +319,11 @@ export function version_of(path, args, re) {
 export function xray_version() {
 	let st = stat(XRAY), key = st ? `${st.mtime}/${st.size}` : null;
 	if (key && versions[XRAY]?.key != key) {
-		let a = control_known('version'), m = a ? match(a[0] ?? '', /Xray ([0-9.]+)/) : null;
+		// one try with a short wait: the pages ask for the version in every status (rpcd, LuCI's 20 s timeout), and
+		// on a busy router (xray runs with nice 10) the socket answered in 12 s
+		let a = control_known('version', 2, 1), m = (type(a) == 'array') ? match(a[0] ?? '', /Xray ([0-9.]+)/) : null;
 		if (m) versions[XRAY] = { key: key, value: m[1] };
+		else if (a == 'busy') return versions[XRAY]?.value ?? '';
 	}
 	return version_of(XRAY, 'version', /Xray ([0-9.]+)/);
 };
@@ -308,7 +333,8 @@ export function xray_version() {
 // { private_key, public_key } in base64url, or null. xray prints the public key as "Password (PublicKey): …"
 // (26.x), "Password: …" (25.x) or "Public key: …" (earlier).
 export function x25519(priv) {
-	let ans = control_known(priv ? `x25519 ${priv}` : 'x25519');
+	let ans = control_known(priv ? `x25519 ${priv}` : 'x25519', 5, 3);
+	if (ans == 'busy') return null;
 	let out = (ans != null) ? join('\n', ans) : exec(`${XRAY} x25519${priv ? ' -i ' + shq(priv) : ''} 2>/dev/null`).out;
 	let a = match(out, /Private ?[Kk]ey *: *([A-Za-z0-9_-]{43})/), b = match(out, /(Public ?[Kk]ey|Password)( *\([^)]*\))? *: *([A-Za-z0-9_-]{43})/);
 	return (a && b) ? { private_key: a[1], public_key: b[3] } : null;

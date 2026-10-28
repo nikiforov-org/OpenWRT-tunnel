@@ -5,8 +5,9 @@
 #     the client applies its settings again (after netifd has written the resolvers of the interfaces
 #     still up). An event that changes neither is left alone: a watchdog that restarts a WAN without a
 #     cable every minute sends ifdown each time, and every reload costs a sync on a small router
-#   dynamic DNS (a domain on), ifup/ifupdate: the public address may be a new one, the domains are
-#     checked at once instead of at the next run from cron
+#   dynamic DNS (a domain on), ifup/ifupdate, and ifdown when the default routes changed (a cable pulled
+#     with a second uplink up: the public address is the other uplink's): the domains are checked at once
+#     instead of at the next run from cron; the restarts of a WAN without a cable change no route
 case "$ACTION" in ifup|ifdown|ifupdate) ;; *) exit 0 ;; esac
 wan=0
 for z in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
@@ -24,7 +25,13 @@ if [ "$ACTION" != ifupdate ] && [ "$(uci -q get xtunnel-client.main.enabled)" = 
 	  logger -t xtunnel-client "uplink $INTERFACE: $ACTION, the way out changed, applying the settings again"
 	  /etc/init.d/xtunnel-client reload 9>&- ) </dev/null >/dev/null 2>&1 &
 fi
-if [ "$ACTION" != ifdown ] && grep -q "# xtunnel-ddns-update" /etc/crontabs/root 2>/dev/null; then
-	( sleep 5; /usr/libexec/xtunnel-ddns/update ) >/dev/null 2>&1 &
+if grep -q "# xtunnel-ddns-update" /etc/crontabs/root 2>/dev/null; then
+	( sleep 5
+	  mkdir -p /tmp/xtunnel-ddns
+	  exec 9>/var/lock/xtunnel-ddns-uplink; flock 9
+	  key=$(ip route | grep '^default' | sort | md5sum | cut -d' ' -f1)
+	  [ "$ACTION" = ifdown ] && [ "$key" = "$(cat /tmp/xtunnel-ddns/uplink.key 2>/dev/null)" ] && exit 0
+	  echo "$key" > /tmp/xtunnel-ddns/uplink.key
+	  /usr/libexec/xtunnel-ddns/update 9>&- ) </dev/null >/dev/null 2>&1 &
 fi
 exit 0

@@ -116,9 +116,6 @@ ubus().call('service', 'set', {
 			env: { XRAY_LOCATION_ASSET: ASSETS, XTUNNEL_CONTROL: CONTROL },
 			file: [ CONF, XRAY ],          // a changed file restarts xray at the next service set (an upgrade)
 			respawn: [ '3600', '5', '5' ],
-			// below the router's own services: under a full load (many new connections through the links on a
-			// slow router) procd, which feeds the watchdog, ubus, dropbear and netifd still get the processor
-			nice: 10,
 			limits: { nofile: '16384 16384' },
 			stderr: true
 		}
