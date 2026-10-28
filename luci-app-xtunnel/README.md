@@ -6,15 +6,16 @@ One package with three LuCI pages in the **XTunnel** section of the top menu:
   and renews Let's Encrypt certificates for each of them and serves your own web site over HTTPS
   straight from the router.
 - **XTunnel → Server**: one xray process serves up to three transports to devices with a
-  profile's links, and the router's tor makes the router reachable through an onion address
-  (SSH, the web interface and the VLESS transports), without a public address or open ports.
-  The profiles hold the keys for both.
+  profile's links. A profile of another router running this package can offer that router's
+  ports here (reverse access): local ports of this router lead to its SSH and web interface
+  through the channel its client keeps, without a public address or open ports there.
 - **XTunnel → Client**: the devices connected to the router reach the Internet through tunnel
-  clients, the links of servers, directly or through Tor.
+  clients, the links of servers; a profile can also offer this router's ports to the server's
+  router (reverse access) and lead local ports to that router through the link.
 
-The server and the client share one xray process, the onion service and the client's links
-through Tor share one tor. It replaces the packages `luci-app-tunnel-ddns`, `-server`, `-client`
-and `-tor` of this repository, which are not installed together with it.
+The server and the client share one xray process. It replaces the packages
+`luci-app-tunnel-ddns`, `-server`, `-client` and `-tor` of this repository, which are not
+installed together with it.
 
 Installing the package is described in the [main README](../README.md). Log in to LuCI again
 after installing; the entries appear in the **XTunnel** section.
@@ -223,17 +224,12 @@ Devices with a profile's links connect to it over the Internet and use the route
   profile password (a URL to proxy, a directory to serve or an xray masquerade object; by
   default a 404 answer).
 - **Profiles.** Any number of profiles, switchable on and off. A profile has a UUID for the
-  VLESS transports, a password for Hysteria2 and a key for the onion service (all generated,
-  all editable) and works on every enabled transport. The **Links** button shows one link and
-  QR code per transport, ready for v2rayNG, Hiddify, Streisand, NekoBox, the Hysteria2 apps and
-  the [Client page](#client) of another router, the links through Tor and the Tor key.
-- **Links through Tor.** While the onion service (section **Tor**, tab **Onion service**) is on, **Links**
-  also gives *TCP + Vision through Tor* and *XHTTP through Tor*: the same VLESS links with the
-  onion address and the transport's own port (the onion service passes each of its ports to
-  the same port of the router, so the transport's port has to be among them: 443 for Vision,
-  8443 for XHTTP by default). They work without a public address or open ports; a client needs
-  the profile's Tor key too (tab **Tor key**). The [Client page](#links-through-tor) of
-  another router takes both. Tor carries TCP only, so there is no Hysteria2 link through Tor.
+  VLESS transports and a password for Hysteria2 (both generated, both editable) and works on
+  every enabled transport. The **Links** button shows one link and QR code per transport, ready
+  for v2rayNG, Hiddify, Streisand, NekoBox, the Hysteria2 apps and the [Client page](#client) of
+  another router.
+- **Reverse access.** A profile of another router running this package can offer that
+  router's ports here: see [Reverse access](#reverse-access).
 - **Keys** are generated on the router (`xray x25519`) with one button; the public key is
   shown next to the private one. Short IDs, the XHTTP path and the obfuscation password get
   random values with a button too.
@@ -248,8 +244,7 @@ Devices with a profile's links connect to it over the Internet and use the route
 ### Step by step
 
 The page shows the **Overview** and the **Profiles** first, then the settings: **REALITY**,
-**Transports** (a tab per transport), **Clients** and **Tor** (tabs **Onion service** and
-**Connection to the Tor network**).
+**Transports** (a tab per transport) and **Clients**.
 
 1. **REALITY.** Enter the **Target** and the **Server names** (for the router's own site:
    `127.0.0.1:443` and the site's domain), click **Generate keypair** next to the private key
@@ -268,9 +263,7 @@ The page shows the **Overview** and the **Profiles** first, then the settings: *
    Apply**). The overview shows "Running" and the open ports a few seconds later; the same
    button then reads **Turn the server off**.
 6. **Links** next to a profile: pick the transport, copy the link or scan the QR code in the
-   client app. With the onion service (section **Tor**) on, the links through Tor are there
-   too; a transport whose port the onion service does not have shows that reason instead.
-   **Copy all** copies every link and the Tor key, one per line, for the Client page of another
+   client app. **Copy all** copies every link, one per line, for the Client page of another
    router (**All links at once** in the dialog of a profile there).
 
 If the router sits behind another router or behind the provider's NAT, the ports must be
@@ -295,111 +288,39 @@ TCP ports of the VLESS transports change, a running xray is stopped before the D
 part is reloaded, so the port is free for whichever of the two has to take it, and
 xray starts again right after.
 
-### Tor and the onion service
+### Reverse access
 
-The section **Tor** of the Server page configures the router's tor in two tabs. **Connection
-to the Tor network**: how tor connects to the Tor network (bridges, snowflake, the country for
-the bridge updates, the cache, the padding), with its state and tools; tor runs while the onion
-service is on or **XTunnel → Client** uses links through Tor, and these settings apply to both.
-**Onion service**: the router as an onion service with client authorization, its ports and the
-names for tor clients. Only the profiles
-with a Tor key can use the address: for everyone else it does not exist. tor lets every client in
-to an onion service without authorized clients, so the service is published only while an enabled
-profile has a Tor key (the page says "Not published" otherwise, and the address stays for later).
+A router running this package that has no public address or open ports (behind a mobile
+operator's NAT, behind another router) can still be administered from this one: its client
+keeps a channel to this server, and local ports of this router lead through it to that router's
+SSH and web interface. This is xray's reverse proxy: a *bridge* on that router opens connections
+through its link to this server with a name that only marks them (the profile's UUID followed by
+`.reverse.xtunnel`, derived on both sides from the link), a *portal* here keeps them as the
+channel, and the connections to the local ports go into it; the bridge dials the target on its
+side. Every connection is made from that router to this one, so nothing has to be open there.
 
-- **An onion service** (version 3) on the router's own tor, with client authorization: the
-  address is `<56 characters>.onion`, created on the first start and kept in
-  `/etc/tor/xtunnel-tor`. Every port in the **Ports** list leads to the same port on the
-  router itself; the default list is 22 (SSH), 80 (the web interface or the site), 443
-  (the site over HTTPS, with the Xray server in front of it when it runs) and 8443 (XHTTP).
-- **Bridges.** The router's tor connects to the Tor network by itself; where direct
-  connections are blocked, it goes through bridges. **Built-in bridges** starts from the
-  bridges shipped with the package (`/usr/share/xtunnel-tor/bridges.txt`: the bridges
-  `bridges.torproject.org` handed out for the country ru when the package was built — obfs4,
-  webtunnel and snowflake lines — then Tor Browser's built-in snowflake and obfs4 bridges). With
-  a **Country for bridges** set, the
-  router refreshes that list once a day, on **Update bridges** and, while the list shipped with
-  the package is in use, as soon as tor has a working circuit (again every 30 minutes until an
-  update succeeds): it asks `bridges.torproject.org` (the moat API, what Tor Browser's connection
-  assist uses) for the bridges handed out in that country, through its own Tor connection
-  (directly if tor is not connected), and merges them into the list, newest first, up to 12
-  per transport. tor restarts with the new list only when the answer did not come through tor
-  itself: a tor that carried the request works and keeps its bridges until its next start.
-  **Bridges entered below** takes the lines from bridges.torproject.org or the Telegram bot
-  @GetBridgesBot; **No bridges** connects directly.
-- **Snowflake bridges** (built-in or entered lines): **Only when no other bridge works** (the
-  default), **Always** or **Never**. Snowflake reaches the Tor network through volunteer
-  proxies found by a broker and keeps trying new proxies, which costs traffic. In the default
-  mode the configuration holds only the other bridges; every 2 minutes
-  `/usr/libexec/xtunnel-tor/watch` asks tor through its control port (127.0.0.1, cookie
-  authentication) whether it has a working circuit and through which bridges its circuits go.
-  After 6 minutes without a working circuit while the router has a default route (a bootstrap
-  that advances counts as working), the snowflake lines are added and tor restarts. They are
-  held back again after 30 minutes of circuits through the other bridges, 24 hours after they
-  were added, or when the daily bridge update brings a changed list. A list of snowflake lines
-  only is used as it is.
-- **Uplink changes.** When an interface of the firewall zone `wan` comes up, goes down or
-  changes its addresses (a cable pulled or plugged, a USB modem as the second uplink) and the
-  route to the Internet now leaves through another interface or address, the package tells tor
-  `DisableNetwork 1` and `0` through its control port: tor closes its connections, which are
-  still bound to the old address, and connects again through the route in effect. Without it,
-  tor noticed nothing for 7 minutes after the WAN cable was pulled and for more than 8 after it
-  was plugged back, and the onion address did not answer meanwhile; with it, the onion service
-  had its introduction circuits back after 10-20 seconds and its descriptor uploaded after 30-40.
-- **Traffic options.** **Keep tor's cache on the router's storage** moves tor's data
-  directory (about 33 MB, mostly the relay descriptors) from `/var/lib/tor` in the memory to
-  `/etc/tor/xtunnel-tor-data`, so that tor does not download the directory again after a
-  restart of the router (about 17 MB each time); tor rewrites the consensus there every few
-  hours (about 3 MB). **Less padding traffic** sets tor's `ReducedConnectionPadding` and
-  `ReducedCircuitPadding`: idle connections to relays are closed sooner, less padding is sent
-  on the connections and only the circuit padding machines with a low overhead are used (the
-  tor manual offers these options for clients on links where traffic is expensive).
-- **The profiles' Tor keys.** Every profile of the server has, next to its UUID and Hysteria2
-  password, an x25519 key for the onion service (**Tor key** in its dialog; generated on the
-  router when the profile is added, or by **Generate**; empty: no access through the onion
-  address). The router keeps the private key in `/etc/config/xtunnel-server` and installs the
-  public key into the service for every enabled profile. **Links** next to a profile has a tab
-  **Tor key**: the onion address and the line `<address>:descriptor:x25519:<key>` that
-  **XTunnel → Client** of another router takes, the key for Tor Browser's prompt, and for a tor
-  daemon (Orbot, or a tor in front of an SSH or Xray client) its torrc lines and the one-line
-  `.auth_private` file, plus a QR code of the line.
-- **Names for clients.** Names such as `router-home` under which a tor daemon opens the router:
-  the torrc lines of **Tor key** then include `MapAddress router-home.onion <address>.onion`, and
-  the client connects to `router-home.onion` instead of the 56-character address. The names
-  are used by the clients only; the router's own tor does not change with them.
-- **No firewall changes.** The router makes the connections itself; nothing is opened from
-  WAN. The onion address works behind any NAT.
-- **Links through Tor.** While the onion service is on, **Links** also gives *TCP + Vision
-  through Tor* and *XHTTP through Tor*: the VLESS links with the onion address and the
-  transport's own port (the onion service passes each of its ports to the same port of the
-  router, so the transport's port has to be among them: 443 for Vision and 8443 for XHTTP are in
-  the default list). Tor carries TCP only, so there is no Hysteria2 link through Tor.
+- **Reverse access** in the dialog of a profile switches the portal on for that profile. Only
+  that profile's UUID can register the channel (the rule matches the user of the connection).
+  Needs a VLESS transport (the UUID names the channel).
+- **Local ports**, one entry `LOCAL:HOST:PORT` each: this router listens on `LOCAL` and the
+  connection comes out at `HOST:PORT` as seen from the other router. For example
+  `22001:127.0.0.1:22` for its SSH (`ssh -p 22001 root@<this router>`) and `22002:127.0.0.1:443`
+  for its web interface (`https://<this router>:22002/`; with the name of that router's site
+  pointed at this router, in `/etc/hosts` or in this router's dnsmasq, the certificate matches).
+  The ports listen on every address of this router; the firewall lets the LAN in and keeps the
+  WAN out as for any other local service. A port may not be one of the transports' or of the
+  client part's own (61000-61299), and no port twice.
+- What the other router lets this one reach is decided there (**Reachable ports** of its client
+  profile: by default its own SSH and web interface, `127.0.0.1:22` and `127.0.0.1:443`); a
+  target outside that list is refused at the bridge.
+- The channel goes through whichever link of that router's profile is active there and comes
+  back on its own after a restart of either side (xray's bridge reconnects). While that
+  router's client is off, the local ports answer nothing.
+- The profile table shows the local ports of a profile with the reverse access on.
 
-#### Step by step
-
-1. **Tor → Connection to the Tor network → Bridges**: leave **Built-in bridges** and enter the
-   **Country for bridges** (two letters) so that the list stays current, or enter your own lines.
-2. **Tor → Onion service**: tick **Run the onion service**; leave the **Ports** list as it is or add
-   the ports you need.
-3. **Profiles**: every profile added has a Tor key filled in; profiles from before have none
-   until you click **Generate** in their dialog.
-4. Click **Save & Apply** (or the button that turns the server on, which saves and applies the
-   page too). The tab **Connection to the Tor network** shows tor connecting and then
-   "connected"; the onion address appears right away, the service answers a minute or two
-   after the connection is made.
-5. **Links** next to a profile, tab **Tor key**:
-   - **Tor Browser**: open `http://<address>.onion/` (or `https://<address>.onion/` for 443);
-     when it asks for the key of the onion service, paste the key.
-   - **A tor daemon** (a computer, a server, Orbot): add the torrc lines shown
-     (`ClientOnionAuthDir`, and `MapAddress` for each of the **Names for clients**), put the
-     line shown into the file `<name>.auth_private` in that directory, restart it, and connect
-     through its SOCKS port: `ssh -o ProxyCommand='nc -x 127.0.0.1:9050 %h %p' root@<name or address>.onion`,
-     or point an Xray client at `<name or address>.onion:443` through that proxy.
-   - **XTunnel → Client of another router**: paste the links through Tor and the line of the
-     Tor key into a profile there and tick **Through Tor** ([Links through Tor](#links-through-tor)).
-
-Switching a profile off (or deleting it, or clearing its Tor key) locks its key out at the next
-apply; the address stays the same. A new key means the client has to get the new key.
+Set up: on this router, the profile with **Reverse access** and its **Local ports**, **Save & Apply**;
+on the other router, **XTunnel → Client**, a profile with this server's links and **Reverse
+access** on ([Reverse access and local ports](#reverse-access-and-local-ports) there).
 
 ## Client
 
@@ -412,17 +333,13 @@ the [Server page](#server) of another router shows them:
 | TCP + XTLS-Vision | `vless://` with `type=tcp` and `flow=xtls-rprx-vision` |
 | XHTTP | `vless://` with `type=xhttp` |
 | Hysteria2 | `hysteria2://` or `hy2://` |
-| TCP + XTLS-Vision through Tor | the same `vless://` link to the server's onion address |
-| XHTTP through Tor | the same `vless://` link to the server's onion address |
-
-The links through Tor reach a server that has no public address or open ports, through its
-onion service: see [Links through Tor](#links-through-tor).
 
 Links of the same kinds from any other Xray or Hysteria2 server (a VPS, another router) work
 too. Every link is a client; one of them is active, chosen by hand or automatically by the
 measured speed. The traffic of the LAN is split by a list of domains and subnets, and nothing
-of it bypasses the clients (kill switch). All clients run in one xray process, the same one as
-the server's.
+of it bypasses the clients (kill switch); with **LAN through the client** off the LAN is left
+alone and the links serve the reverse access and the local ports of the profiles only. All
+clients run in one xray process, the same one as the server's.
 
 ### What it does
 
@@ -480,65 +397,43 @@ the server's.
   for servers that do not have it, and its download is cut off after the test size.
 - **Links that are refused:** VLESS over other transports (WebSocket, gRPC and others), TCP
   header obfuscation, an unchecked TLS certificate (`allowInsecure=1`, or `insecure=1`
-  without `pinSHA256` for Hysteria2: xray has no switch for an unchecked certificate),
-  Hysteria2 port ranges, an `.onion` address in a field that is not through Tor, and HTTP/3
-  (`alpn=h3`) through Tor. The reason is shown next to the link.
+  without `pinSHA256` for Hysteria2: xray has no switch for an unchecked certificate) and
+  Hysteria2 port ranges. The reason is shown next to the link.
 
-### Links through Tor
+### Reverse access and local ports
 
-A server router whose onion service is on (its Server page, section **Tor**, tab **Onion service**) is
-reachable through its onion address without a public address or open ports (behind a mobile
-operator's NAT, for example). **Links** next to a profile on its Server page then gives *TCP +
-Vision through Tor* and *XHTTP through Tor* next to the other links, and the tab **Tor key** the
-line of the profile's key: the onion service lets in only clients with a key.
+A profile can make this router reachable from the server's router without a public address or
+open ports here, and lead local ports of this router to that router through the link. Both go
+through the same link the LAN uses, and both work with **LAN through the client** off, so a
+router can run the client for them alone.
 
-- A profile holds them next to the direct links: the fields **TCP + Vision through Tor
-  link** and **XHTTP through Tor link**, the **Onion service key** (the whole line of the Tor
-  key, `<address>:descriptor:x25519:<key>`) and the box **Through Tor**, which decides whether
-  they are used; switched off, they are kept but left out.
-- The links through Tor are clients like the others: measured, checked every minute (with 30
-  seconds for an answer instead of 10) and chosen by hand or automatically. When the direct
-  links of a server stop answering (its cable out, the server on a mobile uplink), the minute
-  check makes the link through Tor that answers first active, and the measurements then
-  choose the faster of the links through Tor; when the direct links answer again, the next
-  measurement goes back to the fastest. Measured between two test routers in Docker over the
-  Tor network: 40-430 KB/s through Tor against tens of MB/s directly, 1-7 s to the first byte.
-- xray dials them through the SOCKS port of this router's tor, `127.0.0.1:9050` (tor's
-  default). tor runs while they are in use, with the connection settings of this router's
-  Server page (section **Tor**: bridges and so on); the overview shows its state.
-- The keys go to tor with the rest of its configuration (see **Tor** under "What the package
-  changes"): `/etc/tor/xtunnel-client/<profile>.auth_private` (owned by tor's user) and
-  `ClientOnionAuthDir /etc/tor/xtunnel-client` in `/etc/xtunnel-tor/torrc`. tor reads the keys
-  only when it starts, so a new, changed or removed key (also the client switched on or off,
-  or **Through Tor** switched) restarts tor; meanwhile the router's own onion service is
-  unreachable for some minutes, and the onion connections fail at once for about a minute
-  after a few restarts in a row.
-- Tor carries TCP only, so there is no Hysteria2 link through Tor. The names of the servers
-  of the links through Tor are resolved by tor, not at the provider.
-
-### through Tor
-
-**Settings**, tab **through Tor**, **Enabled** adds one more link: the outbound `tor` itself (the SOCKS
-port of this router's tor), so the LAN goes through the Tor network and out of its exit relays,
-without a server. It is measured, checked and chosen like the other links. Its test target is
-`cgi-bin/speed` of the site this router serves (the Dynamic DNS page), at the site's domain and
-port, through Tor; **URL for the speed test through Tor** names another one (a router in front
-that forwards another public port to the site, or another site). Without a site and without a
-URL the link is marked and not used. Tor carries TCP only: UDP of the LAN (QUIC, calls) does not
-pass while it is active, and the resolver of **DNS through the tunnel** is asked over TCP while
-the link is on.
+- **Reverse access** (in the dialog of a profile): this router keeps a channel to the server
+  (xray's reverse proxy: a bridge here, a portal there; the connections are made from here, the
+  profile's UUID names the channel on both sides) through which the server's router reaches the
+  **Reachable ports** listed: an address or subnet of this router and a port or range per entry
+  (`127.0.0.1:22`, `192.168.1.0/24:1-65535`); empty means this router's own SSH and web
+  interface, `127.0.0.1:22` and `127.0.0.1:443`. Anything else is refused at the bridge. The
+  server's router enables the same profile for it and chooses its local ports
+  ([Reverse access](#reverse-access) on its Server page). Needs a VLESS link of the profile.
+- **Local ports to the server's router**, one entry `LOCAL:HOST:PORT` each: this router listens
+  on `LOCAL` (every address of this router; the firewall lets the LAN in), and the connection
+  comes out of the server at `HOST:PORT`: `22101:127.0.0.1:22` for the server router's SSH
+  (`ssh -p 22101 root@<this router>`), `22102:127.0.0.1:443` for its web interface. The
+  server's **Access to local networks** must be on. A port may not be one of this client's own
+  (61000-61299), and no port twice.
+- Both go through the active link while it is one of the profile's links, else through the
+  profile's first link. The **Access** column of the profile table shows what is in effect.
 
 ### Step by step
 
 1. Install the package, log in to LuCI again, open **XTunnel → Client**.
 2. **Profiles → Add profile…**, give it the server's name and paste its links from the
-   server page (**Links** next to a profile there), **Save**. Repeat for every server. For a
-   server with an onion service also paste its links through Tor and the line of its tab
-   **Tor key**, and tick **Through Tor**. Quicker: **Copy all** in that **Links** dialog, paste
-   into **All links at once** of the profile's dialog and click **Fill in the fields** (each link
-   goes into the field of its transport, the Tor key into **Onion service key**, **Through Tor**
-   is ticked when there are links through Tor).
-3. Check the **Split tunnelling** section: the mode, your entries, the sources.
+   server page (**Links** next to a profile there), **Save**. Repeat for every server. Quicker:
+   **Copy all** in that **Links** dialog, paste into **All links at once** of the profile's
+   dialog and click **Fill in the fields** (each link goes into the field of its transport).
+   For the reverse access and the local ports see above.
+3. Check the **Split tunnelling** section: **LAN through the client**, the mode, your entries,
+   the sources.
 4. Click **Turn the client on** in the overview (it saves and applies the page like **Save &
    Apply**; **Turn the client off** switches it off the same way). The overview shows the
    service running and the links ready; **Measure now** fills the speeds and, in the
@@ -634,9 +529,11 @@ configuration is applied again right away.
 The generated configuration: `log` at level warning without an access log; one inbound per
 enabled transport (`vless` with REALITY, `hysteria` version 2 with TLS and ALPN `h3`) with
 `sniffing` for routing only; a `freedom` outbound; a `blackhole` outbound for BitTorrent and,
-with local access off, for private address ranges. **Show configuration** in the overview
-displays the file; **Show log** the xray messages from the system log; **Restart Xray**
-restarts the service.
+with local access off, for private address ranges; for a profile with the reverse access on a
+`reverse.portals` entry, a routing rule that hands the connections of that user to the
+channel's name to the portal, and a `dokodemo-door` inbound per local port routed to the
+portal. **Show configuration** in the overview displays the file; **Show log** the xray
+messages from the system log; **Restart Xray** restarts the service.
 
 ### Client
 
@@ -673,75 +570,25 @@ Everything only on **Save & Apply**, nothing at install time. While the client i
   xtunnel-client-…` lines); the file is removed when no other line is left.
 - `/etc/xtunnel-client/sources/`: the fetched lists and their `.meta` (the files of a removed
   source go at the next apply); `/tmp/xtunnel-client/`: measurements, history, state.
-- While links through Tor are in use, the router's tor runs, and the keys of their onion
-  services are in `/etc/tor/xtunnel-client/` (see **Tor** below).
+- With **LAN through the client** off, only the configuration file and cron are written: no
+  firewall, network or dhcp change. The reverse access is the `reverse.bridges` section of the
+  configuration with its routing rules (the channel to the link, the reachable targets to
+  `direct`, the rest blocked); the local ports are `dokodemo-door` inbounds routed to the link.
 
 The original values of everything changed are kept in `/etc/xtunnel-client/backup.json` and
 restored when the client is switched off.
-
-### Tor
-
-tor is needed while the onion service is on (Server page, section **Tor**, tab **Onion service**) or the client
-uses links through Tor; then:
-
-- `/etc/xtunnel-tor/torrc` (root:tor, mode 640): the tor configuration generated from
-  `/etc/config/xtunnel-server` (section `tor`; the config gets mode 600, it holds the private
-  keys) and `/etc/config/xtunnel-client`: the bridge lines, the traffic options, a control
-  port on 127.0.0.1 (`ControlPort auto`, the port written to `control.port` in the data
-  directory, `CookieAuthentication 1`) for the watch script and the state on the page, which
-  asks tor there for its bootstrap progress; with the onion service the service directory, its
-  version and ports; with the client's keys `ClientOnionAuthDir /etc/tor/xtunnel-client`. It is
-  added to the stock tor configuration through `tor.conf.tail_include` in `/etc/config/tor`,
-  the way the tor package provides for. The file is replaced only after `tor --verify-config`
-  accepts it together with the stock `/etc/tor/torrc`; any error, from an unreadable bridge
-  line to a configuration rejected by tor, leaves the configuration in effect running and
-  shows the reason on the page. When nothing needs tor any more, it is removed.
-- `/etc/tor/xtunnel-tor/` (tor:tor, mode 700): the service's keys and `hostname`, kept by tor;
-  `authorized_clients/<profile section>.auth` for every enabled server profile with a Tor key,
-  written from that key. The directory stays when the service is switched off and when the
-  package is removed; deleting it gives the service a new address.
-- `/etc/tor/xtunnel-client/` (tor:tor, mode 700): one `<client profile section>.auth_private`
-  per client profile whose links through Tor are in use and have a key.
-- `/etc/xtunnel-tor/bridges.txt` and `bridges.state`: the refreshed bridge list and the result
-  of the last update (time, country, through Tor or directly, counts, error); while tor runs
-  with the built-in list and a country, a line in `/etc/crontabs/root` (`# xtunnel-tor-bridges`,
-  once a day at a time chosen at random) runs `/usr/libexec/xtunnel-tor/bridges-update`.
-- With snowflake as the fallback and a list of snowflake and other lines, and while the list
-  shipped with the package is in use with a country set (for the first update), a line in
-  `/etc/crontabs/root` (`# xtunnel-tor-watch`, every 2 minutes) runs
-  `/usr/libexec/xtunnel-tor/watch`; its last result is in `/tmp/xtunnel-tor/watch.json`, and
-  `/etc/xtunnel-tor/snowflake.on` (the time it was written) exists while the snowflake lines are
-  added.
-- `/etc/hotplug.d/iface/90-xtunnel`: on ifup, ifdown and ifupdate of an interface of the wan
-  zone, while tor runs with this package's file, 3 seconds later, `watch reconnect` (one at a
-  time); the route in effect is kept in `/tmp/xtunnel-tor/uplink`, and tor is reconnected only
-  when it changed.
-- `/etc/tor/xtunnel-tor-data/` (tor:tor, mode 700) while the cache is kept on the router's
-  storage. When the option is switched on or off, the cache files (`cached-*`, `state`) are
-  copied to the other directory before tor restarts, so that tor does not download the
-  directory again; afterwards only one copy is kept.
-- The `tor` service is restarted on every change (tor re-reads `/etc/tor/torrc` on reload
-  as the unprivileged tor user, which cannot read it, so a reload would stop it). The service
-  (of `xtunnel-core`, the init script of OpenWrt's `tor` package) is disabled when the package is
-  installed; this package enables and starts it with its configuration while the onion service or
-  the client's links through Tor need it, and stops and disables it when nothing needs tor any
-  more (a switched-off onion service costs no memory: tor's cache stays on the router's storage
-  while that option is on). **Restart tor** in the section **Tor** restarts the service by hand.
-
-The generated configuration and the list of authorized clients: **Show tor configuration** in
-the section **Tor**; **Show tor log** shows the tor messages from the system log, including the
-bootstrap progress.
 
 ## Removal
 
 `apk del luci-app-xtunnel` switches everything off first and then removes the files: the client's
 interception, firewall, routing, IPv6, dnsmasq and cron settings are restored, xray stops, the
-server's firewall rules go, the tor configuration of the package and its inclusion in
-`/etc/config/tor` go (the stock tor service is stopped when this package had switched it on),
-and the web server gets its stock settings back. The configuration (`/etc/config/xtunnel-ddns`,
-`xtunnel-server`, `xtunnel-client`), the uploaded sites (`/usr/share/www/`,
-`/etc/xtunnel-ddns/sites/`), uacme's directories (`/etc/xtunnel-ddns/`, `/etc/ssl/xtunnel-ddns/`),
-the client's fetched lists (`/etc/xtunnel-client/`) and the onion service's keys
-(`/etc/tor/xtunnel-tor/`) stay. The dependencies installed with the package (xtunnel-core, tor, uacme,
-the nftables TPROXY and socket kernel modules, curl) are removed by apk unless another package needs
-them.
+server's firewall rules go, and the web server gets its stock settings back. The configuration
+(`/etc/config/xtunnel-ddns`, `xtunnel-server`, `xtunnel-client`), the uploaded sites
+(`/usr/share/www/`, `/etc/xtunnel-ddns/sites/`), uacme's directories (`/etc/xtunnel-ddns/`,
+`/etc/ssl/xtunnel-ddns/`) and the client's fetched lists (`/etc/xtunnel-client/`) stay. The
+dependencies installed with the package (xtunnel-core, uacme, the nftables TPROXY and socket
+kernel modules, curl) are removed by apk unless another package needs them.
+
+An upgrade from a version with the Tor part stops that tor, removes its configuration
+(`/etc/xtunnel-tor`, the inclusion in `/etc/config/tor`, its cron lines) and leaves the keys of
+the onion service in `/etc/tor/xtunnel-tor/` alone.
