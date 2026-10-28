@@ -14,7 +14,7 @@
 'use strict';
 
 import { access, readfile, writefile, mkdir, unlink, chmod } from 'fs';
-import { XRAY, log, lock, read_json, ubus, instances, replace_checked, xray_test, spawn } from 'xtunnel.common';
+import { XRAY, log, read_json, ubus, instances, running, replace_checked, xray_test, spawn, control, xray_lock } from 'xtunnel.common';
 
 const SERVICE = 'xtunnel-xray';
 const DIR     = '/tmp/xtunnel-xray';
@@ -24,7 +24,6 @@ const STARTED = `${DIR}/started`;    // the files of the started packages
 const LIST    = `${DIR}/parts`;      // the files in the joined file in effect, for the status pages
 const ASSETS  = '/etc/xtunnel-client/sources';   // the .dat files of the client's lists (ext: rules)
 const CONTROL = `${DIR}/control.sock`;           // the client's active link: xray control bo|bi (select)
-const LOCK    = '/var/lock/xtunnel-xray';
 const PARTS   = [
 	{ conf: '/etc/xtunnel-server/config.json' },
 	{ conf: '/etc/xtunnel-client/config.json', after: '/usr/libexec/xtunnel-client/measure started' }
@@ -69,7 +68,7 @@ if (!(op in [ 'start', 'stop' ]) || !length(filter(PARTS, p => p.conf == arg))) 
 }
 mkdir(DIR, 0o700);
 // the processes started from here (the command after a start) do not hold the lock
-let held = lock(LOCK, true);
+let held = xray_lock();
 
 let started = filter(split(readfile(STARTED) ?? '', '\n'), c => length(filter(PARTS, p => p.conf == c)));
 if (op == 'start' && !(arg in started)) push(started, arg);
@@ -128,4 +127,11 @@ if (replaced || !before?.running || join(' ', before?.command ?? []) != join(' '
 	for (let p in used)
 		if (p.after && access(split(p.after, ' ')[0], 'x'))
 			spawn(`i=0; while [ $i -lt 10 ] && [ "$(ubus call service list '{"name":"${SERVICE}"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')" = "${old}" ]; do sleep 1; i=$((i+1)); done; ${p.after}`);
+	// the lock stays held until the new process answers on its control socket (at most 30 s): the executable started
+	// for a test or a key (xray_alone) waits for the lock, so it never runs next to the process that starts now
+	for (let i = 0; i < 30; i++) {
+		let cur = running(SERVICE, 'xray');
+		if (cur && cur.pid != old && control('version', 2) != null) break;
+		system('sleep 1');
+	}
 }

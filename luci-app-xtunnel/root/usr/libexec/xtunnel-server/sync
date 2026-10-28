@@ -14,7 +14,7 @@
 
 import { access, readfile, mkdir, unlink, chmod } from 'fs';
 import { cursor } from 'uci';
-import { log, list, flag, read_json, lock, not_applied, fw_rule, write_xray, replace_checked, x25519, reverse_domain, port_entry } from 'xtunnel.common';
+import { log, list, flag, read_json, xray_lock, not_applied, fw_rule, write_xray, replace_checked, x25519, reverse_domain, port_entry } from 'xtunnel.common';
 import { certificate } from 'xtunnel-server.common';
 
 const CFG   = 'xtunnel-server';
@@ -278,8 +278,9 @@ uci.foreach(CFG, 'profile', function(s) {
 });
 chmod(`/etc/config/${CFG}`, 0o600);
 unlink(ERROR);
-// the lock of xray-service: the joined process is not rebuilt while the file and the port change
-let xray_lock = lock('/var/lock/xtunnel-xray', true);
+// the lock of xray-service: the joined process is not rebuilt while the file and the port change (held until the
+// exit; xray_test and x25519 below know it is held)
+xray_lock();
 let vless_before = vless_ports();
 
 // the public key of the REALITY private key for the status and the links, derived by xray once per key
