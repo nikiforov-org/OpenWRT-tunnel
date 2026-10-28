@@ -112,6 +112,10 @@ function vless(p, protocol) {
 	}
 	let err = vless_security(q, p.host, stream);
 	if (err) return { error: err };
+	// a dead connection (the uplink or its address changed) is closed within about a minute: keepalive
+	// probes after 30 s without traffic, closed after 30 s of unacknowledged data; the reverse channel's
+	// bridge then connects again at once
+	stream.sockopt = { tcpKeepAliveIdle: 30, tcpKeepAliveInterval: 10, tcpUserTimeout: 30000 };
 	return { outbound: { protocol: 'vless', settings: { vnext: [ { address: p.host, port: p.port, users: [ user ] } ] }, streamSettings: stream } };
 }
 

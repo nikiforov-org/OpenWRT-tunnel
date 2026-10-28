@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=XTunnel: dynamic DNS, Let's Encrypt certificates and a web site, an xray server (VLESS + REALITY, Hysteria2), and the LAN through tunnel clients
-LUCI_DEPENDS:=+uhttpd +uacme +uclient-fetch +xtunnel-core +kmod-nft-tproxy +kmod-nft-socket +curl +jsonfilter +luci-lib-uqr +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-math +ucode-mod-log
+LUCI_DEPENDS:=+uhttpd +uacme +uclient-fetch +xtunnel-core +kmod-nft-tproxy +kmod-nft-socket +curl +jsonfilter +luci-lib-uqr +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-math +ucode-mod-log +ucode-mod-socket
 LUCI_PKGARCH:=all
 LUCI_MAINTAINER:=Evgenii Nikiforov
 LUCI_URL:=https://github.com/nikiforov-org/OpenWRT-tunnel

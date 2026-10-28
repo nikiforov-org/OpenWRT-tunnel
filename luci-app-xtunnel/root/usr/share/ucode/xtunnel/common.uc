@@ -218,24 +218,64 @@ export function replace_checked(path, text, mode, check) {
 	return 'written';
 };
 
-// xray's test of the configuration in PATH (ENV: variables for it): null when it accepts it, else the
-// reason (the end of its last line)
-export function xray_test(path, env) {
-	let r = exec(`${env ?? ''} ${XRAY} run -test -format json -c ${shq(path)} 2>&1`);
-	if (r.code == 0) return null;
-	let lines = split(rtrim(r.out, '\n'), '\n'), last = split(lines[length(lines) - 1] ?? '', ' > ');
-	return trim(last[length(last) - 1]) || `xray exit code ${r.code}`;
+// one request to the control socket of the running xray (xtunnel-core's control.go): the lines of the
+// answer, or null when no xray answers there (none runs) or ucode's socket module is missing
+export const CONTROL = '/tmp/xtunnel-xray/control.sock';
+let socket_mod = null;
+export function control(request, timeout) {
+	if (socket_mod == null) {
+		try { socket_mod = require('socket'); } catch (e) { socket_mod = false; }
+	}
+	let so = socket_mod || null, s = so?.create(so.AF_UNIX, so.SOCK_STREAM, 0);
+	if (!s) return null;
+	if (!s.connect({ family: so.AF_UNIX, path: CONTROL })) {
+		s.close();
+		return null;
+	}
+	s.setopt(so.SOL_SOCKET, so.SO_RCVTIMEO, { tv_sec: timeout ?? 10, tv_usec: 0 });
+	s.setopt(so.SOL_SOCKET, so.SO_SNDTIMEO, { tv_sec: 5, tv_usec: 0 });
+	let out = '', c;
+	if (s.send(`${request}\n`) != null)
+		while ((c = s.recv(4096)) != null && length(c) > 0) out += c;
+	s.close();
+	return length(out) ? split(rtrim(out, '\n'), '\n') : null;
+};
+
+// the answer of control() of an xray that knows the request (an older one answers "error usage: …"), else null
+function control_known(request, timeout) {
+	let a = control(request, timeout);
+	return (a == null || match(a[0] ?? '', /^error usage/)) ? null : a;
+}
+
+// xray's test of the configuration in PATH (ASSET: the directory of its ext: files): null when xray accepts
+// it, else the reason (the end of xray's message). A running xray tests it itself through its control
+// socket, so that no second xray process starts while one runs; without one, "xray run -test".
+export function xray_test(path, asset) {
+	let a = control_known(`test ${path}${asset ? ' ' + asset : ''}`, 120), msg;
+	if (a != null) {
+		if (a[0] == 'ok') return null;
+		msg = replace(join(' ', a), /^error /, '');
+	}
+	else {
+		let r = exec(`${asset ? 'XRAY_LOCATION_ASSET=' + shq(asset) : ''} ${XRAY} run -test -format json -c ${shq(path)} 2>&1`);
+		if (r.code == 0) return null;
+		let lines = split(rtrim(r.out, '\n'), '\n');
+		msg = lines[length(lines) - 1] ?? '';
+		if (!length(msg)) return `xray exit code ${r.code}`;
+	}
+	let last = split(msg, ' > ');
+	return trim(last[length(last) - 1]) || 'rejected';
 };
 
 // the xray configuration CONFIG of a part (log TAG, its reason file ERROR) to the file PATH, when xray
-// accepts it (ENV: variables for the test): 'same', 'written' or null (the reason in ERROR)
-export function write_xray(tag, error, path, config, env) {
+// accepts it (ASSET: the directory of its ext: files): 'same', 'written' or null (the reason in ERROR)
+export function write_xray(tag, error, path, config, asset) {
 	mkdir(replace(path, /\/[^\/]*$/, ''), 0o700);
 	if (stat(XRAY)?.mode == null) {
 		not_applied(tag, error, 'xray is not installed (/usr/bin/xray of the package xtunnel-core is missing)');
 		return null;
 	}
-	let r = replace_checked(path, sprintf('%.2J\n', config), 0o600, f => xray_test(f, env));
+	let r = replace_checked(path, sprintf('%.2J\n', config), 0o600, f => xray_test(f, asset));
 	if (r == 'written') log(tag, 'configuration written');
 	else if (r != 'same') { not_applied(tag, error, `xray rejected the configuration: ${r}`); return null; }
 	return r;
@@ -253,15 +293,23 @@ export function version_of(path, args, re) {
 	return versions[path].value;
 };
 
+// the version of xray: the running one answers through its control socket, else "xray version" (cached)
 export function xray_version() {
+	let st = stat(XRAY), key = st ? `${st.mtime}/${st.size}` : null;
+	if (key && versions[XRAY]?.key != key) {
+		let a = control_known('version'), m = a ? match(a[0] ?? '', /Xray ([0-9.]+)/) : null;
+		if (m) versions[XRAY] = { key: key, value: m[1] };
+	}
 	return version_of(XRAY, 'version', /Xray ([0-9.]+)/);
 };
 
-// an X25519 key pair from xray, made (without PRIV) or derived from the private key PRIV (base64url):
+// an X25519 key pair from xray (the running one through its control socket, else "xray x25519"), made
+// (without PRIV) or derived from the private key PRIV (base64url):
 // { private_key, public_key } in base64url, or null. xray prints the public key as "Password (PublicKey): …"
 // (26.x), "Password: …" (25.x) or "Public key: …" (earlier).
 export function x25519(priv) {
-	let out = exec(`${XRAY} x25519${priv ? ' -i ' + shq(priv) : ''} 2>/dev/null`).out;
+	let ans = control_known(priv ? `x25519 ${priv}` : 'x25519');
+	let out = (ans != null) ? join('\n', ans) : exec(`${XRAY} x25519${priv ? ' -i ' + shq(priv) : ''} 2>/dev/null`).out;
 	let a = match(out, /Private ?[Kk]ey *: *([A-Za-z0-9_-]{43})/), b = match(out, /(Public ?[Kk]ey|Password)( *\([^)]*\))? *: *([A-Za-z0-9_-]{43})/);
 	return (a && b) ? { private_key: a[1], public_key: b[3] } : null;
 };

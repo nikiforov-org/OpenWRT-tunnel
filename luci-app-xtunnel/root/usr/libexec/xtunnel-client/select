@@ -1,45 +1,64 @@
-#!/bin/sh
-# select [TAG]: makes TAG the active link of the running xray (the override of the balancer "active",
-# through the control socket of xray-service, without a restart). Without an argument: the configured
-# link by hand, else the last automatic choice (also one made by measure after the last sync) while it
-# is a link of the configuration in effect, else the choice sync made (the first link). Only a link of
-# the configuration in effect is selected: xray accepts an override to any tag, also a removed one.
-# Waits up to 30 s for the socket after a start. Prints nothing; logs a switch. The link in effect is
-# written with the pid of that xray to /tmp/xtunnel-client/active, where the status and the
-# measurements read it.
-export XTUNNEL_CONTROL=/tmp/xtunnel-xray/control.sock
-STATE=/tmp/xtunnel-client/state.json
-AUTO=/etc/xtunnel-client/auto.json
-ACTIVE=/tmp/xtunnel-client/active
-known() { [ -n "$1" ] && [ -n "$(jsonfilter -i $STATE -e "@.clients[@.tag='$1'].tag" 2>/dev/null)" ]; }
-TAG="$1"
-if [ -z "$TAG" ]; then
-	[ "$(uci -q get xtunnel-client.main.mode)" != manual ] && TAG="$(jsonfilter -i $AUTO -e '@.active' 2>/dev/null)"
-	known "$TAG" || TAG="$(jsonfilter -i $STATE -e '@.active' 2>/dev/null)"
-fi
-[ -n "$TAG" ] || exit 0
-if ! known "$TAG"; then
-	logger -t xtunnel-client "not selected: $TAG is not a link of the configuration in effect"
-	exit 1
-fi
-# the override of the balancer, empty without one (a start of xray has none)
-override() {
-	xray control bi active 2>/dev/null | sed -n 's/^override //p'
+#!/usr/bin/env ucode
+'use strict';
+// select [TAG]: makes TAG the active link of the running xray (the override of the balancer "active",
+// through the control socket of xray-service, without a restart and without starting another xray process).
+// Without an argument: the configured link by hand, else the last automatic choice (also one made by measure
+// after the last sync) while it is a link of the configuration in effect, else the choice sync made (the
+// first link). Only a link of the configuration in effect is selected: xray accepts an override to any tag,
+// also a removed one. Waits up to 30 s for the socket after a start. Prints nothing; logs a switch. The link
+// in effect is written with the pid of that xray to /tmp/xtunnel-client/active, where the status and the
+// measurements read it.
+
+import { writefile } from 'fs';
+import { cursor } from 'uci';
+import { log, read_json, control, running } from 'xtunnel.common';
+
+const STATE  = '/tmp/xtunnel-client/state.json';
+const AUTO   = '/etc/xtunnel-client/auto.json';
+const ACTIVE = '/tmp/xtunnel-client/active';
+
+let state = read_json(STATE);
+function known(tag) {
+	return tag != null && tag != '' && length(filter(state.clients ?? [], c => c.tag == tag)) > 0;
 }
-for i in $(seq 1 30); do
-	xray control bi active >/dev/null 2>&1 && break
-	[ $i = 30 ] && exit 1
-	sleep 1
-done
-PID="$(ubus call service list '{"name":"xtunnel-xray"}' 2>/dev/null | jsonfilter -e '@[*].instances.xray.pid')"
-if [ "$(override)" = "$TAG" ]; then
-	echo "$TAG $PID" > $ACTIVE
-	exit 0
-fi
-if xray control bo active "$TAG" >/dev/null 2>&1 && [ "$(override)" = "$TAG" ]; then
-	echo "$TAG $PID" > $ACTIVE
-	logger -t xtunnel-client "active link: $TAG"
-else
-	logger -t xtunnel-client "could not make $TAG the active link"
-	exit 1
-fi
+
+// the override of the balancer ('' without one: a start of xray has none), or null while xray does not answer
+function override() {
+	let a = control('bi active');
+	let m = (a != null) ? match(a[0] ?? '', /^override ?(.*)$/) : null;
+	return m ? trim(m[1]) : null;
+}
+
+let tag = ARGV[0];
+if (tag == null || tag == '') {
+	if (cursor().get('xtunnel-client', 'main', 'mode') != 'manual')
+		tag = read_json(AUTO).active;
+	if (!known(tag))
+		tag = state.active;
+}
+if (tag == null || tag == '')
+	exit(0);
+if (!known(tag)) {
+	log('xtunnel-client', `not selected: ${tag} is not a link of the configuration in effect`);
+	exit(1);
+}
+
+let cur = null;
+for (let i = 1; i <= 30 && (cur = override()) == null; i++)
+	if (i < 30) system('sleep 1');
+if (cur == null)
+	exit(1);
+
+let pid = running('xtunnel-xray', 'xray')?.pid ?? '';
+if (cur == tag) {
+	writefile(ACTIVE, `${tag} ${pid}\n`);
+	exit(0);
+}
+let a = control(`bo active ${tag}`);
+if (a?.[0] == 'ok' && override() == tag) {
+	writefile(ACTIVE, `${tag} ${pid}\n`);
+	log('xtunnel-client', `active link: ${tag}`);
+	exit(0);
+}
+log('xtunnel-client', `could not make ${tag} the active link`);
+exit(1);

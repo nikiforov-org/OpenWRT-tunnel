@@ -125,7 +125,7 @@ uci.foreach(CFG, 'source', function(sec) {
 				let test = `${DIR}/.${name}.test.json`, field = (kind == 'ip') ? 'ip' : 'domain';
 				writefile(test, sprintf('%J', { outbounds: [ { protocol: 'freedom', tag: 'd' } ],
 					routing: { rules: [ { type: 'field', [field]: [ `ext:.${name}.tmp:${tag}` ], outboundTag: 'd' } ] } }));
-				let error = xray_test(test, `XRAY_LOCATION_ASSET=${shq(DIR)}`);
+				let error = xray_test(test, DIR);
 				unlink(test);
 				if (error) meta.error = `xray cannot read the list "${tag}" from this file`;
 				else {

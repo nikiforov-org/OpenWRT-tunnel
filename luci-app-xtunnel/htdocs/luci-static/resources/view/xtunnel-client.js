@@ -49,7 +49,7 @@ return view.extend({
 	status: {},
 
 	load: function() {
-		return Promise.all([ L.resolveDefault(callStatus(), {}), uci.load('network').catch(function() {}) ]).then(L.bind(function(r) {
+		return Promise.all([ L.resolveDefault(callStatus(), {}), uci.load('network').catch(function() {}), uci.load('xtunnel-client').catch(function() {}) ]).then(L.bind(function(r) {
 			this.status = r[0] || {};
 		}, this));
 	},
@@ -437,8 +437,9 @@ return view.extend({
 		o.default = 'auto';
 
 		o = s.taboption('choice', form.ListValue, 'active', _('Active link'), _('Strictly this one; if it fails the LAN waits for it.'));
-		if (!links.length) o.value('', _('(no links yet)'));
 		links.forEach(function(l) { if (usable(l)) o.value(l.tag, linkLabel(l)); });
+		/* a select without any value throws in ui.Select */
+		if (!o.keylist || !o.keylist.length) o.value('', links.length ? _('(no usable link)') : _('(no links yet)'));
 		o.depends('mode', 'manual');
 		o.retain = true;
 
@@ -463,10 +464,15 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.taboption('choice', form.MultiValue, 'metered', _('Metered uplinks'), _('While the router\'s default route goes through one of these interfaces (a mobile modem, for example), the periodic measurement does not run; the measurement after every start of xray and the minute check of the active link stay.'));
-		/* the interfaces of /etc/config/network (widgets.NetworkSelect loads the whole network model) */
+		/* the interfaces of /etc/config/network (widgets.NetworkSelect loads the whole network model) and the configured
+		   ones: the network configuration may not have loaded on a slow router, and ui.Dropdown throws without values */
 		uci.sections('network', 'interface').forEach(function(n) {
 			if (n['.name'] != 'loopback') o.value(n['.name'], n['.name']);
 		});
+		L.toArray(uci.get('xtunnel-client', 'main', 'metered')).forEach(function(v) {
+			if (!o.keylist || o.keylist.indexOf(v) < 0) o.value(v, v);
+		});
+		if (!o.keylist || !o.keylist.length) o.value('wan', 'wan');
 		o.display_size = 4;
 
 		o = s.taboption('dns', form.Value, 'resolver', _('DNS through the tunnel'),

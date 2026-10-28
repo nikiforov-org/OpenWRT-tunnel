@@ -19,6 +19,9 @@ import { certificate } from 'xtunnel-server.common';
 
 const CFG   = 'xtunnel-server';
 const DIR   = '/etc/xtunnel-server';
+// a connection whose sent data stays unacknowledged for 30 s is closed (the default is about 15 minutes of
+// retransmissions): a reverse channel over a link whose client changed its address frees its portal at once
+const SOCKOPT = { tcpUserTimeout: 30000 };
 const CONF  = `${DIR}/config.json`;
 const RUN   = '/tmp/xtunnel-server';
 const ERROR = `${RUN}/error`;
@@ -142,7 +145,7 @@ function build(main, profiles, uci) {
 		push(inbounds, {
 			tag: 'vision', listen: '::', port: vport, protocol: 'vless',
 			settings: { clients: vless_clients(true), decryption: 'none' },
-			streamSettings: { network: 'tcp', security: 'reality', realitySettings: realitySettings },
+			streamSettings: { network: 'tcp', security: 'reality', realitySettings: realitySettings, sockopt: SOCKOPT },
 			sniffing: sniffing
 		});
 	if (xhttp)
@@ -152,7 +155,7 @@ function build(main, profiles, uci) {
 			streamSettings: {
 				network: 'xhttp',
 				xhttpSettings: { path: main.xhttp_path || '/', mode: main.xhttp_mode || 'auto' },
-				security: 'reality', realitySettings: realitySettings
+				security: 'reality', realitySettings: realitySettings, sockopt: SOCKOPT
 			},
 			sniffing: sniffing
 		});

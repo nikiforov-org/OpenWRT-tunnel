@@ -551,7 +551,7 @@ if (run) {
 	let sources = sources_info(uci);
 	prune_sources(sources);
 	let b = build(main, enabled, clients, profiles, sources, isp_resolvers());
-	if (write_xray(CFG, ERROR, CONF, b.config, `XRAY_LOCATION_ASSET=${shq(SOURCES)}`)) {
+	if (write_xray(CFG, ERROR, CONF, b.config, SOURCES)) {
 		state = { ...state, ...b.state, sources: sources };
 		listed = b.listed;
 	}

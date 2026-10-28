@@ -35,6 +35,7 @@ const OUT    = `${RUN}/measure.json`;
 const HIST   = `${RUN}/history.json`;
 const LOCK   = `${RUN}/measure.lock`;
 const PENDING = `${RUN}/measure.pending`;     // the measurement after a start, not made yet
+const MEASURED = `${RUN}/measure.started`;    // the links and the time of the last measurement after a start
 const AUTO   = '/etc/xtunnel-client/auto.json';
 const SELECT = '/usr/libexec/xtunnel-client/select';
 const HISTORY = 24;
@@ -98,17 +99,32 @@ let auto = (main.mode != 'manual');
 if (what == 'started') {
 	system(`${SELECT} >/dev/null 2>&1`);
 	if (!auto || length(clients) < 2) exit(0);
+	// a start with the links of a measurement after a start of the last 10 minutes (another part of the
+	// shared xray applied) only applies the choice
+	let last = read_json(MEASURED, {});
+	if (last.links == sprintf('%J', clients) && time() - (last.time ?? 0) < 600) exit(0);
 	mkdir(RUN, 0o755);
 	writefile(PENDING, `${time()}\n`);
-	// another start can follow at once (at boot the server joins the client's process a moment
-	// later): the measurement waits until xray has kept its pid for a few seconds, else the command
-	// after the newer start measures
+	// another start can follow (at boot the server joins the client's process, on a slow router up to a
+	// minute later): the measurement waits until xray has kept its pid for 60 s, else the command after the
+	// newer start measures
 	let pid = instance()?.pid;
-	sleep(5000);
-	if (instance()?.pid != pid) exit(0);
+	for (let i = 0; i < 12; i++) {
+		sleep(5000);
+		if (instance()?.pid != pid) exit(0);
+	}
+	// the minute check may have made it meanwhile
+	if (access(PENDING) != true) exit(0);
 	what = 'pending';
 }
-if (what == 'health' && auto && length(clients) >= 2 && access(PENDING) == true) what = 'pending';
+// the seconds the running xray has been up (its start time in /proc, in clock ticks of 1/100 s)
+function xray_age() {
+	let pid = instance()?.pid, st = pid ? readfile(`/proc/${pid}/stat`) : null;
+	let f = st ? split(trim(substr(st, rindex(st, ')') + 1)), ' ') : null, up = split(readfile('/proc/uptime') ?? '0', ' ');
+	return (f && length(f) > 19) ? +up[0] - int(f[19]) / 100 : 0;
+}
+// the pending measurement after a start, once xray has kept its process for 60 s (another start can follow)
+if (what == 'health' && auto && length(clients) >= 2 && access(PENDING) == true && xray_age() >= 60) what = 'pending';
 if (what == 'pending' && uplink() == null) exit(0);
 if (what == '' && (!auto || length(clients) < 2 || metered_uplink(main))) exit(0);
 if (what == 'health' && (!auto || length(clients) < 2)) exit(0);
@@ -159,7 +175,10 @@ if (what == 'health') {
 
 let results = run(clients, bytes, timeout, false);
 // the measurement after a start is done once a link answered
-if (what == 'pending' && length(filter(clients, c => results[c.tag].ok))) unlink(PENDING);
+if (what == 'pending' && length(filter(clients, c => results[c.tag].ok))) {
+	unlink(PENDING);
+	writefile(MEASURED, sprintf('%J\n', { time: time(), links: sprintf('%J', clients) }));
+}
 let hist = read_json(HIST, {});
 for (let tag, r in results) {
 	let h = (type(hist[tag]) == 'array') ? hist[tag] : [];
