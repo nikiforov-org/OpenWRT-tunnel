@@ -154,9 +154,10 @@ if (!staging) system(`rm -rf ${shq(`${CERTS}/${host}/staging`)}`);
 log(`certificate installed to ${CERTS}/${host}/`);
 set_state('ok');
 syslog(CFG, `certificate for ${host} issued`);
-// the web server re-reads it when it is the certificate in effect; sync starts the move of the
-// site when the site waits for this one, and the Xray server takes the files when its Hysteria2
-// transport uses this domain
-if (in_effect() == host) system('/etc/init.d/uhttpd reload >/dev/null 2>&1');
+// the web server loads its certificate only when it starts ("reload" with unchanged settings leaves
+// the process running): restarted when this is the certificate in effect; sync starts the move of
+// the site when the site waits for this one, and the Xray server takes the files when its Hysteria2
+// transport uses this domain (xray reads them again every hour by itself)
+if (in_effect() == host) system('/etc/init.d/uhttpd restart >/dev/null 2>&1');
 system(`${SYNC} >/dev/null 2>&1`);
 exit(0);
